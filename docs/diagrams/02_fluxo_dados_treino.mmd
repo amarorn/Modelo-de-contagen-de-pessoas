@@ -1,0 +1,15 @@
+flowchart TD
+    A[Videos Brutos] --> B[Extracao de Frames]
+    B --> C[Rotulacao Detector]
+    B --> D[Rotulacao Sexo Opcional]
+    C --> E[Controle de Qualidade]
+    D --> E
+    E --> F[Split Train Val Test]
+    F --> G[Treino Detector]
+    F --> H[Treino Classificador Sexo]
+    G --> I[Validacao Detector]
+    H --> J[Validacao Sexo]
+    I --> K[Integracao com Tracker e Regra]
+    J --> K
+    K --> L[Teste End to End]
+    L --> M[Registro MLflow e Model Registry]

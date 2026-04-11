@@ -1,0 +1,21 @@
+sequenceDiagram
+    participant Cam as Camera
+    participant Ing as Ingestao
+    participant Det as Detector
+    participant Trk as Tracker
+    participant Cnt as Motor de Contagem
+    participant Sex as Classificador Sexo
+    participant API as API Evento
+
+    Cam->>Ing: Frame
+    Ing->>Det: Frame preprocessado
+    Det->>Trk: Deteccoes
+    Trk->>Cnt: Tracks com IDs
+    Cnt->>Cnt: Verifica cruzamento da linha
+    alt Cruzou linha
+        Cnt->>Sex: Crop da pessoa
+        Sex-->>Cnt: Classe e confianca
+        Cnt->>API: Evento entry/exit + sexo opcional
+    else Nao cruzou
+        Cnt-->>API: Sem evento
+    end

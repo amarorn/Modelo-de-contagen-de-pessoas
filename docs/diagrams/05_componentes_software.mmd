@@ -1,0 +1,45 @@
+classDiagram
+    class VideoSource {
+      +open()
+      +read_frame()
+      +close()
+    }
+
+    class Preprocessor {
+      +apply_roi(frame)
+      +normalize(frame)
+    }
+
+    class PersonDetector {
+      +infer(frame)
+    }
+
+    class MultiObjectTracker {
+      +update(detections)
+    }
+
+    class CrossingCounter {
+      +process(track)
+      +emit_event()
+    }
+
+    class SexClassifier {
+      +predict(crop)
+    }
+
+    class EventStore {
+      +save(event)
+      +query(interval)
+    }
+
+    class MetricsCollector {
+      +push(metric)
+    }
+
+    VideoSource --> Preprocessor
+    Preprocessor --> PersonDetector
+    PersonDetector --> MultiObjectTracker
+    MultiObjectTracker --> CrossingCounter
+    CrossingCounter --> SexClassifier
+    CrossingCounter --> EventStore
+    CrossingCounter --> MetricsCollector

@@ -1,0 +1,17 @@
+flowchart LR
+    A[Camera na Porta] --> B[Ingestao de Video]
+    B --> C[Preprocessamento ROI]
+    C --> D[Detector de Pessoas]
+    D --> E[Tracker Multi-Objeto]
+    E --> F[Regra de Cruzamento de Linha]
+    F --> G[Eventos Entry Exit]
+    E --> H[Crop da Pessoa]
+    H --> I[Classificador de Sexo Opcional]
+    I --> J[Estatisticas Agregadas]
+    G --> K[Banco de Eventos]
+    J --> K
+    K --> L[API]
+    L --> M[Dashboard]
+    D --> N[Monitoramento]
+    E --> N
+    F --> N

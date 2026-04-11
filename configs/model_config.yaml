@@ -1,0 +1,44 @@
+project:
+  name: people-count-door
+  version: 0.1.0
+
+camera:
+  fps_target: 20
+  resolution: [1920, 1080]
+  roi: [0, 0, 1920, 1080]
+
+counting:
+  line:
+    p1: [960, 300]
+    p2: [960, 900]
+  min_track_age: 5
+  anti_bounce_seconds: 2.0
+
+models:
+  detector:
+    family: yolov8
+    variant: m
+    input_size: 640
+    conf_threshold: 0.35
+    iou_threshold: 0.5
+  tracker:
+    type: bytetrack
+    track_high_thresh: 0.5
+    track_low_thresh: 0.1
+    match_thresh: 0.8
+  sex_classifier:
+    enabled: true
+    backbone: mobilenetv3
+    abstain_threshold: 0.65
+
+training:
+  epochs_detector: 120
+  batch_size_detector: 16
+  lr_detector: 0.001
+  epochs_sex_classifier: 50
+  batch_size_sex_classifier: 64
+
+acceptance:
+  count_f1_min: 0.92
+  count_error_hourly_max: 0.08
+  latency_p95_ms_max: 180

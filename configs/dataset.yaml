@@ -1,0 +1,23 @@
+# Estrutura esperada:
+# data/
+#   person_count/
+#     images/
+#       train/*.jpg
+#       val/*.jpg
+#       test/*.jpg
+#     labels/
+#       train/*.txt
+#       val/*.txt
+#       test/*.txt
+#
+# Formato YOLO txt por imagem:
+# <class_id> <x_center> <y_center> <width> <height>
+# valores normalizados entre 0 e 1.
+
+path: data/person_count
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: person

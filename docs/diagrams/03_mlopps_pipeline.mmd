@@ -1,0 +1,14 @@
+flowchart LR
+    A[Dataset Versionado DVC] --> B[Pipeline de Treino CI]
+    B --> C[Avaliacao Automatizada]
+    C --> D{Passou nos Gates?}
+    D -- Nao --> E[Reprova e Abre Ajustes]
+    D -- Sim --> F[Registry Staging]
+    F --> G[Teste Integrado em Video Gravado]
+    G --> H{Aprovado?}
+    H -- Nao --> E
+    H -- Sim --> I[Deploy Edge Produção]
+    I --> J[Monitoramento Online]
+    J --> K{Drift ou Queda KPI?}
+    K -- Sim --> L[Re-treino]
+    L --> A

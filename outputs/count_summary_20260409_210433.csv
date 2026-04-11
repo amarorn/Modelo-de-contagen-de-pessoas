@@ -1,0 +1,2 @@
+started_at,finished_at,source,model,person_class_id,entries,exits,total_passages
+2026-04-09T21:04:33.193119,2026-04-09T21:05:03.732901,rtsp://192.168.0.120:8554/live,/Users/amaro/Downloads/exp.pt,6,0,0,0
