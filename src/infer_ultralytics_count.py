@@ -1,16 +1,28 @@
 #!/usr/bin/env python3
-"""Inferencia em stream/video para contagem por linha com YOLO track (ByteTrack)."""
+"""Inferencia em stream/video para contagem por linha com YOLO track (ByteTrack).
+
+Teste com live web (ex.: Fremont Street na Skyline usa YouTube; obter URL HLS e passar em --source):
+
+  URL=$(yt-dlp -g -f "best[height<=720]" "https://www.youtube.com/watch?v=ZvYvZLfPatQ")
+  python src/infer_ultralytics_count.py --source "$URL" --line "640,160,640,560" --show
+
+Ajuste --line (pixels) a resolucao real do video. Links HLS expiram; regenere com yt-dlp se o stream parar.
+"""
 
 from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
+import torch
 from ultralytics import YOLO
+
+from device_utils import resolve_device
 
 
 @dataclass
@@ -26,8 +38,13 @@ def side_of_line(x: float, y: float, x1: int, y1: int, x2: int, y2: int) -> floa
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Contagem de pessoas com YOLO + ByteTrack")
     p.add_argument("--model", default="runs/people_count/yolov8m-door-counter/weights/best.pt")
-    p.add_argument("--source", default="0", help="camera index, arquivo ou rtsp://")
-    p.add_argument("--line", default="960,300,960,900", help="x1,y1,x2,y2")
+    p.add_argument(
+        "--source",
+        default="0",
+        help="Indice de camera (0,1,...), path de ficheiro, rtsp:// ou URL de stream (ex. m3u8 de yt-dlp).",
+    )
+    p.add_argument("--device", default="auto", help="auto, cpu, mps ou id CUDA (ex: 0)")
+    p.add_argument("--line", default="960,300,960,900", help="x1,y1,x2,y2 em pixels do frame")
     p.add_argument(
         "--conf",
         type=float,
@@ -70,6 +87,17 @@ def resolve_person_class_id(model: YOLO, forced_id: int | None) -> int:
     return 0
 
 
+def _camera_unavailable_message() -> str:
+    if sys.platform == "darwin":
+        return (
+            "Falha ao abrir a camera. No macOS: System Settings > Privacy & Security > Camera para o terminal/Python. "
+            "Ou use --source com ficheiro/URL."
+        )
+    return (
+        "Sem camera local (/dev/video*). Use --source path.mp4, rtsp://... ou URL HLS (ex. via yt-dlp)."
+    )
+
+
 def validate_source(source: str | int) -> None:
     """Valida camera local antes de iniciar pipeline do Ultralytics."""
     if isinstance(source, int):
@@ -77,12 +105,7 @@ def validate_source(source: str | int) -> None:
         ok = cap.isOpened()
         cap.release()
         if not ok:
-            raise ConnectionError(
-                "Falha ao abrir camera local. No macOS, habilite permissao de Camera para "
-                "Terminal/iTerm/Python em System Settings > Privacy & Security > Camera. "
-                "Depois feche e reabra o terminal e tente novamente. "
-                "Se necessario, teste outro indice de camera (--source 1, --source 2)."
-            )
+            raise ConnectionError(_camera_unavailable_message())
 
 
 def resolve_csv_path(csv_out_arg: str) -> Path:
@@ -139,9 +162,10 @@ def main() -> None:
     args = parse_args()
     started_at = datetime.now()
     x1, y1, x2, y2 = [int(v) for v in args.line.split(",")]
+    resolved_device = resolve_device(args.device)
     model = YOLO(args.model)
     person_class_id = resolve_person_class_id(model, args.person_class_id)
-    print(f"[infer] Filtrando apenas classe pessoa: id={person_class_id}")
+    print(f"[infer] Filtrando apenas classe pessoa: id={person_class_id} | device={resolved_device}")
 
     state = CounterState()
     last_side_by_id: dict[int, float] = {}
@@ -161,11 +185,17 @@ def main() -> None:
             tracker="bytetrack.yaml",
             persist=True,
             verbose=False,
+            device=resolved_device,
         )
     except Exception as exc:
+        hint = (
+            " Para URL de stream, obtenha um m3u8 atual com: "
+            "yt-dlp -g -f best[height<=720] 'https://www.youtube.com/watch?v=VIDEO_ID'"
+            if isinstance(source, str) and source.startswith("http")
+            else " Se estiver no macOS, valide permissao de camera para o terminal/python."
+        )
         raise ConnectionError(
-            f"Nao foi possivel iniciar a fonte de video '{source}'. "
-            "Se estiver no macOS, valide permissao de camera para o terminal/python."
+            f"Nao foi possivel iniciar a fonte de video '{source}'.{hint}"
         ) from exc
 
     try:
@@ -177,9 +207,9 @@ def main() -> None:
                 xys = result.boxes.xyxy.tolist()
 
                 for track_id, (x_min, y_min, x_max, y_max) in zip(ids, xys):
-                    cx = (x_min + x_max) / 2.0
-                    cy = (y_min + y_max) / 2.0
-                    side = side_of_line(cx, cy, x1, y1, x2, y2)
+                    foot_x = (x_min + x_max) / 2.0
+                    foot_y = float(y_max)
+                    side = side_of_line(foot_x, foot_y, x1, y1, x2, y2)
 
                     if track_id in last_side_by_id:
                         prev = last_side_by_id[track_id]

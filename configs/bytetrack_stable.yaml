@@ -1,0 +1,11 @@
+# ByteTrack com buffer maior para oclusoes curtas / deteccao instavel.
+# Uso: src/web_dashboard.py --tracker configs/bytetrack_stable.yaml
+# Base: ultralytics/cfg/trackers/bytetrack.yaml
+
+tracker_type: bytetrack
+track_high_thresh: 0.22
+track_low_thresh: 0.08
+new_track_thresh: 0.22
+track_buffer: 60
+match_thresh: 0.75
+fuse_score: true
