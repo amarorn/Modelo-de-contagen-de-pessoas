@@ -12,7 +12,7 @@ if [ -f .env ]; then
   done < .env
 fi
 
-MODEL_PATH="${YOLO_INFER_MODEL:-/Users/amaro/Downloads/exp.pt}"
+MODEL_PATH="${YOLO_INFER_MODEL:-runs/people_count/yolov8m-door-counter/weights/best.pt}"
 CONF_THRES="${YOLO_INFER_CONF:-0.22}"
 IMGSZ="${YOLO_INFER_IMGSZ:-1280}"
 PERSON_CLASS_ID="${PERSON_CLASS_ID:-}"
