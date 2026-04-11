@@ -35,7 +35,8 @@ Contar entradas e saidas com alta precisao, baixa latencia e rastreabilidade de 
 
 - Detector principal: YOLOv8m (Ultralytics)
 - Rastreamento: ByteTrack (`model.track(..., tracker="bytetrack.yaml")`)
-- Regra de contagem: cruzamento de linha virtual na porta
+- Regra de contagem: cruzamento de linha virtual na porta (ou ROI poligonal em `/roi`)
+- Classificador de sexo (opcional): modelo YOLO `task=classify` com `--sex-model`; apenas totais agregados na entrada, com abstention; ver `docs/04_privacidade_etica.md` e `src/sex_classifier_agg.py`
 - MLOps: opcao de uso de Ultralytics HUB via `ULTRALYTICS_HUB_API_KEY`
 
 ## Como treinar
@@ -55,6 +56,8 @@ bash scripts/run_inference.sh
 ```bash
 bash scripts/run_web.sh
 ```
+
+Estatistica agregada por sexo (opcional): treine um classificador YOLO (`yolo classify`) com classes nomeadas `female`/`male` (ou `mulher`/`homem`) e defina no `.env` `YOLO_SEX_MODEL=/caminho/para/best.pt` e opcionalmente `YOLO_SEX_ABSTAIN=0.65`.
 
 ## Como usar camera do proprio celular (quem acessa)
 
