@@ -16,6 +16,8 @@ from pathlib import Path
 
 import torch
 import ultralytics
+
+from device_utils import resolve_device
 from ultralytics import YOLO, settings
 from ultralytics.hub import login as hub_login
 
@@ -36,16 +38,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--close-mosaic", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
-
-
-def resolve_device(device_arg: str) -> str:
-    if device_arg != "auto":
-        return device_arg
-    if torch.cuda.is_available():
-        return "0"
-    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
 
 
 def resolve_data_arg(data_arg: str) -> str:

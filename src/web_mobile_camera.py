@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Dashboard web com camera do proprio aparelho (getUserMedia)."""
+"""Dashboard web com camera do proprio aparelho (getUserMedia).
+
+Com --source, o servidor le o video no proprio processo (OpenCV), util para RTSP,
+arquivo local, ou URL HLS obtida de um live (ex.: YouTube) com ferramentas externas.
+
+Exemplo (Fremont Street Skyline = player YouTube na pagina; obter URL HLS):
+  yt-dlp -g -f "best[height<=720]" "https://www.youtube.com/watch?v=ZvYvZLfPatQ"
+  python src/web_mobile_camera.py --model best.pt --source "<url_m3u8_impressa>"
+"""
 
 from __future__ import annotations
 
@@ -7,6 +15,7 @@ import argparse
 import base64
 import csv
 import math
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -43,6 +52,12 @@ class SessionState:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="People Counter com camera do celular")
     p.add_argument("--model", required=True)
+    p.add_argument(
+        "--source",
+        default="",
+        help="Se definido, modo stream no servidor: indice de camera, ficheiro, RTSP ou URL "
+        "(ex. m3u8). Sem isto, usa a camera do browser (getUserMedia).",
+    )
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8081)
     p.add_argument("--conf", type=float, default=0.22)
@@ -100,6 +115,254 @@ def write_summary_csv(path: Path, session_id: str, session: SessionState) -> Non
                 "total_passages": session.total,
             }
         )
+
+
+@dataclass
+class StreamSharedState:
+    session: SessionState
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    last_frame_jpeg: bytes | None = None
+    last_error: str | None = None
+    started_at: datetime = field(default_factory=datetime.now)
+
+
+def process_bgr_frame(
+    frame: np.ndarray,
+    sess: SessionState,
+    model: YOLO,
+    person_class_id: int,
+    conf: float,
+    imgsz: int,
+    lx1: float,
+    ly1: float,
+    lx2: float,
+    ly2: float,
+    draw: bool,
+) -> tuple[list[dict], np.ndarray]:
+    h, w = frame.shape[:2]
+    px1, py1, px2, py2 = lx1 * w, ly1 * h, lx2 * w, ly2 * h
+    result = model.predict(
+        frame,
+        conf=conf,
+        imgsz=imgsz,
+        classes=[person_class_id],
+        verbose=False,
+    )[0]
+
+    sess.updated_at_ts = time.time()
+
+    detections = []
+    if result.boxes is not None:
+        for b in result.boxes.xyxy.tolist():
+            x1, y1, x2, y2 = b
+            cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+            detections.append((x1, y1, x2, y2, cx, cy))
+
+    max_dist = max(45.0, min(w, h) * 0.12)
+    assigned_tracks: set[int] = set()
+    boxes_out: list[dict] = []
+
+    out_frame = frame if not draw else frame.copy()
+
+    for x1, y1, x2, y2, cx, cy in detections:
+        best_id = None
+        best_dist = float("inf")
+        for tid, tr in sess.tracks.items():
+            if tid in assigned_tracks:
+                continue
+            d = math.hypot(cx - tr.cx, cy - tr.cy)
+            if d < best_dist and d <= max_dist:
+                best_dist = d
+                best_id = tid
+
+        side = side_of_line(cx, cy, px1, py1, px2, py2)
+        now_ts = time.time()
+
+        if best_id is None:
+            best_id = sess.next_track_id
+            sess.next_track_id += 1
+            sess.tracks[best_id] = TrackState(cx=cx, cy=cy, side=side, last_seen_ts=now_ts)
+        else:
+            tr = sess.tracks[best_id]
+            if tr.side < 0 <= side:
+                sess.entries += 1
+            elif tr.side > 0 >= side:
+                sess.exits += 1
+            tr.cx, tr.cy, tr.side, tr.last_seen_ts = cx, cy, side, now_ts
+
+        assigned_tracks.add(best_id)
+        boxes_out.append({"id": best_id, "x1": int(x1), "y1": int(y1), "w": int(x2 - x1), "h": int(y2 - y1)})
+
+        if draw:
+            cv2.rectangle(out_frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+            cv2.putText(
+                out_frame,
+                f"id={best_id}",
+                (int(x1), int(y1) - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 0),
+                1,
+            )
+
+    cutoff = time.time() - 2.0
+    sess.tracks = {tid: tr for tid, tr in sess.tracks.items() if tr.last_seen_ts >= cutoff}
+
+    if draw:
+        cv2.line(out_frame, (int(px1), int(py1)), (int(px2), int(py2)), (0, 0, 255), 2)
+        cv2.putText(
+            out_frame,
+            f"in={sess.entries} out={sess.exits} total={sess.total}",
+            (20, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (255, 255, 255),
+            2,
+        )
+
+    return boxes_out, out_frame
+
+
+def stream_inference_loop(
+    args: argparse.Namespace,
+    model: YOLO,
+    person_class_id: int,
+    lx1: float,
+    ly1: float,
+    lx2: float,
+    ly2: float,
+    shared: StreamSharedState,
+    stop_event: threading.Event,
+) -> None:
+    raw = args.source.strip()
+    source: str | int = int(raw) if raw.isdigit() else raw
+    cap = cv2.VideoCapture(source)
+    if not cap.isOpened():
+        with shared.lock:
+            shared.last_error = f"Nao foi possivel abrir --source: {source!r}"
+        return
+
+    try:
+        while not stop_event.is_set():
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                time.sleep(0.05)
+                continue
+
+            with shared.lock:
+                sess = shared.session
+
+            _, drawn = process_bgr_frame(
+                frame,
+                sess,
+                model,
+                person_class_id,
+                args.conf,
+                args.imgsz,
+                lx1,
+                ly1,
+                lx2,
+                ly2,
+                draw=True,
+            )
+
+            enc_ok, encoded = cv2.imencode(".jpg", drawn)
+            if enc_ok:
+                with shared.lock:
+                    shared.last_frame_jpeg = encoded.tobytes()
+    except Exception as exc:
+        with shared.lock:
+            shared.last_error = str(exc)
+    finally:
+        cap.release()
+
+
+def create_stream_app(args: argparse.Namespace, shared: StreamSharedState) -> Flask:
+    app = Flask(__name__)
+    stream_session_id = "_stream"
+
+    @app.get("/")
+    def index() -> str:
+        return """
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <title>People Counter (stream)</title>
+    <style>
+      body { margin: 0; background: #0d1117; color: #fff; font-family: Arial, sans-serif; padding: 16px; }
+      .cards { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+      .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 10px; text-align: center; }
+      img { max-width: 100%; border-radius: 12px; border: 1px solid #30363d; }
+      button { border: 0; border-radius: 8px; padding: 10px 12px; cursor: pointer; background: #1f6feb; color: #fff; }
+    </style>
+  </head>
+  <body>
+    <h3>Contagem (fonte no servidor)</h3>
+    <p style="color:#8b949e;font-size:14px;">Modo --source: mesmo algoritmo que a camera do celular, com video lido no backend.</p>
+    <div class="cards">
+      <div class="card">Entradas<br/><b id="entries">0</b></div>
+      <div class="card">Saidas<br/><b id="exits">0</b></div>
+      <div class="card">Total<br/><b id="total">0</b></div>
+    </div>
+    <img src="/video_feed" alt="feed"/>
+    <p style="margin-top:12px"><button onclick="exportCsv()">Exportar CSV</button></p>
+    <p id="msg"><small></small></p>
+    <script>
+      async function refresh() {
+        const r = await fetch('/api/stats');
+        const j = await r.json();
+        document.getElementById('entries').textContent = j.entries;
+        document.getElementById('exits').textContent = j.exits;
+        document.getElementById('total').textContent = j.total_passages;
+        document.getElementById('msg').innerHTML = '<small>' + (j.error ? ('Erro: ' + j.error) : 'Online') + '</small>';
+      }
+      async function exportCsv() {
+        const r = await fetch('/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const j = await r.json();
+        document.getElementById('msg').innerHTML = '<small>' + (j.csv_path || j.error || '') + '</small>';
+      }
+      setInterval(refresh, 1000);
+      refresh();
+    </script>
+  </body>
+</html>
+"""
+
+    @app.get("/api/stats")
+    def stats() -> Response:
+        with shared.lock:
+            payload = {
+                "entries": shared.session.entries,
+                "exits": shared.session.exits,
+                "total_passages": shared.session.total,
+                "error": shared.last_error,
+            }
+        return jsonify(payload)
+
+    @app.post("/api/export")
+    def export_csv() -> Response:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = Path("outputs") / f"count_mobile_stream_{ts}.csv"
+        with shared.lock:
+            write_summary_csv(path, stream_session_id, shared.session)
+        return jsonify({"csv_path": str(path)})
+
+    @app.get("/video_feed")
+    def video_feed() -> Response:
+        def gen() -> bytes:
+            while True:
+                with shared.lock:
+                    blob = shared.last_frame_jpeg
+                if blob is None:
+                    time.sleep(0.05)
+                    continue
+                yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + blob + b"\r\n"
+
+        return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+    return app
 
 
 def create_app(args: argparse.Namespace) -> Flask:
@@ -274,66 +537,24 @@ def create_app(args: argparse.Namespace) -> Flask:
 
         try:
             frame = decode_data_url_to_bgr(image)
-            h, w = frame.shape[:2]
-            px1, py1, px2, py2 = lx1 * w, ly1 * h, lx2 * w, ly2 * h
-            result = model.predict(
-                frame,
-                conf=args.conf,
-                imgsz=args.imgsz,
-                classes=[person_class_id],
-                verbose=False,
-            )[0]
-
             sess = sessions.get(session_id)
             if sess is None:
                 sess = SessionState()
                 sessions[session_id] = sess
-            sess.updated_at_ts = time.time()
 
-            detections = []
-            if result.boxes is not None:
-                for b in result.boxes.xyxy.tolist():
-                    x1, y1, x2, y2 = b
-                    cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
-                    detections.append((x1, y1, x2, y2, cx, cy))
-
-            max_dist = max(45.0, min(w, h) * 0.12)
-            assigned_tracks: set[int] = set()
-            boxes_out = []
-
-            for x1, y1, x2, y2, cx, cy in detections:
-                best_id = None
-                best_dist = float("inf")
-                for tid, tr in sess.tracks.items():
-                    if tid in assigned_tracks:
-                        continue
-                    d = math.hypot(cx - tr.cx, cy - tr.cy)
-                    if d < best_dist and d <= max_dist:
-                        best_dist = d
-                        best_id = tid
-
-                side = side_of_line(cx, cy, px1, py1, px2, py2)
-                now_ts = time.time()
-
-                if best_id is None:
-                    best_id = sess.next_track_id
-                    sess.next_track_id += 1
-                    sess.tracks[best_id] = TrackState(cx=cx, cy=cy, side=side, last_seen_ts=now_ts)
-                else:
-                    tr = sess.tracks[best_id]
-                    if tr.side < 0 <= side:
-                        sess.entries += 1
-                    elif tr.side > 0 >= side:
-                        sess.exits += 1
-                    tr.cx, tr.cy, tr.side, tr.last_seen_ts = cx, cy, side, now_ts
-
-                assigned_tracks.add(best_id)
-                boxes_out.append(
-                    {"id": best_id, "x1": int(x1), "y1": int(y1), "w": int(x2 - x1), "h": int(y2 - y1)}
-                )
-
-            cutoff = time.time() - 2.0
-            sess.tracks = {tid: tr for tid, tr in sess.tracks.items() if tr.last_seen_ts >= cutoff}
+            boxes_out, _ = process_bgr_frame(
+                frame,
+                sess,
+                model,
+                person_class_id,
+                args.conf,
+                args.imgsz,
+                lx1,
+                ly1,
+                lx2,
+                ly2,
+                draw=False,
+            )
 
             stale = time.time() - 900
             for sid in list(sessions.keys()):
@@ -370,8 +591,33 @@ def create_app(args: argparse.Namespace) -> Flask:
 
 def main() -> None:
     args = parse_args()
-    app = create_app(args)
-    app.run(host=args.host, port=args.port, debug=False)
+    if args.source.strip():
+        model = YOLO(args.model)
+        person_class_id = resolve_person_class_id(model, args.person_class_id)
+        line_vals = [float(v) for v in args.line.split(",")]
+        if len(line_vals) != 4:
+            raise ValueError("Linha deve ter 4 valores: x1,y1,x2,y2")
+        lx1, ly1, lx2, ly2 = line_vals
+        shared = StreamSharedState(session=SessionState())
+        stop_event = threading.Event()
+        t = threading.Thread(
+            target=stream_inference_loop,
+            args=(args, model, person_class_id, lx1, ly1, lx2, ly2, shared, stop_event),
+            daemon=True,
+        )
+        t.start()
+        print(
+            f"[mobile] Modo stream: source={args.source!r} model={args.model} "
+            f"person_class_id={person_class_id} line={args.line}"
+        )
+        app = create_stream_app(args, shared)
+        try:
+            app.run(host=args.host, port=args.port, debug=False, use_reloader=False)
+        finally:
+            stop_event.set()
+    else:
+        app = create_app(args)
+        app.run(host=args.host, port=args.port, debug=False)
 
 
 if __name__ == "__main__":
