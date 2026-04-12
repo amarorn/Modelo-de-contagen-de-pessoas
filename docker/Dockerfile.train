@@ -1,0 +1,13 @@
+# Imagem para treino YOLO/Ultralytics com CUDA. O codigo e dados montam-se em /workspace no compose.
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+
+WORKDIR /workspace
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+COPY requirements.txt .
+RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+
+# Entrada padrao: mesmo script que o host (variaveis via .env ou -e).
+CMD ["bash", "scripts/run_train.sh"]

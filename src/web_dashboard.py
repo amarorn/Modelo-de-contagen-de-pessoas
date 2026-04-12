@@ -15,12 +15,17 @@ import argparse
 import csv
 import logging
 import os
+import socket
 import sys
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+# Antes de cv2: FFmpeg/libav em streams HLS pode imprimir "non-existing SPS" (join a meio do GOP); nao e fatal.
+if os.environ.get("YOLO_WEB_VERBOSE", "").strip() != "1":
+    os.environ.setdefault("AV_LOG_LEVEL", "error")
 
 import cv2
 import numpy as np
@@ -30,6 +35,21 @@ from ultralytics import YOLO
 
 from device_utils import resolve_device
 from sex_classifier_agg import OptionalSexClassifier, SexAggregateStats
+
+
+def _check_tcp_port_available(host: str, port: int) -> None:
+    """Falha antes de abrir stream/GPU se a porta HTTP estiver ocupada."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((host, port))
+    except OSError as exc:
+        print(
+            f"[web] ERRO: {host}:{port} indisponivel ({exc}). "
+            "Pare a outra instancia do dashboard ou use outra porta, ex.: WEB_PORT=8081 ./scripts/run_web.sh ...",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from exc
 
 
 def _configure_runtime_logging() -> None:
@@ -1266,6 +1286,7 @@ def create_app(shared: SharedState) -> Flask:
 def main() -> None:
     _configure_runtime_logging()
     args = parse_args()
+    _check_tcp_port_available(args.host, args.port)
     line_init = tuple(int(v) for v in args.line.split(","))
     shared = SharedState(line_default=line_init)
     stop_event = threading.Event()

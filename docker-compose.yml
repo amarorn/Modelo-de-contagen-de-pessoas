@@ -1,0 +1,20 @@
+# Treino reproduzivel com GPU (requer NVIDIA Container Toolkit no host).
+# Uso (GPU):
+#   docker compose build train
+#   docker compose run --rm --gpus all train
+# CPU apenas (lento para YOLO):
+#   docker compose run --rm train
+
+services:
+  train:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.train
+    image: modelo-contagem-train:latest
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    # run_train.sh le .env a partir de /workspace se existir no host.
+    shm_size: "2gb"
+    stdin_open: true
+    tty: true

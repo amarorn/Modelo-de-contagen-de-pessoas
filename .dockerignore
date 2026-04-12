@@ -1,0 +1,11 @@
+.git
+.venv
+runs
+outputs
+__pycache__
+*.pyc
+.env
+*.pt
+.DS_Store
+.cursor
+**/.ipynb_checkpoints
