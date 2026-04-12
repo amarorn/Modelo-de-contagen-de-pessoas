@@ -21,7 +21,9 @@ Antes de executar, use estes documentos como base:
 
 ## 3. Fluxo de teste local do pipeline de treino
 
-### 3.1 Preparar ambiente
+O script de entrada no repositorio e `scripts/run_train.sh` (chama `src/train_ultralytics.py`). Nomes antigos como `run_train_pipeline.sh` referem-se ao mesmo tipo de fluxo; use sempre o script acima.
+
+### 3.1 Preparar ambiente (venv no host)
 
 ```bash
 python3 -m venv .venv
@@ -41,20 +43,29 @@ python3 -c "import torch; print('cuda=', torch.cuda.is_available(), 'mps=', geta
 ### 3.3 Treino baseline local GPU
 
 ```bash
-bash scripts/run_train_pipeline.sh
+bash scripts/run_train.sh
 ```
 
-### 3.4 Treino com tracking de experimento (MLflow)
+### 3.4 Docker Compose (treino reproduzivel com GPU)
+
+Util quando queres **mesma stack PyTorch/CUDA** em qualquer maquina com **NVIDIA Container Toolkit** instalado, sem depender do venv local. O compose monta o repositorio em `/workspace`; artefatos (`runs/`, pesos) ficam no host.
 
 ```bash
-INSTALL_MLOPS_DEPS=1 TRAIN_USE_MLFLOW=1 bash scripts/run_train_pipeline.sh
+docker compose build train
+docker compose run --rm --gpus all train
 ```
 
-### 3.5 Reproducao controlada (DVC)
+Requisitos no host: Docker, `nvidia-container-toolkit`, GPU visivel com `nvidia-smi`. Opcional: copiar `.env.example` para `.env` antes do treino (variaveis `YOLO_*`, dataset, etc.).
 
-```bash
-dvc repro train
-```
+Ficheiros: `docker-compose.yml`, `docker/Dockerfile.train`, `.dockerignore`.
+
+### 3.5 Treino com tracking de experimento (MLflow)
+
+Integracao MLflow nao esta embutida em `scripts/run_train.sh` neste repositorio; seguir orientacoes em `docs/03_operacao_mlopps.md` e `docs/10_runbook_mlops_treino_gpu.md` se quiseres ligar um servidor MLflow externo ou metricas adicionais.
+
+### 3.6 Reproducao controlada (DVC)
+
+Se o projeto passar a usar pipelines DVC, o comando tipico sera `dvc repro` sobre o stage definido no teu `dvc.yaml`. Enquanto nao existir esse ficheiro no repo, trata esta linha como referencia de documentacao (`docs/09_pipeline_treinamento_profissional.md`).
 
 ## 4. Como testar o pipeline de inferencia/contagem
 
@@ -78,7 +89,7 @@ bash scripts/run_web_mobile.sh
 
 ## 5. Como monitorar
 
-## 5.1 Monitoramento de treino
+### 5.1 Monitoramento de treino
 
 Monitorar por rodada:
 
@@ -93,7 +104,7 @@ KPIs minimos para comparacao:
 - `metrics/precision(B)`
 - `metrics/recall(B)`
 
-## 5.2 Monitoramento operacional de contagem
+### 5.2 Monitoramento operacional de contagem
 
 Monitorar em producao assistida:
 
@@ -106,7 +117,7 @@ Evidencias de operacao ficam em:
 
 - `outputs/count_summary_*.csv`
 
-## 5.3 Monitoramento de plataforma
+### 5.3 Monitoramento de plataforma
 
 No modo HUB, monitorar:
 
@@ -115,11 +126,13 @@ No modo HUB, monitorar:
 - comparacao entre experimentos
 - artefatos por versao de modelo
 
-Comando:
+Com token Ultralytics HUB no ambiente (ver `.env.example`):
 
 ```bash
-TRAIN_PIPELINE_MODE=hub bash scripts/run_train_pipeline.sh
+bash scripts/run_train.sh
 ```
+
+O `src/train_ultralytics.py` autentica com `ULTRALYTICS_HUB_API_KEY` quando definida; caso contrario treina so em local.
 
 ## 6. Como subir de local para plataforma com seguranca
 
