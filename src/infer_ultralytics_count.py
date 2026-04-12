@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+import unicodedata
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
@@ -98,6 +99,28 @@ def _camera_unavailable_message() -> str:
     )
 
 
+def resolve_local_media_path(source: str) -> str:
+    """Se o path nao existir, tenta o mesmo nome de ficheiro com outra normalizacao Unicode (NFC/NFD)."""
+    if source.isdigit():
+        return source
+    low = source.lower()
+    if low.startswith(("http://", "https://", "rtsp://", "rtmp://", "udp://", "tcp://", "mms://")):
+        return source
+    p = Path(source).expanduser()
+    if p.exists():
+        return str(p.resolve())
+    parent = p.parent
+    if not parent.exists():
+        return source
+    target = unicodedata.normalize("NFC", p.name)
+    for entry in parent.iterdir():
+        if unicodedata.normalize("NFC", entry.name) == target:
+            resolved = entry.resolve()
+            print(f"[infer] Caminho resolvido (Unicode): {resolved}")
+            return str(resolved)
+    return source
+
+
 def validate_source(source: str | int) -> None:
     """Valida camera local antes de iniciar pipeline do Ultralytics."""
     if isinstance(source, int):
@@ -171,6 +194,8 @@ def main() -> None:
     last_side_by_id: dict[int, float] = {}
 
     source = int(args.source) if args.source.isdigit() else args.source
+    if isinstance(source, str):
+        source = resolve_local_media_path(source)
     validate_source(source)
     csv_path = resolve_csv_path(args.csv_out)
 
@@ -199,55 +224,66 @@ def main() -> None:
         ) from exc
 
     try:
-        for result in stream:
-            frame = result.orig_img
+        try:
+            for result in stream:
+                frame = result.orig_img
 
-            if result.boxes is not None and result.boxes.id is not None:
-                ids = result.boxes.id.int().tolist()
-                xys = result.boxes.xyxy.tolist()
+                if result.boxes is not None and result.boxes.id is not None:
+                    ids = result.boxes.id.int().tolist()
+                    xys = result.boxes.xyxy.tolist()
 
-                for track_id, (x_min, y_min, x_max, y_max) in zip(ids, xys):
-                    foot_x = (x_min + x_max) / 2.0
-                    foot_y = float(y_max)
-                    side = side_of_line(foot_x, foot_y, x1, y1, x2, y2)
+                    for track_id, (x_min, y_min, x_max, y_max) in zip(ids, xys):
+                        foot_x = (x_min + x_max) / 2.0
+                        foot_y = float(y_max)
+                        side = side_of_line(foot_x, foot_y, x1, y1, x2, y2)
 
-                    if track_id in last_side_by_id:
-                        prev = last_side_by_id[track_id]
-                        if prev < 0 <= side:
-                            state.entries += 1
-                            print(f"entry track={track_id} total={state.entries}")
-                        elif prev > 0 >= side:
-                            state.exits += 1
-                            print(f"exit track={track_id} total={state.exits}")
+                        if track_id in last_side_by_id:
+                            prev = last_side_by_id[track_id]
+                            if prev < 0 <= side:
+                                state.entries += 1
+                                print(f"entry track={track_id} total={state.entries}")
+                            elif prev > 0 >= side:
+                                state.exits += 1
+                                print(f"exit track={track_id} total={state.exits}")
 
-                    last_side_by_id[track_id] = side
+                        last_side_by_id[track_id] = side
 
-                    if args.show:
-                        cv2.rectangle(frame, (int(x_min), int(y_min)), (int(x_max), int(y_max)), (0, 255, 0), 2)
-                        cv2.putText(
-                            frame,
-                            f"id={track_id}",
-                            (int(x_min), int(y_min) - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5,
-                            (0, 255, 0),
-                            1,
-                        )
+                        if args.show:
+                            cv2.rectangle(frame, (int(x_min), int(y_min)), (int(x_max), int(y_max)), (0, 255, 0), 2)
+                            cv2.putText(
+                                frame,
+                                f"id={track_id}",
+                                (int(x_min), int(y_min) - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.5,
+                                (0, 255, 0),
+                                1,
+                            )
 
-            if args.show:
-                cv2.line(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                cv2.putText(
-                    frame,
-                    f"in={state.entries} out={state.exits}",
-                    (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0,
-                    (255, 255, 255),
-                    2,
+                if args.show:
+                    cv2.line(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                    cv2.putText(
+                        frame,
+                        f"in={state.entries} out={state.exits}",
+                        (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1.0,
+                        (255, 255, 255),
+                        2,
+                    )
+                    cv2.imshow("people-counter", frame)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        break
+        except ConnectionError as exc:
+            msg = str(exc).lower()
+            hint = ""
+            if "resolve" in msg or "name or service not known" in msg or "failed to open" in msg:
+                hint = (
+                    " Falha de rede/DNS ou stream indisponivel: confirme internet, "
+                    "teste `ping`/`nslookup` ao hostname ou use outro URL/ficheiro .mp4."
                 )
-                cv2.imshow("people-counter", frame)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
+            print(f"[infer] Nao foi possivel abrir a fonte: {exc}{hint}", file=sys.stderr)
+            raise SystemExit(1) from exc
     finally:
         finished_at = datetime.now()
         write_summary_csv(

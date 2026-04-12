@@ -1,0 +1,10 @@
+# ByteTrack mais reativo para live web (menos IDs fantasmas quando a pessoa sai do quadro).
+# track_buffer menor que bytetrack_stable.yaml — pior em oclusoes longas, melhor para cenas abertas.
+
+tracker_type: bytetrack
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.25
+track_buffer: 25
+match_thresh: 0.78
+fuse_score: true

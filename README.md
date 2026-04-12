@@ -66,6 +66,20 @@ Estatistica agregada por sexo (opcional): treine um classificador YOLO (`yolo cl
 bash scripts/run_web_mobile.sh
 ```
 
+## FFmpeg relay (opcional)
+
+Para streams HLS/RTSP instáveis, o relay FFmpeg reduz jitter e alimenta frames mais estáveis para a inferência.
+Ative com `FFMPEG_RELAY=1` no `.env`. Requer `ffmpeg` instalado:
+
+```bash
+# openSUSE
+sudo zypper install ffmpeg
+# Debian/Ubuntu
+sudo apt install ffmpeg
+```
+
+Se `ffmpeg` não estiver instalado, o sistema usa `cv2.VideoCapture` direto (comportamento padrão).
+
 ## Proxima etapa recomendada
 
 1. Coletar dados reais no angulo final da camera da porta.

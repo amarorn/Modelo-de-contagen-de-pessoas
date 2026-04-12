@@ -1,0 +1,24 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --color-surface: #0f1419;
+  --color-surface-2: #151c24;
+  --color-accent: #22d3ee;
+  --color-accent-dim: #0891b2;
+}
+
+/* Fallback explícito: se o pipeline Tailwind falhar, o fundo não fica branco. */
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100vh;
+}
+
+body {
+  background-color: #0a0e12;
+  color: #f1f5f9;
+  font-family: var(--font-sans, system-ui, sans-serif);
+  -webkit-font-smoothing: antialiased;
+}

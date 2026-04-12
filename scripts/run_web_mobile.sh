@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${ROOT_DIR}"
+
 if [ -f .env ]; then
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
@@ -10,6 +14,45 @@ if [ -f .env ]; then
       export "$line"
     fi
   done < .env
+fi
+
+SOURCE=""
+USE_YOUTUBE=0
+
+if [ "$#" -gt 0 ]; then
+  if [ "${1}" = "--youtube" ] || [ "${1}" = "--youte" ]; then
+    if [ -z "${2:-}" ]; then
+      echo "Uso: $0 [URL_DO_STREAM | --youtube URL_DO_YOUTUBE | sem argumento]" >&2
+      exit 1
+    fi
+    if [ "${1}" = "--youte" ]; then
+      echo "[run_web_mobile] Aviso: use --youtube (correcao ortografica)." >&2
+    fi
+    SOURCE="$2"
+    USE_YOUTUBE=1
+    shift 2
+  elif [ -n "${1:-}" ]; then
+    SOURCE="$1"
+    shift
+  fi
+fi
+
+if [ -z "${SOURCE}" ]; then
+  SOURCE="${YOLO_WEB_SOURCE:-}"
+fi
+
+if [ -n "${SOURCE}" ]; then
+  export WEB_HOST="${WEB_HOST:-0.0.0.0}"
+  export WEB_PORT="${WEB_MOBILE_PORT:-8081}"
+  if [ "${USE_YOUTUBE}" = "1" ]; then
+    export YOLO_WEB_YOUTUBE_URL="${SOURCE}"
+    unset YOLO_WEB_SOURCE || true
+  else
+    export YOLO_WEB_SOURCE="${SOURCE}"
+    unset YOLO_WEB_YOUTUBE_URL || true
+  fi
+  bash "${SCRIPT_DIR}/run_web.sh"
+  exit 0
 fi
 
 MODEL_PATH="${YOLO_INFER_MODEL:-runs/people_count/yolov8m-door-counter/weights/best.pt}"

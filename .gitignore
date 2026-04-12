@@ -8,3 +8,9 @@ outputs/
 data/gender_classify_7k_view/
 /*.pt
 weights/**/*.pt
+
+# FFmpeg estatico (H.264 completo); instalar com scripts/install_static_ffmpeg.sh
+tools/ffmpeg-*-amd64-static/
+
+frontend/node_modules/
+frontend/dist/

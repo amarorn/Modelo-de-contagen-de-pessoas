@@ -13,15 +13,20 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import os
+import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Callable
 
 # Antes de cv2: FFmpeg/libav em streams HLS pode imprimir "non-existing SPS" (join a meio do GOP); nao e fatal.
 if os.environ.get("YOLO_WEB_VERBOSE", "").strip() != "1":
@@ -30,8 +35,9 @@ if os.environ.get("YOLO_WEB_VERBOSE", "").strip() != "1":
 import cv2
 import numpy as np
 import torch
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, abort, jsonify, request, send_from_directory
 from ultralytics import YOLO
+from werkzeug.utils import secure_filename
 
 from device_utils import resolve_device
 from sex_classifier_agg import OptionalSexClassifier, SexAggregateStats
@@ -94,11 +100,22 @@ class SharedState:
         self.last_frame_jpeg: bytes | None = None
         self.last_error: str | None = None
         self.lock = threading.Lock()
-        self.line_default = line_default
-        self.line_live = line_default
+        self.line_default_px = line_default
+        self._line_seed_px: tuple[int, int, int, int] = line_default
+        self.line_frac: tuple[float, float, float, float] | None = None
+        self.default_line_frac: tuple[float, float, float, float] | None = None
         self.count_mode: str = "line"
         self.polygon_default: list[tuple[int, int]] = []
         self.polygon_live: list[tuple[int, int]] = []
+        self.grabber_manager: Any = None  # GrabberManager quando inference inicia
+        self.heatmap_overlay_enabled: bool = True
+        self.heatmap_available: bool = False
+        self.current_source_display: str | int | None = None
+        # False = pausa: grabber nao avanca frames; inferencia parada. True = reproduzir.
+        self.inference_playing: bool = True
+        # Resolucao do frame de inferencia (antes do MJPEG redimensionado); para alinhar overlay web.
+        self.inference_frame_w: int = 0
+        self.inference_frame_h: int = 0
 
 
 class HeatmapAccumulator:
@@ -202,11 +219,430 @@ class TrackBoxOverlay:
         return out
 
 
+def _ffmpeg_global_opts_for_url(url: str) -> list[str]:
+    """Opcoes libav antes de ``-i`` para HLS (ffprobe/ffmpeg)."""
+    u = url.lower()
+    opts: list[str] = []
+    if "m3u8" in u:
+        opts += [
+            "-protocol_whitelist",
+            "file,http,https,tcp,tls,crypto,udp,rtp",
+        ]
+    opts += [
+        "-user_agent",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36",
+    ]
+    opts += ["-analyzeduration", "10000000", "-probesize", "10000000"]
+    return opts
+
+
+def _ffmpeg_http_headers_for_source(source: str) -> str | None:
+    """Cabecalhos HTTP para ffprobe/ffmpeg em URLs (HLS/CDN muitas vezes exige Referer).
+
+    Defina ``FFMPEG_HTTP_HEADERS`` ou ``PREDICT_FFMPEG_HEADERS`` (mesmo formato que
+    scripts/predict_deployed_hls_frame.sh). Para skylinewebcams.com usa valores
+    padrao se as variaveis estiverem vazias.
+    """
+    raw = (
+        os.environ.get("FFMPEG_HTTP_HEADERS")
+        or os.environ.get("PREDICT_FFMPEG_HEADERS")
+        or ""
+    ).strip()
+    if raw:
+        return raw if raw.endswith("\r\n") else raw + "\r\n"
+    s = str(source).lower()
+    if "skylinewebcams.com" in s:
+        return (
+            "Referer: https://www.skylinewebcams.com/\r\n"
+            "Origin: https://www.skylinewebcams.com\r\n"
+        )
+    return None
+
+
+def _parse_ffprobe_json_streams(raw: bytes) -> tuple[int, int] | None:
+    try:
+        data = json.loads(raw.decode())
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+    def wh_from_stream(st: dict) -> tuple[int, int] | None:
+        w, h = st.get("width"), st.get("height")
+        if w is None or h is None:
+            return None
+        try:
+            iw, ih = int(w), int(h)
+        except (TypeError, ValueError):
+            return None
+        if iw > 1 and ih > 1:
+            return iw, ih
+        return None
+
+    streams = data.get("streams")
+    if isinstance(streams, list):
+        for st in streams:
+            if isinstance(st, dict):
+                got = wh_from_stream(st)
+                if got is not None:
+                    return got
+    programs = data.get("programs")
+    if isinstance(programs, list):
+        for prog in programs:
+            if not isinstance(prog, dict):
+                continue
+            subs = prog.get("streams")
+            if isinstance(subs, list):
+                for st in subs:
+                    if isinstance(st, dict):
+                        got = wh_from_stream(st)
+                        if got is not None:
+                            return got
+    return None
+
+
+def _probe_resolution_cv2_one_frame(url: str) -> tuple[int, int] | None:
+    """Se ffprobe nao obtiver WxH, dimensoes via OpenCV (HLS pode precisar de varios read)."""
+    try:
+        cap = cv2.VideoCapture(url)
+        if not cap.isOpened():
+            return None
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
+        frame = None
+        try:
+            for _ in range(120):
+                ok, frame = cap.read()
+                if ok and frame is not None:
+                    break
+                time.sleep(0.05)
+            if frame is None:
+                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                if w > 1 and h > 1:
+                    return w, h
+                return None
+            fh, fw = frame.shape[:2]
+            if fw < 2 or fh < 2:
+                return None
+            return int(fw), int(fh)
+        finally:
+            cap.release()
+    except Exception:
+        return None
+
+
+def _probe_resolution(source: str | int) -> tuple[int, int] | None:
+    """Largura x altura do video: ffprobe (preferencial) ou primeiro frame OpenCV."""
+    ffprobe = shutil.which("ffprobe")
+    if isinstance(source, int):
+        return None
+    s = str(source)
+    is_net = s.startswith(("http://", "https://", "rtsp://", "rtmp://", "mms://"))
+
+    if ffprobe is not None:
+        cmd: list[str] = [ffprobe, "-v", "error"]
+        if is_net:
+            cmd += _ffmpeg_global_opts_for_url(s)
+            hdr = _ffmpeg_http_headers_for_source(s)
+            if hdr:
+                cmd += ["-headers", hdr]
+        cmd += [
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "json",
+            "-i",
+            s,
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=45,
+                check=False,
+            )
+            if proc.returncode == 0 and proc.stdout:
+                parsed = _parse_ffprobe_json_streams(proc.stdout)
+                if parsed is not None:
+                    return parsed
+            err = (proc.stderr or b"").decode(errors="replace").strip()
+            if err:
+                tail = err[-400:] if len(err) > 400 else err
+                print(f"[grabber] ffprobe stderr: {tail}")
+        except Exception as exc:
+            print(f"[grabber] ffprobe falhou: {exc}")
+
+    fb = _probe_resolution_cv2_one_frame(s)
+    if fb is not None:
+        print(
+            "[grabber] resolucao via primeiro frame OpenCV (ffprobe sem WxH ou indisponivel)"
+        )
+        return fb
+    return None
+
+
+def _source_is_url(source: str | int) -> bool:
+    if isinstance(source, int):
+        return False
+    s = str(source).strip().lower()
+    return s.startswith(("http://", "https://", "rtsp://", "rtmp://", "mms://"))
+
+
+class FrameGrabber:
+    """Thread de captura desacoplada: le stream continuamente e guarda apenas o ultimo frame.
+
+    Se ``use_ffmpeg_relay=True`` e o source for URL e ffmpeg estiver instalado,
+    usa subprocess ffmpeg para decodificar o stream e le raw BGR24 via pipe,
+    reduzindo jitter/rebuffer de HLS. Caso contrario, usa cv2.VideoCapture.
+    """
+
+    def __init__(
+        self,
+        source: str | int,
+        vid_stride: int,
+        app_stop: threading.Event,
+        thread_stop: threading.Event,
+        use_ffmpeg_relay: bool = False,
+        pause_check: Callable[[], bool] | None = None,
+    ) -> None:
+        self._source = source
+        self._vid_stride = max(1, vid_stride)
+        self._app_stop = app_stop
+        self._thread_stop = thread_stop
+        self._use_ffmpeg = use_ffmpeg_relay
+        self._pause_check = pause_check
+        self._lock = threading.Lock()
+        self._frame: np.ndarray | None = None
+        self._frame_count = 0
+        self._grab_ts: float = 0.0
+
+    def _stopped(self) -> bool:
+        return self._app_stop.is_set() or self._thread_stop.is_set()
+
+    def _wait_if_paused(self) -> None:
+        if self._pause_check is None:
+            return
+        while self._pause_check() and not self._stopped():
+            time.sleep(0.02)
+
+    def run(self) -> None:
+        if (
+            self._use_ffmpeg
+            and _source_is_url(self._source)
+            and shutil.which("ffmpeg") is not None
+        ):
+            self._run_ffmpeg()
+        else:
+            if self._use_ffmpeg:
+                if not _source_is_url(self._source):
+                    print("[grabber] ffmpeg relay ignorado: source nao e URL")
+                elif shutil.which("ffmpeg") is None:
+                    print("[grabber] ffmpeg nao encontrado no PATH; usando cv2 direto")
+            self._run_cv2()
+
+    def _run_cv2(self) -> None:
+        cap = cv2.VideoCapture(self._source)
+        if not cap.isOpened():
+            print(f"[grabber] ERRO: nao foi possivel abrir source={self._source!r}", file=sys.stderr)
+            return
+        print(f"[grabber] cv2 captura iniciada: source={self._source!r} vid_stride={self._vid_stride}")
+        try:
+            while not self._stopped():
+                self._wait_if_paused()
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    time.sleep(0.005)
+                    continue
+                self._frame_count += 1
+                if self._vid_stride > 1 and (self._frame_count % self._vid_stride) != 0:
+                    continue
+                with self._lock:
+                    self._frame = frame
+                    self._grab_ts = time.perf_counter()
+        finally:
+            cap.release()
+
+    def _run_ffmpeg(self) -> None:
+        res = _probe_resolution(self._source)
+        if res is None:
+            print(
+                "[grabber] relay ffmpeg sem resolucao (ffprobe + OpenCV); fallback para cv2"
+            )
+            self._run_cv2()
+            return
+        w, h = res
+        frame_bytes = w * h * 3
+        print(
+            f"[grabber] ffmpeg relay iniciado: {w}x{h} source={self._source!r} "
+            f"vid_stride={self._vid_stride}"
+        )
+        src = str(self._source)
+        hdr = _ffmpeg_http_headers_for_source(src)
+        cmd: list[str] = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-fflags",
+            "+nobuffer+discardcorrupt",
+            "-flags",
+            "low_delay",
+        ]
+        cmd += _ffmpeg_global_opts_for_url(src)
+        if hdr:
+            cmd += ["-headers", hdr]
+        cmd += [
+            "-i",
+            src,
+            "-an",
+            "-c:v",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        try:
+            while not self._stopped():
+                self._wait_if_paused()
+                raw = proc.stdout.read(frame_bytes)  # type: ignore[union-attr]
+                if len(raw) < frame_bytes:
+                    if proc.poll() is not None:
+                        print("[grabber] ffmpeg encerrou; fallback para cv2")
+                        self._run_cv2()
+                        return
+                    time.sleep(0.005)
+                    continue
+                frame = np.frombuffer(raw, dtype=np.uint8).reshape((h, w, 3))
+                self._frame_count += 1
+                if self._vid_stride > 1 and (self._frame_count % self._vid_stride) != 0:
+                    continue
+                with self._lock:
+                    self._frame = frame.copy()
+                    self._grab_ts = time.perf_counter()
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def get_latest(self) -> tuple[np.ndarray | None, float]:
+        with self._lock:
+            f = self._frame
+            ts = self._grab_ts
+            self._frame = None
+            return f, ts
+
+
+class GrabberManager:
+    """Gere o FrameGrabber atual e permite trocar a fonte em runtime (API)."""
+
+    def __init__(
+        self,
+        initial_source: str | int,
+        vid_stride: int,
+        app_stop: threading.Event,
+        use_ffmpeg_relay: bool,
+        pause_check: Callable[[], bool] | None = None,
+    ) -> None:
+        self._app_stop = app_stop
+        self._vid_stride = vid_stride
+        self._use_ffmpeg = use_ffmpeg_relay
+        self._pause_check = pause_check
+        self._lock = threading.Lock()
+        self._thread_stop = threading.Event()
+        self._grabber: FrameGrabber | None = None
+        self._thread: threading.Thread | None = None
+        self._source: str | int = initial_source
+        self._start_locked()
+
+    def _start_locked(self) -> None:
+        self._thread_stop.clear()
+        self._grabber = FrameGrabber(
+            self._source,
+            self._vid_stride,
+            self._app_stop,
+            self._thread_stop,
+            self._use_ffmpeg,
+            self._pause_check,
+        )
+        self._thread = threading.Thread(target=self._grabber.run, daemon=True)
+        self._thread.start()
+
+    def get_latest(self) -> tuple[np.ndarray | None, float]:
+        g = self._grabber
+        if g is None:
+            return None, 0.0
+        return g.get_latest()
+
+    @property
+    def current_source(self) -> str | int:
+        return self._source
+
+    def swap(self, new_source: str | int) -> None:
+        with self._lock:
+            self._thread_stop.set()
+            if self._thread is not None:
+                self._thread.join(timeout=10.0)
+            self._source = new_source
+            self._thread_stop = threading.Event()
+            self._start_locked()
+
+
+def _is_probably_youtube_url(url: str) -> bool:
+    u = url.strip().lower()
+    return "youtube.com/" in u or "youtu.be/" in u
+
+
+def resolve_youtube_stream_url(url: str) -> str | None:
+    """Resolve URL HLS/mp4 direta via yt-dlp (mesma ideia que scripts/run_web.sh)."""
+    bin_path = shutil.which("yt-dlp")
+    if bin_path is None:
+        return None
+    try:
+        out = subprocess.check_output(
+            [bin_path, "-g", "-f", "best[height<=720]", url],
+            stderr=subprocess.DEVNULL,
+            timeout=120,
+            text=True,
+        )
+        lines = [ln.strip() for ln in out.strip().splitlines() if ln.strip()]
+        return lines[-1] if lines else None
+    except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired) as exc:
+        print(f"[web] yt-dlp falhou: {exc}", file=sys.stderr)
+        return None
+
+
+def coerce_source_value(raw: str) -> tuple[str | int, str]:
+    """Retorna (fonte para OpenCV, texto para UI)."""
+    s = raw.strip()
+    if not s:
+        raise ValueError("Fonte vazia")
+    if s.isdigit():
+        return int(s), s
+    if _is_probably_youtube_url(s):
+        resolved = resolve_youtube_stream_url(s)
+        if not resolved:
+            raise ValueError(
+                "Falha ao resolver YouTube (instale yt-dlp no venv e atualize o cliente)"
+            )
+        return resolved, s
+    return s, s
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Dashboard web do contador de pessoas")
     p.add_argument("--model", required=True)
     p.add_argument("--source", default="0", help="camera index, arquivo ou rtsp://")
-    p.add_argument("--line", default="960,300,960,900", help="x1,y1,x2,y2 em pixels do frame")
+    p.add_argument(
+        "--line",
+        default="0,540,1919,540",
+        help="x1,y1,x2,y2 em pixels do frame (padrao: linha horizontal em toda a largura, eixo medio 1080p; o clamp adapta a resolucao)",
+    )
     p.add_argument(
         "--conf",
         type=float,
@@ -314,6 +750,11 @@ def parse_args() -> argparse.Namespace:
         help="Manter a ultima caixa N frames sem deteccao (reduz piscar; 0 = so frame atual)",
     )
     p.add_argument(
+        "--hide-stale-boxes",
+        action="store_true",
+        help="Nao desenha caixas sem deteccao atual (posicao 'stale'). Reduz caixas que ficam no sitio apos a pessoa sair.",
+    )
+    p.add_argument(
         "--no-shape-filter",
         action="store_true",
         help="Desliga filtro de forma (postes/placas/caixas enormes podem ser contados como pessoa)",
@@ -343,6 +784,16 @@ def parse_args() -> argparse.Namespace:
         help="Altura minima do bbox em pixels",
     )
     p.add_argument(
+        "--min-det-conf",
+        type=float,
+        default=None,
+        help=(
+            "Opcional: descarta deteccoes com conf < este valor (apos o tracker). "
+            "Util com --conf mais baixo para o tracker e limiar mais alto para exibir/contar. "
+            "Reduz falsos positivos em texturas (chao, barcos)."
+        ),
+    )
+    p.add_argument(
         "--sex-model",
         default=None,
         help=(
@@ -357,6 +808,11 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.65,
         help="Confianca minima do top-1 (YOLO_SEX_ABSTAIN no .env); abaixo conta como unknown.",
+    )
+    p.add_argument(
+        "--ffmpeg-relay",
+        action="store_true",
+        help="Usa ffmpeg como relay para decodificar o stream (reduz jitter HLS). Requer ffmpeg instalado.",
     )
     return p.parse_args()
 
@@ -383,6 +839,48 @@ def clamp_line(
     if fw < 1 or fh < 1:
         return x1, y1, x2, y2
     return c(x1, fw), c(y1, fh), c(x2, fw), c(y2, fh)
+
+
+def pixels_to_frac(
+    x1: int, y1: int, x2: int, y2: int, fw: int, fh: int
+) -> tuple[float, float, float, float]:
+    """Normaliza a linha para [0,1] em relacao ao frame, para escalar com a resolucao."""
+    if fw < 2 or fh < 2:
+        return (0.0, 0.0, 0.0, 0.0)
+
+    def nf(v: int, m: int) -> float:
+        return max(0.0, min(1.0, float(v) / float(m - 1)))
+
+    return (nf(x1, fw), nf(y1, fh), nf(x2, fw), nf(y2, fh))
+
+
+def frac_to_pixels(
+    frac: tuple[float, float, float, float], fw: int, fh: int
+) -> tuple[int, int, int, int]:
+    if fw < 1 or fh < 1:
+        return (0, 0, 0, 0)
+    fx1, fy1, fx2, fy2 = frac
+
+    def p(t: float, m: int) -> int:
+        if m <= 1:
+            return 0
+        return int(max(0, min(m - 1, round(t * (m - 1)))))
+
+    return (p(fx1, fw), p(fy1, fh), p(fx2, fw), p(fy2, fh))
+
+
+def line_pixels_for_frame(
+    shared: SharedState, fw: int, fh: int
+) -> tuple[int, int, int, int]:
+    """Segmento em pixels para o frame atual; usa line_frac se ja inicializado."""
+    with shared.lock:
+        lf = shared.line_frac
+        seed = shared._line_seed_px
+    if fw >= 1 and fh >= 1 and lf is not None:
+        return frac_to_pixels(lf, fw, fh)
+    if fw >= 1 and fh >= 1:
+        return clamp_line(*seed, fw, fh)
+    return seed
 
 
 def clamp_polygon(
@@ -429,6 +927,19 @@ def bbox_looks_like_person(
     if w * h > max_area_frac * float(fw * fh):
         return False
     return True
+
+
+def apply_min_det_conf_filter(result: Any, min_c: float | None) -> None:
+    """Remove deteccoes com conf abaixo do limiar (in-place em result.boxes)."""
+    if min_c is None or result is None or result.boxes is None or len(result.boxes) == 0:
+        return
+    keep = result.boxes.conf >= min_c
+    if bool(keep.all()):
+        return
+    if not bool(keep.any()):
+        result.boxes = None
+        return
+    result.boxes = result.boxes[keep]
 
 
 def filter_boxes_by_shape(
@@ -542,15 +1053,18 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
         )
 
         with shared.lock:
-            _ld = shared.line_live
+            _ld = shared._line_seed_px
             _mode = shared.count_mode
             _np = len(shared.polygon_live)
         print(
-            f"[web] Modo contagem={_mode} | linha (pixels): {_ld} | poligono: {_np} vertices. "
+            f"[web] Modo contagem={_mode} | linha (pixels seed): {_ld} | poligono: {_np} vertices. "
             "Linha: pes cruzam segmento. Poligono: entrada/saida pela area (UI /roi)."
         )
         source = int(args.source) if args.source.isdigit() else args.source
         validate_source(source)
+        if isinstance(source, str) and Path(source).is_file():
+            with shared.lock:
+                shared.inference_playing = False
 
         sex_clf: OptionalSexClassifier | None = None
         if args.sex_model:
@@ -586,11 +1100,15 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 f"radius={args.heat_radius} alpha={args.heat_alpha}"
             )
 
+        with shared.lock:
+            shared.heatmap_available = heat is not None
+            shared.heatmap_overlay_enabled = heat is not None
+
         tracker_yaml = resolve_tracker_yaml(args.tracker)
         box_overlay = TrackBoxOverlay(args.track_ema, args.track_hold_frames)
         print(
             f"[web] tracker={tracker_yaml} track_ema={args.track_ema} "
-            f"track_hold_frames={args.track_hold_frames}"
+            f"track_hold_frames={args.track_hold_frames} hide_stale_boxes={args.hide_stale_boxes}"
         )
         if args.no_shape_filter:
             print("[web] Filtro de forma desligado (--no-shape-filter)")
@@ -599,10 +1117,15 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 f"[web] Filtro de forma ativo: ar=[{args.min_person_ar},{args.max_person_ar}] "
                 f"max_area_frac={args.max_box_area_frac} min_h_px={args.min_person_height_px}"
             )
+        if args.min_det_conf is not None:
+            print(f"[web] Filtro extra por confianca por bbox: min_det_conf={args.min_det_conf} (alem de conf={args.conf})")
+            if args.min_det_conf <= args.conf:
+                print(
+                    "[web] AVISO: defina min_det_conf > conf (ex. conf=0.25 e min_det_conf=0.42) para filtrar falsos positivos.",
+                    file=sys.stderr,
+                )
 
         track_kw: dict = {
-            "source": source,
-            "stream": True,
             "conf": args.conf,
             "iou": args.iou,
             "imgsz": args.imgsz,
@@ -612,8 +1135,6 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
             "persist": True,
             "verbose": False,
             "device": resolved_device,
-            "vid_stride": max(1, args.vid_stride),
-            "stream_buffer": args.stream_buffer,
         }
         if use_half:
             track_kw["half"] = True
@@ -622,19 +1143,76 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
         if args.agnostic_nms:
             track_kw["agnostic_nms"] = True
 
-        stream = model.track(**track_kw)
+        def pause_when_not_playing() -> bool:
+            with shared.lock:
+                return not shared.inference_playing
 
-        for result in stream:
-            if stop_event.is_set():
-                break
+        mgr = GrabberManager(
+            source,
+            args.vid_stride,
+            stop_event,
+            args.ffmpeg_relay,
+            pause_check=pause_when_not_playing,
+        )
+        with shared.lock:
+            shared.grabber_manager = mgr
+            shared.current_source_display = (
+                str(source) if not isinstance(source, int) else source
+            )
 
-            frame = result.orig_img
+        _pmw = os.environ.get("YOLO_WEB_PREVIEW_MAX_WIDTH", "").strip()
+        preview_max_w = int(_pmw) if _pmw.isdigit() else 0
+        _jq = os.environ.get("YOLO_WEB_JPEG_QUALITY", "").strip()
+        jpeg_q: int | None = int(_jq) if _jq.isdigit() else None
+        if jpeg_q is not None:
+            jpeg_q = max(40, min(95, jpeg_q))
+        if preview_max_w > 0 or jpeg_q is not None:
+            print(
+                f"[web] MJPEG para o browser: "
+                f"preview_max_width={preview_max_w if preview_max_w > 0 else 'full'} "
+                f"jpeg_quality={jpeg_q if jpeg_q is not None else 'opencv default'}"
+            )
+
+        last_frame_ts = time.perf_counter()
+        fps_ema = 0.0
+        inf_ms_ema = 0.0
+        enc_ms_ema = 0.0
+
+        while not stop_event.is_set():
+            frame, grab_ts = mgr.get_latest()
             if frame is None:
+                time.sleep(0.005)
                 continue
+
+            now_ts = time.perf_counter()
+            dt = max(1e-6, now_ts - last_frame_ts)
+            last_frame_ts = now_ts
+            inst_fps = 1.0 / dt
+            fps_ema = inst_fps if fps_ema <= 0.0 else 0.90 * fps_ema + 0.10 * inst_fps
+            cap_ms = max(0.0, (now_ts - grab_ts) * 1000.0) if grab_ts > 0.0 else 0.0
+
+            t_inf_0 = time.perf_counter()
+            results = model.track(frame, **track_kw)
+            t_inf_1 = time.perf_counter()
+            inf_ms = (t_inf_1 - t_inf_0) * 1000.0
+            inf_ms_ema = inf_ms if inf_ms_ema <= 0.0 else 0.90 * inf_ms_ema + 0.10 * inf_ms
+
+            result = results[0] if results else None
+            if result is None:
+                continue
+            apply_min_det_conf_filter(result, args.min_det_conf)
 
             fh, fw = frame.shape[:2]
             with shared.lock:
-                raw_line = shared.line_live
+                shared.inference_frame_w = int(fw)
+                shared.inference_frame_h = int(fh)
+                if shared.line_frac is None:
+                    shared.line_frac = pixels_to_frac(*shared._line_seed_px, fw, fh)
+                if shared.default_line_frac is None:
+                    shared.default_line_frac = pixels_to_frac(
+                        *shared.line_default_px, fw, fh
+                    )
+                raw_line = line_pixels_for_frame(shared, fw, fh)
                 count_mode = shared.count_mode
                 poly_raw = list(shared.polygon_live)
             cfg_sig = f"{count_mode}|{raw_line}|{poly_raw}"
@@ -672,8 +1250,11 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                     foot_points.append((foot_x, foot_y))
 
             if heat is not None:
-                heat.step(fh, fw, foot_points)
-                frame = heat.blend_over(frame)
+                with shared.lock:
+                    _show_heat = shared.heatmap_overlay_enabled
+                if _show_heat:
+                    heat.step(fh, fw, foot_points)
+                    frame = heat.blend_over(frame)
 
             ids_list: list[int] | None = None
             xys_raw: list[tuple[float, float, float, float]] | None = None
@@ -715,9 +1296,9 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                                 shared.counter.exits += 1
                         last_side_by_id[track_id] = side
 
-                if sex_clf and sex_clf.enabled and entry_boxes and result.orig_img is not None:
+                if sex_clf and sex_clf.enabled and entry_boxes and frame is not None:
                     for box in entry_boxes:
-                        bucket = sex_clf.classify_crop(result.orig_img, box)
+                        bucket = sex_clf.classify_crop(frame, box)
                         with shared.lock:
                             if bucket == "female":
                                 shared.sex_agg.female += 1
@@ -736,6 +1317,8 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                     del prev_inside_by_id[tid]
 
             for track_id, (xa, ya, xb, yb), stale in draw_items:
+                if args.hide_stale_boxes and stale:
+                    continue
                 color = (0, 200, 100) if stale else (0, 255, 0)
                 cv2.rectangle(frame, (xa, ya), (xb, yb), color, 2)
                 label = f"id={track_id}" + (" ~" if stale else "")
@@ -753,7 +1336,14 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 text = f"in={shared.counter.entries} out={shared.counter.exits} total={shared.counter.total}"
             if count_mode == "polygon" and len(poly_pts) >= 3:
                 arr = np.array(poly_pts, dtype=np.int32).reshape(-1, 1, 2)
-                cv2.polylines(frame, [arr], isClosed=True, color=(255, 200, 0), thickness=2)
+                cv2.polylines(
+                    frame,
+                    [arr],
+                    isClosed=True,
+                    color=(255, 200, 0),
+                    thickness=2,
+                    lineType=cv2.LINE_AA,
+                )
                 cv2.putText(
                     frame,
                     "ROI poligonal",
@@ -776,10 +1366,42 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 )
                 cv2.putText(frame, text, (20, 72), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
             else:
-                cv2.line(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                cv2.line(frame, (x1, y1), (x2, y2), (0, 0, 255), 2, cv2.LINE_AA)
                 cv2.putText(frame, text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
 
-            ok, encoded = cv2.imencode(".jpg", frame)
+            cv2.putText(
+                frame,
+                f"fps={fps_ema:.1f} inf={inf_ms_ema:.0f}ms cap={cap_ms:.0f}ms enc={enc_ms_ema:.0f}ms",
+                (20, 76),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (40, 220, 255),
+                2,
+            )
+
+            send_frame = frame
+            if preview_max_w > 0:
+                fh0, fw0 = frame.shape[:2]
+                if fw0 > preview_max_w:
+                    scale = preview_max_w / float(fw0)
+                    send_frame = cv2.resize(
+                        frame,
+                        (preview_max_w, int(round(fh0 * scale))),
+                        interpolation=cv2.INTER_AREA,
+                    )
+
+            t_enc_0 = time.perf_counter()
+            if jpeg_q is None:
+                ok, encoded = cv2.imencode(".jpg", send_frame)
+            else:
+                ok, encoded = cv2.imencode(
+                    ".jpg",
+                    send_frame,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_q],
+                )
+            t_enc_1 = time.perf_counter()
+            enc_ms = (t_enc_1 - t_enc_0) * 1000.0
+            enc_ms_ema = enc_ms if enc_ms_ema <= 0.0 else 0.90 * enc_ms_ema + 0.10 * enc_ms
             if ok:
                 with shared.lock:
                     shared.last_frame_jpeg = encoded.tobytes()
@@ -798,8 +1420,8 @@ _ROI_PAGE_HTML = """
     <style>
       body { font-family: Arial, sans-serif; margin: 20px; background: #111; color: #fff; }
       a { color: #6cf; }
-      .video-wrap { display: inline-block; position: relative; max-width: 100%; line-height: 0; }
-      #roiFeed { max-width: 100%; border-radius: 8px; border: 1px solid #444; display: block; }
+      .video-wrap { display: block; width: 100%; max-width: 100%; position: relative; line-height: 0; text-align: center; }
+      #roiFeed { width: auto; height: auto; max-width: 100%; max-height: 90vh; border-radius: 8px; border: 1px solid #444; display: inline-block; vertical-align: top; }
       #roiCanvas { position: absolute; left: 0; top: 0; cursor: crosshair; border-radius: 8px; }
       button { padding: 8px 12px; margin: 8px 8px 0 0; }
       .hint { color: #aaa; font-size: 14px; max-width: 720px; line-height: 1.45; }
@@ -807,7 +1429,7 @@ _ROI_PAGE_HTML = """
     </style>
   </head>
   <body>
-    <p><a href="/">&larr; Voltar ao dashboard</a></p>
+    <p><a href="/" target="_top">&larr; Voltar ao dashboard</a></p>
     <h2>Modo ROI poligonal (porta)</h2>
     <p class="hint">
       Clique na imagem para marcar vertices no sentido horario ou anti-horario (minimo 3).
@@ -942,190 +1564,73 @@ _ROI_PAGE_HTML = """
 </html>
 """
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+FRONTEND_DIST = _REPO_ROOT / "frontend" / "dist"
+
+_LEGACY_INDEX_HTML = """<!doctype html>
+<html lang="pt"><head><meta charset="utf-8"/><title>People Counter</title></head>
+<body style="font-family:system-ui,sans-serif;background:#111;color:#eee;padding:1.5rem;max-width:52rem">
+  <h2>Dashboard React nao compilado</h2>
+  <p>Na raiz do repositorio execute:</p>
+  <pre style="background:#1a1a1a;padding:12px;border-radius:8px;overflow:auto">cd frontend &amp;&amp; npm install &amp;&amp; npm run build</pre>
+  <p>Depois reinicie o servidor Flask. Endpoints: <a href="/api/stats" style="color:#6cf">/api/stats</a>,
+  <a href="/video_feed" style="color:#6cf">/video_feed</a>, <a href="/roi" style="color:#6cf">/roi</a>.</p>
+</body></html>"""
+
 
 def create_app(shared: SharedState) -> Flask:
     app = Flask(__name__)
 
     @app.get("/roi")
-    def roi_page() -> str:
+    def roi_page():
+        idx = FRONTEND_DIST / "index.html"
+        if idx.is_file():
+            return send_from_directory(FRONTEND_DIST, "index.html")
         return _ROI_PAGE_HTML
 
     @app.get("/")
-    def index() -> str:
-        return """
-<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <title>People Counter</title>
-    <style>
-      body { font-family: Arial, sans-serif; margin: 20px; background: #111; color: #fff; }
-      .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 16px; }
-      .card { background: #1e1e1e; padding: 12px; border-radius: 8px; }
-      .video-wrap { display: inline-block; position: relative; max-width: 100%; }
-      #feed { max-width: 100%; border-radius: 8px; border: 1px solid #444; display: block; }
-      #feed.calib-on { cursor: crosshair; outline: 2px solid #fc0; }
-      button { padding: 8px 12px; margin: 8px 8px 0 0; }
-      .row { margin: 10px 0; color: #ccc; font-size: 14px; }
-      label { cursor: pointer; }
-    </style>
-  </head>
-  <body>
-    <h2>Contagem de Pessoas (Web)</h2>
-    <p><a href="/roi" style="color:#6cf;">Modo ROI poligonal (porta)</a> — desenhe a zona no video; contagem so para quem entra/sai dessa area.</p>
-    <p style="color:#aaa;font-size:14px;">Mapa de calor: intensidade agregada no solo (base do bbox), sem identidade.</p>
-    <div class="grid">
-      <div class="card">Entradas: <b id="entries">0</b></div>
-      <div class="card">Saidas: <b id="exits">0</b></div>
-      <div class="card">Total: <b id="total">0</b></div>
-    </div>
-    <div id="sexPanel" style="display:none;margin:12px 0;padding:12px;background:#1a1a2e;border-radius:8px;font-size:14px;max-width:520px;">
-      <p style="color:#9cf;margin:0 0 8px 0;">Entradas por classe (agregado; abstencao se confianca baixa). Ver docs/04_privacidade_etica.md.</p>
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">
-        <span>F: <b id="sexF">0</b></span>
-        <span>M: <b id="sexM">0</b></span>
-        <span>Incerto: <b id="sexU">0</b></span>
-      </div>
-    </div>
-    <div class="row">
-      <strong>Modo / geometria:</strong> <span id="modeInfo">—</span>
-    </div>
-    <div class="row">
-      <button type="button" id="btnCalib">Calibrar linha (2 cliques)</button>
-      <button type="button" id="btnCancel">Cancelar calibracao</button>
-      <button type="button" id="btnResetLine">Repor linha inicial (.env)</button>
-    </div>
-    <div class="row">
-      <label><input type="checkbox" id="resetOnCalib" /> Zerar contadores ao aplicar nova linha</label>
-    </div>
-    <p id="calibStatus" style="color:#fc0;font-size:14px;min-height:1.2em;"></p>
-    <div class="video-wrap">
-      <img id="feed" src="/video_feed" alt="video" />
-    </div>
-    <br/>
-    <button onclick="exportCsv()">Exportar CSV</button>
-    <p id="status"></p>
-    <script>
-      let calibrating = false;
-      let p1 = null;
-      const feed = document.getElementById('feed');
-      function frameCoords(ev) {
-        const r = feed.getBoundingClientRect();
-        const nw = feed.naturalWidth || feed.width;
-        const nh = feed.naturalHeight || feed.height;
-        const x = Math.round((ev.clientX - r.left) / r.width * nw);
-        const y = Math.round((ev.clientY - r.top) / r.height * nh);
-        return [x, y];
-      }
-      async function loadLineInfo() {
-        try {
-          const r = await fetch('/api/config');
-          const j = await r.json();
-          const L = j.line;
-          let t = j.mode === 'polygon'
-            ? ('poligono ' + (j.polygon || []).length + ' pontos')
-            : ('linha (' + L.x1 + ',' + L.y1 + ')->(' + L.x2 + ',' + L.y2 + ')');
-          document.getElementById('modeInfo').textContent = j.mode + ' | ' + t;
-        } catch (e) {}
-      }
-      feed.addEventListener('click', async (ev) => {
-        if (!calibrating) return;
-        ev.preventDefault();
-        const [x, y] = frameCoords(ev);
-        if (!p1) {
-          p1 = [x, y];
-          document.getElementById('calibStatus').textContent =
-            'Ponto 1 em (' + x + ',' + y + '). Clique o 2o ponto.';
-          return;
-        }
-        const resetCounters = document.getElementById('resetOnCalib').checked;
-        try {
-          const r = await fetch('/api/line', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              x1: p1[0], y1: p1[1], x2: x, y2: y,
-              reset_counters: resetCounters
-            })
-          });
-          const j = await r.json();
-          if (!r.ok) throw new Error(j.error || r.status);
-          document.getElementById('calibStatus').textContent = 'Linha aplicada.';
-          loadLineInfo();
-        } catch (e) {
-          document.getElementById('calibStatus').textContent = 'Erro: ' + e;
-        }
-        calibrating = false;
-        p1 = null;
-        feed.classList.remove('calib-on');
-      });
-      document.getElementById('btnCalib').addEventListener('click', () => {
-        calibrating = true;
-        p1 = null;
-        feed.classList.add('calib-on');
-        document.getElementById('calibStatus').textContent =
-          'Clique o 1o ponto da linha no video (coordenadas alinhadas ao frame do servidor).';
-      });
-      document.getElementById('btnCancel').addEventListener('click', () => {
-        calibrating = false;
-        p1 = null;
-        feed.classList.remove('calib-on');
-        document.getElementById('calibStatus').textContent = '';
-      });
-      document.getElementById('btnResetLine').addEventListener('click', async () => {
-        const resetCounters = document.getElementById('resetOnCalib').checked;
-        try {
-          const r = await fetch('/api/line/reset', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ reset_counters: resetCounters })
-          });
-          const j = await r.json();
-          if (!r.ok) throw new Error(j.error || r.status);
-          document.getElementById('calibStatus').textContent = 'Linha reposta ao valor inicial.';
-          loadLineInfo();
-        } catch (e) {
-          document.getElementById('calibStatus').textContent = 'Erro: ' + e;
-        }
-      });
-      async function refresh() {
-        const r = await fetch('/api/stats');
-        const j = await r.json();
-        document.getElementById('entries').textContent = j.entries;
-        document.getElementById('exits').textContent = j.exits;
-        document.getElementById('total').textContent = j.total_passages;
-        document.getElementById('status').textContent = j.error ? ('Erro: ' + j.error) : 'Online';
-        const sp = document.getElementById('sexPanel');
-        if (j.sex_classifier_enabled) {
-          sp.style.display = 'block';
-          document.getElementById('sexF').textContent = j.sex_female_agg;
-          document.getElementById('sexM').textContent = j.sex_male_agg;
-          document.getElementById('sexU').textContent = j.sex_unknown_agg;
-        } else {
-          sp.style.display = 'none';
-        }
-      }
-      async function exportCsv() {
-        const r = await fetch('/api/export', {method: 'POST'});
-        const j = await r.json();
-        document.getElementById('status').textContent = 'CSV salvo: ' + j.csv_path;
-      }
-      setInterval(refresh, 1000);
-      refresh();
-      loadLineInfo();
-    </script>
-  </body>
-</html>
-"""
+    def index():
+        idx = FRONTEND_DIST / "index.html"
+        if idx.is_file():
+            return send_from_directory(FRONTEND_DIST, "index.html")
+        return _LEGACY_INDEX_HTML
+
+    @app.get("/assets/<path:fname>")
+    def spa_assets(fname: str):
+        d = FRONTEND_DIST / "assets"
+        if not d.is_dir():
+            abort(404)
+        return send_from_directory(d, fname)
 
     @app.get("/api/config")
     def get_config() -> Response:
         with shared.lock:
             mode = shared.count_mode
-            x1, y1, x2, y2 = shared.line_live
-            d1, d2, d3, d4 = shared.line_default
             poly = [{"x": a, "y": b} for a, b in shared.polygon_live]
             pdef = [{"x": a, "y": b} for a, b in shared.polygon_default]
+            hm_avail = shared.heatmap_available
+            hm_on = shared.heatmap_overlay_enabled
+            cur = shared.current_source_display
+            playing = shared.inference_playing
+            iw, ih = shared.inference_frame_w, shared.inference_frame_h
+        if iw > 0 and ih > 0:
+            x1, y1, x2, y2 = line_pixels_for_frame(shared, iw, ih)
+            with shared.lock:
+                dlf = shared.default_line_frac
+                ldp = shared.line_default_px
+            if dlf is not None:
+                d1, d2, d3, d4 = frac_to_pixels(dlf, iw, ih)
+            else:
+                d1, d2, d3, d4 = clamp_line(*ldp, iw, ih)
+        else:
+            with shared.lock:
+                x1, y1, x2, y2 = shared._line_seed_px
+                d1, d2, d3, d4 = shared.line_default_px
+        inf_size = (
+            {"w": iw, "h": ih}
+            if iw > 0 and ih > 0
+            else None
+        )
         return jsonify(
             {
                 "mode": mode,
@@ -1133,16 +1638,127 @@ def create_app(shared: SharedState) -> Flask:
                 "default_line": {"x1": d1, "y1": d2, "x2": d3, "y2": d4},
                 "polygon": poly,
                 "default_polygon": pdef,
+                "heatmap_available": hm_avail,
+                "heatmap_overlay_enabled": hm_on,
+                "current_source": cur,
+                "inference_playing": playing,
+                "inference_size": inf_size,
             }
         )
+
+    @app.post("/api/source")
+    def post_source() -> Response:
+        mgr = getattr(shared, "grabber_manager", None)
+        if mgr is None:
+            return jsonify({"error": "Captura ainda nao iniciada"}), 503
+        data = request.get_json(silent=True) or {}
+        raw = data.get("source")
+        if raw is None:
+            return jsonify({"error": "Campo source obrigatorio"}), 400
+        reset_counters = bool(data.get("reset_counters", False))
+        try:
+            if isinstance(raw, int):
+                src: str | int = raw
+                disp: str | int = raw
+            else:
+                s = str(raw).strip()
+                if not s:
+                    return jsonify({"error": "Fonte vazia"}), 400
+                src, disp = coerce_source_value(s)
+            if isinstance(src, int):
+                validate_source(src)
+            mgr.swap(src)
+            with shared.lock:
+                shared.current_source_display = disp
+                shared.last_frame_jpeg = None
+                shared.last_error = None
+                if reset_counters:
+                    reset_entry_exit_counters(shared)
+                if isinstance(src, str) and Path(src).is_file():
+                    shared.inference_playing = False
+                else:
+                    shared.inference_playing = True
+            return jsonify({"ok": True, "source": disp})
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+
+    @app.post("/api/upload")
+    def post_upload() -> Response:
+        mgr = getattr(shared, "grabber_manager", None)
+        if mgr is None:
+            return jsonify({"error": "Captura ainda nao iniciada"}), 503
+        max_mb = int(os.environ.get("WEB_UPLOAD_MAX_MB", "512"))
+        max_bytes = max(1, max_mb) * 1024 * 1024
+        cl = request.content_length
+        if cl is not None and cl > max_bytes:
+            return jsonify({"error": f"Ficheiro demasiado grande (max {max_mb} MB)"}), 413
+        f = request.files.get("file")
+        if f is None or not f.filename:
+            return jsonify({"error": "Campo file em falta"}), 400
+        raw_name = secure_filename(f.filename)
+        ext = Path(raw_name).suffix.lower()
+        if ext not in (".mp4", ".webm", ".mov"):
+            return jsonify({"error": "Extensao permitida: .mp4, .webm, .mov"}), 400
+        upload_dir = _REPO_ROOT / "outputs" / "uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        name = f"{uuid.uuid4().hex}{ext}"
+        path = upload_dir / name
+        try:
+            f.save(str(path))
+            resolved = str(path.resolve())
+            mgr.swap(resolved)
+            with shared.lock:
+                shared.current_source_display = resolved
+                shared.last_frame_jpeg = None
+                shared.last_error = None
+                shared.inference_playing = False
+            return jsonify({"ok": True, "path": resolved})
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+
+    @app.post("/api/heatmap")
+    def post_heatmap() -> Response:
+        data = request.get_json(silent=True) or {}
+        en = data.get("enabled")
+        if not isinstance(en, bool):
+            return jsonify({"error": "enabled (boolean) obrigatorio"}), 400
+        with shared.lock:
+            if not shared.heatmap_available:
+                return jsonify({"error": "Heatmap indisponivel (servidor com --no-heatmap)"}), 400
+            shared.heatmap_overlay_enabled = en
+        return jsonify({"ok": True, "enabled": en})
+
+    @app.post("/api/playback")
+    def post_playback() -> Response:
+        data = request.get_json(silent=True) or {}
+        playing = data.get("playing")
+        if not isinstance(playing, bool):
+            return jsonify({"error": "playing (boolean) obrigatorio"}), 400
+        with shared.lock:
+            shared.inference_playing = playing
+        return jsonify({"ok": True, "inference_playing": playing})
 
     @app.get("/api/line")
     def get_line() -> Response:
         with shared.lock:
             mode = shared.count_mode
-            x1, y1, x2, y2 = shared.line_live
-            d1, d2, d3, d4 = shared.line_default
+            iw, ih = shared.inference_frame_w, shared.inference_frame_h
             poly = [{"x": a, "y": b} for a, b in shared.polygon_live]
+        if iw > 0 and ih > 0:
+            x1, y1, x2, y2 = line_pixels_for_frame(shared, iw, ih)
+            with shared.lock:
+                dlf = shared.default_line_frac
+                ldp = shared.line_default_px
+            if dlf is not None:
+                d1, d2, d3, d4 = frac_to_pixels(dlf, iw, ih)
+            else:
+                d1, d2, d3, d4 = clamp_line(*ldp, iw, ih)
+        else:
+            with shared.lock:
+                x1, y1, x2, y2 = shared._line_seed_px
+                d1, d2, d3, d4 = shared.line_default_px
         return jsonify(
             {
                 "mode": mode,
@@ -1167,21 +1783,43 @@ def create_app(shared: SharedState) -> Flask:
         reset_counters = bool(data.get("reset_counters", False))
         with shared.lock:
             shared.count_mode = "line"
-            shared.line_live = (x1, y1, x2, y2)
+            iw, ih = shared.inference_frame_w, shared.inference_frame_h
+            if iw > 0 and ih > 0:
+                shared.line_frac = pixels_to_frac(x1, y1, x2, y2, iw, ih)
+            else:
+                shared.line_frac = None
+            shared._line_seed_px = (x1, y1, x2, y2)
             if reset_counters:
                 reset_entry_exit_counters(shared)
-        return jsonify({"ok": True, "line": {"x1": x1, "y1": y1, "x2": x2, "y2": y2}})
+        if iw > 0 and ih > 0:
+            ox1, oy1, ox2, oy2 = line_pixels_for_frame(shared, iw, ih)
+        else:
+            ox1, oy1, ox2, oy2 = x1, y1, x2, y2
+        return jsonify(
+            {
+                "ok": True,
+                "line": {"x1": ox1, "y1": oy1, "x2": ox2, "y2": oy2},
+            }
+        )
 
     @app.post("/api/line/reset")
     def reset_line() -> Response:
         data = request.get_json(silent=True) or {}
         reset_counters = bool(data.get("reset_counters", False))
         with shared.lock:
-            shared.line_live = shared.line_default
+            iw, ih = shared.inference_frame_w, shared.inference_frame_h
+            if shared.default_line_frac is not None:
+                shared.line_frac = shared.default_line_frac
+            else:
+                shared.line_frac = None
+            shared._line_seed_px = shared.line_default_px
             if reset_counters:
                 reset_entry_exit_counters(shared)
-        with shared.lock:
-            x1, y1, x2, y2 = shared.line_live
+        if iw > 0 and ih > 0:
+            x1, y1, x2, y2 = line_pixels_for_frame(shared, iw, ih)
+        else:
+            with shared.lock:
+                x1, y1, x2, y2 = shared._line_seed_px
         return jsonify({"ok": True, "line": {"x1": x1, "y1": y1, "x2": x2, "y2": y2}})
 
     @app.post("/api/polygon")
@@ -1243,6 +1881,7 @@ def create_app(shared: SharedState) -> Flask:
     @app.get("/api/stats")
     def stats() -> Response:
         with shared.lock:
+            iw, ih = shared.inference_frame_w, shared.inference_frame_h
             payload = {
                 "entries": shared.counter.entries,
                 "exits": shared.counter.exits,
@@ -1252,6 +1891,10 @@ def create_app(shared: SharedState) -> Flask:
                 "sex_female_agg": shared.sex_agg.female,
                 "sex_male_agg": shared.sex_agg.male,
                 "sex_unknown_agg": shared.sex_agg.unknown,
+                "inference_playing": shared.inference_playing,
+                "inference_size": (
+                    {"w": iw, "h": ih} if iw > 0 and ih > 0 else None
+                ),
             }
         return jsonify(payload)
 
