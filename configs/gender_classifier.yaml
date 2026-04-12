@@ -1,0 +1,16 @@
+# Classificador de sexo (YOLO task=classify) — referencia do projeto.
+# O dashboard usa o ficheiro .pt via YOLO_SEX_MODEL no .env (ver .env.example).
+
+dataset:
+  name: gender-classifierv1
+  ndjson_export: gender-classifierv1.ndjson
+  platform_url: https://platform.ultralytics.com/amaro-neto/datasets/gender-classifierv1
+  task: classify
+  classes:
+    0: Female
+    1: Male
+
+weights:
+  # Nome do experimento na Ultralytics Platform; exportar o .pt e colocar em weights/gender-classifier/
+  experiment: classification-exp-4
+  path: weights/gender-classifier/classification-exp-4.pt

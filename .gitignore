@@ -7,3 +7,4 @@ __pycache__/
 outputs/
 data/gender_classify_7k_view/
 /*.pt
+weights/**/*.pt
