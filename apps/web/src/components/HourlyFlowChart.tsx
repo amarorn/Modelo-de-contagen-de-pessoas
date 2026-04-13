@@ -17,7 +17,7 @@ export function HourlyFlowChart({ hourlyEntries, hourlyExits, peakHour }: Props)
       type: "bar",
       background: "transparent",
       toolbar: { show: false },
-      animations: { enabled: true, easing: "easeinout", speed: 400 },
+      animations: { enabled: true, speed: 400 },
     },
     theme: { mode: "dark" },
     colors: ["#00D4FF", "#EF4444"],
@@ -56,7 +56,6 @@ export function HourlyFlowChart({ hourlyEntries, hourlyExits, peakHour }: Props)
     },
     tooltip: {
       theme: "dark",
-      x: { formatter: (_, { dataPointIndex }) => `${HOURS[dataPointIndex]}` },
     },
     annotations: {
       xaxis:
