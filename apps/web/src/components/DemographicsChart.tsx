@@ -25,7 +25,7 @@ function DonutCard({
     chart: {
       type: "donut",
       background: "transparent",
-      animations: { enabled: true, easing: "easeinout", speed: 400 },
+      animations: { enabled: true, speed: 400 },
     },
     theme: { mode: "dark" },
     colors,

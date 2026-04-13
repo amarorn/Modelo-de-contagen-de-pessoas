@@ -28,7 +28,7 @@ export function OccupancyGauge({
     chart: {
       type: "radialBar",
       background: "transparent",
-      animations: { enabled: true, easing: "easeinout", speed: 600 },
+      animations: { enabled: true, speed: 600 },
     },
     theme: { mode: "dark" },
     colors: [color],
