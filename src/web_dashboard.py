@@ -33,6 +33,7 @@ import cv2
 import numpy as np
 import torch
 from flask import Flask, Response, jsonify, request
+from flask_cors import CORS
 from ultralytics import YOLO
 
 from device_utils import resolve_device
@@ -1395,6 +1396,7 @@ _ROI_PAGE_HTML = """
 
 def create_app(shared: SharedState) -> Flask:
     app = Flask(__name__)
+    CORS(app, resources={r"/api/*": {"origins": "*"}, r"/video_feed": {"origins": "*"}})
 
     @app.get("/roi")
     def roi_page() -> str:

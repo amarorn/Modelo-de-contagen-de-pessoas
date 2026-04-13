@@ -1,0 +1,12 @@
+{
+  "name": "modelo-contagem-pessoas",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Monorepo: people counting system with real-time dashboard",
+  "scripts": {
+    "dev": "pnpm --filter @contagem/web dev",
+    "build": "pnpm --filter @contagem/web build",
+    "preview": "pnpm --filter @contagem/web preview",
+    "lint": "pnpm --filter @contagem/web lint"
+  }
+}
