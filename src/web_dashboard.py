@@ -40,19 +40,45 @@ from age_classifier_agg import AgeAggregateStats, OptionalAgeClassifier
 from sex_classifier_agg import OptionalSexClassifier, SexAggregateStats
 
 
-def _check_tcp_port_available(host: str, port: int) -> None:
-    """Falha antes de abrir stream/GPU se a porta HTTP estiver ocupada."""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind((host, port))
-    except OSError as exc:
-        print(
-            f"[web] ERRO: {host}:{port} indisponivel ({exc}). "
-            "Pare a outra instancia do dashboard ou use outra porta, ex.: WEB_PORT=8081 ./scripts/run_web.sh ...",
-            file=sys.stderr,
-        )
-        raise SystemExit(1) from exc
+def _resolve_listen_port(host: str, preferred: int) -> int:
+    """Escolhe uma porta livre: `preferred` ou a primeira seguinte (ate +31).
+
+    Defina WEB_PORT_STRICT=1 para exigir exactamente `preferred` e falhar se estiver ocupada.
+    """
+    strict = os.environ.get("WEB_PORT_STRICT", "").strip() == "1"
+
+    def try_bind(p: int) -> bool:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind((host, p))
+        except OSError:
+            return False
+        return True
+
+    if strict:
+        if not try_bind(preferred):
+            print(
+                f"[web] ERRO: {host}:{preferred} indisponivel (WEB_PORT_STRICT=1). "
+                "Pare a outra instancia ou use WEB_PORT=8081.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        return preferred
+
+    for port in range(preferred, preferred + 32):
+        if try_bind(port):
+            if port != preferred:
+                print(
+                    f"[web] Porta {preferred} ocupada; a servir em http://{host}:{port}/",
+                    flush=True,
+                )
+            return port
+    print(
+        f"[web] ERRO: nenhuma porta livre entre {preferred} e {preferred + 31} em {host}.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 
 
 def _configure_runtime_logging() -> None:
@@ -1674,7 +1700,7 @@ def create_app(shared: SharedState) -> Flask:
 def main() -> None:
     _configure_runtime_logging()
     args = parse_args()
-    _check_tcp_port_available(args.host, args.port)
+    args.port = _resolve_listen_port(args.host, args.port)
     line_init = tuple(int(v) for v in args.line.split(","))
     shared = SharedState(line_default=line_init)
     stop_event = threading.Event()
