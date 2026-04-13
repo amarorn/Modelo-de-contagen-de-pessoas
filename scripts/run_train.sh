@@ -43,8 +43,15 @@ CLOSE_MOSAIC="${YOLO_CLOSE_MOSAIC:-10}"
 # Se nao vier nome de experimento explicito, usa os campos da plataforma quando existirem.
 PROJECT="${YOLO_PROJECT:-${ULTRALYTICS_PLATFORM_PROJECT:-runs/people_count}}"
 NAME="${YOLO_EXPERIMENT_NAME:-${ULTRALYTICS_PLATFORM_NAME:-yolov8m-door-counter}}"
+# Treinar so classes indicadas (indices no YAML do dataset), ex.: YOLO_CLASSES=6 ou 0 (COCO person=0)
+YOLO_CLASSES="${YOLO_CLASSES:-}"
 
 python3 -m pip install -r requirements.txt
+
+EXTRA=()
+if [ -n "${YOLO_CLASSES}" ]; then
+  EXTRA+=(--classes "${YOLO_CLASSES}")
+fi
 
 python3 src/train_ultralytics.py \
   --model "${MODEL}" \
@@ -57,4 +64,5 @@ python3 src/train_ultralytics.py \
   --patience "${PATIENCE}" \
   --close-mosaic "${CLOSE_MOSAIC}" \
   --project "${PROJECT}" \
-  --name "${NAME}"
+  --name "${NAME}" \
+  "${EXTRA[@]}"

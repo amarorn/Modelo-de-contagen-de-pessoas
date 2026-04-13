@@ -1,0 +1,11 @@
+# ByteTrack com track_buffer curto: overlays desaparecem mais depressa em live/HLS.
+# Uso: --tracker configs/bytetrack_live.yaml
+# Base: ultralytics/cfg/trackers/bytetrack.yaml
+
+tracker_type: bytetrack
+track_high_thresh: 0.22
+track_low_thresh: 0.08
+new_track_thresh: 0.22
+track_buffer: 15
+match_thresh: 0.75
+fuse_score: true

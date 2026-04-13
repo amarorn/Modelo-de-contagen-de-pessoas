@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
-"""Treino de detector de pessoas com Ultralytics YOLO.
+"""Treino de detector de pessoas com Ultralytics YOLO (YOLOv8, YOLO11, RT-DETR, etc.).
 
 Uso rapido:
   python src/train_ultralytics.py --data configs/dataset.yaml --model yolov8m.pt
+
+YOLO11 ou RT-DETR (mesma API YOLO()):
+  python src/train_ultralytics.py --model yolo11m.pt --data coco.yaml
+  python src/train_ultralytics.py --model rtdetr-l.pt --data coco.yaml
+
+Treinar so com classes escolhidas do dataset (ex.: so indice 6 — ver indices no YAML do data):
+  python src/train_ultralytics.py --data coco.yaml --classes 6
+  # COCO 80 classes: person=0, nao 6. Use o indice que o teu dataset/HUB define para "person".
 
 Com HUB token (opcional):
   ULTRALYTICS_HUB_API_KEY=... python src/train_ultralytics.py ...
@@ -51,8 +59,15 @@ def expand_project_dataset_yaml(data_arg: str) -> tuple[str, Path | None]:
     """
     data_path = Path(data_arg).resolve()
     try:
-        data_path.relative_to(REPO_ROOT)
+        rel_in_repo = data_path.relative_to(REPO_ROOT)
     except ValueError:
+        return str(data_arg), None
+    # Com venv dentro do repo, ultralytics/cfg/datasets/*.yaml fica sob .venv/.../site-packages:
+    # nao e dataset do projeto; nao reescrever path para REPO_ROOT/<nome>.
+    _parts = rel_in_repo.parts
+    if _parts and _parts[0] == ".venv":
+        return str(data_arg), None
+    if "site-packages" in _parts:
         return str(data_arg), None
     if data_path.suffix not in {".yaml", ".yml"} or not data_path.is_file():
         return str(data_arg), None
@@ -124,9 +139,26 @@ def check_project_det_dataset_layout(tmp_yaml: Path | None) -> None:
         sys.exit(1)
 
 
+def parse_train_classes(arg: str | None) -> list[int] | None:
+    """Converte '6' ou '0,1' em lista de indices de classe; None = todas as classes."""
+    if arg is None or not str(arg).strip():
+        return None
+    out: list[int] = []
+    for part in str(arg).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        out.append(int(part))
+    return out or None
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Treino YOLO para contagem de pessoas")
-    parser.add_argument("--model", default="yolov8m.pt", help="Checkpoint/base model")
+    parser.add_argument(
+        "--model",
+        default="yolov8m.pt",
+        help="Checkpoint/base: yolov8m.pt, yolo11m.pt, rtdetr-l.pt, rtdetr-x.pt, ...",
+    )
     parser.add_argument("--data", default="configs/dataset.yaml", help="Dataset YAML")
     parser.add_argument("--epochs", type=int, default=120)
     parser.add_argument("--imgsz", type=int, default=640)
@@ -139,6 +171,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cos-lr", action="store_true", help="Habilita scheduler coseno")
     parser.add_argument("--close-mosaic", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--classes",
+        default=None,
+        metavar="IDS",
+        help=(
+            "Indices de classe no dataset (separados por virgula) para treinar so essas classes. "
+            "Ex.: --classes 6 ou --classes 0 (COCO 80: person e 0, nao 6). "
+            "Omissao = todas as classes do YAML."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -205,6 +247,10 @@ def main() -> None:
     print("[train] Carregando modelo:", args.model)
     model = YOLO(args.model)
 
+    cls_filter = parse_train_classes(args.classes)
+    if cls_filter is not None:
+        print("[train] Filtrar classes (indices no data YAML):", cls_filter)
+
     print(f"[train] Iniciando treinamento no device={resolved_device}...")
     train_kwargs = dict(
         data=resolved_data,
@@ -223,6 +269,8 @@ def main() -> None:
         cache=False,
         verbose=True,
     )
+    if cls_filter is not None:
+        train_kwargs["classes"] = cls_filter
 
     try:
         try:

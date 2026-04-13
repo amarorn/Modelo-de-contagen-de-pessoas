@@ -7,6 +7,7 @@ passa-os como `--sex-model` e `--sex-abstain`. `YOLO_SEX_MODEL` e o caminho no
 disco para um unico ficheiro de pesos Ultralytics `task=classify` (ex. treino com
 `yolo classify`, classes nomeadas female/male ou mulher/homem). Ver
 `sex_classifier_agg.OptionalSexClassifier` e docs/04_privacidade_etica.md.
+Faixa etaria agregada (opcional): `YOLO_AGE_MODEL` / `--age-model` com `age_classifier_agg.OptionalAgeClassifier`.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+from collections import deque
 import os
 import socket
 import sys
@@ -34,6 +36,7 @@ from flask import Flask, Response, jsonify, request
 from ultralytics import YOLO
 
 from device_utils import resolve_device
+from age_classifier_agg import AgeAggregateStats, OptionalAgeClassifier
 from sex_classifier_agg import OptionalSexClassifier, SexAggregateStats
 
 
@@ -83,13 +86,44 @@ class CounterState:
 def reset_entry_exit_counters(shared: SharedState) -> None:
     shared.counter = CounterState()
     shared.sex_agg = SexAggregateStats()
+    shared.age_agg = AgeAggregateStats()
+    shared.hourly_entries = [0] * 24
+    shared.hourly_exits = [0] * 24
+
+
+def _hour_now() -> int:
+    return datetime.now().hour % 24
+
+
+def _bump_hourly(shared: SharedState, kind: str) -> None:
+    h = _hour_now()
+    if kind == "entry":
+        shared.hourly_entries[h] += 1
+    elif kind == "exit":
+        shared.hourly_exits[h] += 1
+
+
+def _peak_hour_stats(shared: SharedState) -> tuple[int, int]:
+    """Indice 0-23 com maior (entradas+saidas); fluxo nessa hora."""
+    best_h = 0
+    best_v = -1
+    for h in range(24):
+        v = shared.hourly_entries[h] + shared.hourly_exits[h]
+        if v > best_v:
+            best_v = v
+            best_h = h
+    return best_h, max(0, best_v)
 
 
 class SharedState:
     def __init__(self, line_default: tuple[int, int, int, int]) -> None:
         self.counter = CounterState()
         self.sex_agg = SexAggregateStats()
+        self.age_agg = AgeAggregateStats()
+        self.hourly_entries: list[int] = [0] * 24
+        self.hourly_exits: list[int] = [0] * 24
         self.sex_classifier_enabled: bool = False
+        self.age_classifier_enabled: bool = False
         self.started_at = datetime.now()
         self.last_frame_jpeg: bytes | None = None
         self.last_error: str | None = None
@@ -314,6 +348,12 @@ def parse_args() -> argparse.Namespace:
         help="Manter a ultima caixa N frames sem deteccao (reduz piscar; 0 = so frame atual)",
     )
     p.add_argument(
+        "--trail-len",
+        type=int,
+        default=72,
+        help="Historico de posicoes dos pes por pessoa para desenhar o trajeto; 0 desliga.",
+    )
+    p.add_argument(
         "--no-shape-filter",
         action="store_true",
         help="Desliga filtro de forma (postes/placas/caixas enormes podem ser contados como pessoa)",
@@ -357,6 +397,50 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.65,
         help="Confianca minima do top-1 (YOLO_SEX_ABSTAIN no .env); abaixo conta como unknown.",
+    )
+    p.add_argument(
+        "--age-model",
+        default=None,
+        help=(
+            "Caminho para um .pt YOLO classify com faixas etarias (nome das classes: "
+            "crianca/child, adolescent/teen, young/jovem, adult, elderly/senior/idoso). "
+            "Em .env: YOLO_AGE_MODEL=... Estatistica agregada na entrada."
+        ),
+    )
+    p.add_argument(
+        "--age-abstain",
+        type=float,
+        default=0.55,
+        help="Confianca minima do top-1 (YOLO_AGE_ABSTAIN); abaixo conta como unknown.",
+    )
+    p.add_argument(
+        "--no-heading-arrow",
+        action="store_true",
+        help="Nao desenhar seta de direcao prevista (PCA sobre o historico do trajeto).",
+    )
+    p.add_argument(
+        "--heading-min-points",
+        type=int,
+        default=5,
+        help="Minimo de pontos no rastro para estimar direcao.",
+    )
+    p.add_argument(
+        "--heading-arrow-len",
+        type=int,
+        default=72,
+        help="Comprimento em pixels da seta de tendencia.",
+    )
+    p.add_argument(
+        "--heading-min-anisotropy",
+        type=float,
+        default=0.12,
+        help="Limiar de anisotropia PCA (0=circular, 1=linha); abaixo usa direcao liquida.",
+    )
+    p.add_argument(
+        "--heading-min-speed",
+        type=float,
+        default=0.05,
+        help="Comprimento medio minimo por segmento do rastro (px/frame).",
     )
     return p.parse_args()
 
@@ -450,6 +534,80 @@ def filter_boxes_by_shape(
     return out_ids, out_xy
 
 
+def predict_trail_heading_pca(
+    pts: list[tuple[int, int]],
+    *,
+    max_points: int = 28,
+    min_points: int = 5,
+    min_anisotropy: float = 0.12,
+    min_speed: float = 0.05,
+) -> tuple[float, float, float] | None:
+    """Tendencia de movimento a partir do rastro: PCA 2D; fallback se o trajeto for curvo.
+
+    Velocidade usa o comprimento medio dos segmentos (|Delta p| por frame), nunca a media
+    dos Delta x/y separados (isso anula-se em ziguezague). Sentido PCA alinha-se ao
+    deslocamento liquido (primeiro->ultimo) ou ao ultimo segmento se o liquido for quase nulo.
+
+    Retorna (ux, uy, confianca). None se o movimento for fraco.
+    """
+    if len(pts) < min_points:
+        return None
+    seg = pts[-max_points:]
+    xs_o = np.array([p[0] for p in seg], dtype=np.float64)
+    ys_o = np.array([p[1] for p in seg], dtype=np.float64)
+    if len(xs_o) < min_points:
+        return None
+    dx = np.diff(xs_o)
+    dy = np.diff(ys_o)
+    seg_len = np.hypot(dx, dy)
+    positive = seg_len[seg_len > 1e-6]
+    if positive.size == 0:
+        return None
+    speed = float(np.mean(positive))
+    if speed < min_speed:
+        return None
+
+    def _align_sign(ux: float, uy: float) -> tuple[float, float]:
+        gx = float(xs_o[-1] - xs_o[0])
+        gy = float(ys_o[-1] - ys_o[0])
+        if np.hypot(gx, gy) < 0.5:
+            gx = float(xs_o[-1] - xs_o[-2])
+            gy = float(ys_o[-1] - ys_o[-2])
+        if ux * gx + uy * gy < 0:
+            return -ux, -uy
+        return ux, uy
+
+    xs = xs_o - xs_o.mean()
+    ys = ys_o - ys_o.mean()
+    cov = np.cov(np.stack([xs, ys], axis=0))
+    evals, evecs = np.linalg.eigh(cov)
+    e0, e1 = float(evals[0]), float(evals[1])
+    trace = e1 + e0 + 1e-9
+    anisotropy = (e1 - e0) / trace
+
+    if anisotropy >= min_anisotropy and trace > 1e-8:
+        vx = float(evecs[0, -1])
+        vy = float(evecs[1, -1])
+        h = float(np.hypot(vx, vy))
+        if h > 1e-9:
+            ux, uy = vx / h, vy / h
+            ux, uy = _align_sign(ux, uy)
+            conf = float(np.clip(anisotropy, 0.0, 1.0))
+            return ux, uy, conf
+
+    gx = float(xs_o[-1] - xs_o[0])
+    gy = float(ys_o[-1] - ys_o[0])
+    gn = float(np.hypot(gx, gy))
+    if gn < 1e-3 and len(xs_o) >= 2:
+        gx = float(xs_o[-1] - xs_o[-2])
+        gy = float(ys_o[-1] - ys_o[-2])
+        gn = float(np.hypot(gx, gy))
+    if gn < 1e-6:
+        return None
+    ux, uy = gx / gn, gy / gn
+    return ux, uy, 0.35
+
+
 def resolve_person_class_id(model: YOLO, forced_id: int | None) -> int:
     if forced_id is not None:
         return forced_id
@@ -487,11 +645,21 @@ def write_summary_csv(
     state: CounterState,
     started_at: datetime,
     sex: SexAggregateStats | None = None,
+    age: AgeAggregateStats | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fields = ["started_at", "finished_at", "entries", "exits", "total_passages"]
     if sex is not None:
         fields += ["sex_female_agg", "sex_male_agg", "sex_unknown_agg"]
+    if age is not None:
+        fields += [
+            "age_child_agg",
+            "age_adolescent_agg",
+            "age_young_agg",
+            "age_adult_agg",
+            "age_elderly_agg",
+            "age_unknown_agg",
+        ]
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
@@ -506,6 +674,13 @@ def write_summary_csv(
             row["sex_female_agg"] = sex.female
             row["sex_male_agg"] = sex.male
             row["sex_unknown_agg"] = sex.unknown
+        if age is not None:
+            row["age_child_agg"] = age.child
+            row["age_adolescent_agg"] = age.adolescent
+            row["age_young_agg"] = age.young
+            row["age_adult_agg"] = age.adult
+            row["age_elderly_agg"] = age.elderly
+            row["age_unknown_agg"] = age.unknown
         writer.writerow(row)
 
 
@@ -569,6 +744,23 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
             else:
                 print("[web] AVISO: --sex-model nao ativo (ficheiro inexistente ou nao e YOLO classify)")
 
+        age_clf: OptionalAgeClassifier | None = None
+        if args.age_model:
+            try:
+                age_clf = OptionalAgeClassifier(args.age_model, resolved_device, args.age_abstain)
+            except Exception as exc:
+                print(f"[web] ERRO ao carregar --age-model: {exc}")
+                age_clf = None
+            with shared.lock:
+                shared.age_classifier_enabled = bool(age_clf and age_clf.enabled)
+            if age_clf and age_clf.enabled:
+                print(
+                    f"[web] Estatistica agregada por faixa etaria na entrada (abstain>={args.age_abstain}). "
+                    "Classes: nomeie o modelo com child/teen/young/adult/elderly ou equivalentes PT."
+                )
+            else:
+                print("[web] AVISO: --age-model nao ativo (ficheiro inexistente ou nao e YOLO classify)")
+
         last_side_by_id: dict[int, float] = {}
         prev_inside_by_id: dict[int, bool] = {}
         prev_config_sig: str | None = None
@@ -590,7 +782,8 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
         box_overlay = TrackBoxOverlay(args.track_ema, args.track_hold_frames)
         print(
             f"[web] tracker={tracker_yaml} track_ema={args.track_ema} "
-            f"track_hold_frames={args.track_hold_frames}"
+            f"track_hold_frames={args.track_hold_frames} trail_len={args.trail_len} "
+            f"heading_arrow={not args.no_heading_arrow}"
         )
         if args.no_shape_filter:
             print("[web] Filtro de forma desligado (--no-shape-filter)")
@@ -623,6 +816,9 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
             track_kw["agnostic_nms"] = True
 
         stream = model.track(**track_kw)
+        foot_trail_by_id: dict[int, deque[tuple[int, int]]] = {}
+        trail_max = max(0, int(args.trail_len))
+        show_heading_arrow = (not args.no_heading_arrow) and trail_max >= 2
 
         for result in stream:
             if stop_event.is_set():
@@ -641,6 +837,7 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
             if prev_config_sig is not None and cfg_sig != prev_config_sig:
                 last_side_by_id.clear()
                 prev_inside_by_id.clear()
+                foot_trail_by_id.clear()
             prev_config_sig = cfg_sig
 
             x1, y1, x2, y2 = clamp_line(*raw_line, fw, fh)
@@ -700,9 +897,11 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                             prev_b = prev_inside_by_id.get(track_id)
                             if prev_b is not None and not prev_b and inside:
                                 shared.counter.entries += 1
+                                _bump_hourly(shared, "entry")
                                 entry_boxes.append((x_min, y_min, x_max, y_max))
                             elif prev_b is not None and prev_b and not inside:
                                 shared.counter.exits += 1
+                                _bump_hourly(shared, "exit")
                         prev_inside_by_id[track_id] = inside
                     elif count_mode == "line":
                         side = side_of_line(foot_x, foot_y, x1, y1, x2, y2)
@@ -710,35 +909,98 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                             prev = last_side_by_id.get(track_id)
                             if prev is not None and prev < 0 <= side:
                                 shared.counter.entries += 1
+                                _bump_hourly(shared, "entry")
                                 entry_boxes.append((x_min, y_min, x_max, y_max))
                             elif prev is not None and prev > 0 >= side:
                                 shared.counter.exits += 1
+                                _bump_hourly(shared, "exit")
                         last_side_by_id[track_id] = side
 
-                if sex_clf and sex_clf.enabled and entry_boxes and result.orig_img is not None:
+                if entry_boxes and result.orig_img is not None:
                     for box in entry_boxes:
-                        bucket = sex_clf.classify_crop(result.orig_img, box)
-                        with shared.lock:
-                            if bucket == "female":
-                                shared.sex_agg.female += 1
-                            elif bucket == "male":
-                                shared.sex_agg.male += 1
-                            else:
-                                shared.sex_agg.unknown += 1
+                        if sex_clf and sex_clf.enabled:
+                            bucket = sex_clf.classify_crop(result.orig_img, box)
+                            with shared.lock:
+                                if bucket == "female":
+                                    shared.sex_agg.female += 1
+                                elif bucket == "male":
+                                    shared.sex_agg.male += 1
+                                else:
+                                    shared.sex_agg.unknown += 1
+                        if age_clf and age_clf.enabled:
+                            ab = age_clf.classify_crop(result.orig_img, box)
+                            with shared.lock:
+                                if ab == "child":
+                                    shared.age_agg.child += 1
+                                elif ab == "adolescent":
+                                    shared.age_agg.adolescent += 1
+                                elif ab == "young":
+                                    shared.age_agg.young += 1
+                                elif ab == "adult":
+                                    shared.age_agg.adult += 1
+                                elif ab == "elderly":
+                                    shared.age_agg.elderly += 1
+                                else:
+                                    shared.age_agg.unknown += 1
 
             draw_items = box_overlay.step(ids_list, xys_raw)
             active_ids = {t for t, _, _ in draw_items}
+            raw_foot_by_id: dict[int, tuple[int, int]] = {}
+            if ids_list is not None and xys_raw is not None and len(ids_list) == len(xys_raw):
+                for tid, (rx1, ry1, rx2, ry2) in zip(ids_list, xys_raw):
+                    raw_foot_by_id[int(tid)] = (
+                        int(round((rx1 + rx2) / 2.0)),
+                        int(round(float(ry2))),
+                    )
             for tid in list(last_side_by_id.keys()):
                 if tid not in active_ids:
                     del last_side_by_id[tid]
             for tid in list(prev_inside_by_id.keys()):
                 if tid not in active_ids:
                     del prev_inside_by_id[tid]
+            for tid in list(foot_trail_by_id.keys()):
+                if tid not in active_ids:
+                    del foot_trail_by_id[tid]
 
             for track_id, (xa, ya, xb, yb), stale in draw_items:
-                color = (0, 200, 100) if stale else (0, 255, 0)
+                if track_id in raw_foot_by_id:
+                    fcx, fcy = raw_foot_by_id[track_id]
+                else:
+                    fcx = int(round((xa + xb) / 2.0))
+                    fcy = int(yb)
+                side_v = last_side_by_id.get(track_id) if count_mode == "line" else None
+                if count_mode == "line" and side_v is not None:
+                    if side_v < 0:
+                        color = (60, 100, 200) if stale else (80, 140, 255)
+                        side_tag = "A"
+                    elif side_v > 0:
+                        color = (50, 160, 50) if stale else (70, 210, 70)
+                        side_tag = "B"
+                    else:
+                        color = (140, 140, 140) if stale else (180, 180, 180)
+                        side_tag = "|"
+                    label = f"id={track_id} {side_tag}" + (" ~" if stale else "")
+                else:
+                    color = (0, 200, 100) if stale else (0, 255, 0)
+                    label = f"id={track_id}" + (" ~" if stale else "")
+                if trail_max >= 2:
+                    dq = foot_trail_by_id.get(track_id)
+                    if dq is None:
+                        dq = deque(maxlen=trail_max)
+                        foot_trail_by_id[track_id] = dq
+                    if not dq or dq[-1] != (fcx, fcy):
+                        dq.append((fcx, fcy))
+                    if len(dq) >= 2:
+                        pts = np.array(list(dq), dtype=np.int32).reshape((-1, 1, 2))
+                        cv2.polylines(
+                            frame,
+                            [pts],
+                            isClosed=False,
+                            color=color,
+                            thickness=3,
+                            lineType=cv2.LINE_AA,
+                        )
                 cv2.rectangle(frame, (xa, ya), (xb, yb), color, 2)
-                label = f"id={track_id}" + (" ~" if stale else "")
                 cv2.putText(
                     frame,
                     label,
@@ -748,6 +1010,50 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                     color,
                     1,
                 )
+                if trail_max >= 2 and show_heading_arrow:
+                    dq = foot_trail_by_id.get(track_id)
+                    if dq is not None and len(dq) >= args.heading_min_points:
+                        hdg = predict_trail_heading_pca(
+                            list(dq),
+                            max_points=min(trail_max, 28),
+                            min_points=args.heading_min_points,
+                            min_anisotropy=args.heading_min_anisotropy,
+                            min_speed=args.heading_min_speed,
+                        )
+                        if hdg is not None:
+                            ux, uy, _conf = hdg
+                            L = max(24, int(args.heading_arrow_len))
+                            box_h = max(1, int(yb - ya))
+                            acx = int(round((xa + xb) / 2.0))
+                            off = max(8, min(28, box_h // 4))
+                            acy = int(np.clip(ya + off, ya + 1, max(ya + 1, yb - 2)))
+                            tx = int(round(acx + ux * L))
+                            ty = int(round(acy + uy * L))
+                            tx = int(np.clip(tx, 0, fw - 1))
+                            ty = int(np.clip(ty, 0, fh - 1))
+                            p0 = (acx, acy)
+                            p1 = (tx, ty)
+                            if (tx - acx) ** 2 + (ty - acy) ** 2 >= 16:
+                                cv2.arrowedLine(
+                                    frame,
+                                    p0,
+                                    p1,
+                                    (0, 0, 0),
+                                    5,
+                                    lineType=cv2.LINE_AA,
+                                    tipLength=0.28,
+                                )
+                                cv2.arrowedLine(
+                                    frame,
+                                    p0,
+                                    p1,
+                                    (255, 255, 255),
+                                    3,
+                                    lineType=cv2.LINE_AA,
+                                    tipLength=0.28,
+                                )
+                                cv2.circle(frame, p1, 5, (0, 0, 0), -1, lineType=cv2.LINE_AA)
+                                cv2.circle(frame, p1, 4, (255, 255, 255), -1, lineType=cv2.LINE_AA)
 
             with shared.lock:
                 text = f"in={shared.counter.entries} out={shared.counter.exits} total={shared.counter.total}"
@@ -778,6 +1084,15 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
             else:
                 cv2.line(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
                 cv2.putText(frame, text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+                cv2.putText(
+                    frame,
+                    "A/B=lados | linha= trajeto | seta (topo bbox)= tendencia (PCA)",
+                    (20, fh - 24),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (200, 200, 200),
+                    1,
+                )
 
             ok, encoded = cv2.imencode(".jpg", frame)
             if ok:
@@ -979,12 +1294,33 @@ def create_app(shared: SharedState) -> Flask:
       <div class="card">Saidas: <b id="exits">0</b></div>
       <div class="card">Total: <b id="total">0</b></div>
     </div>
+    <div class="row" style="flex-wrap:wrap;gap:8px;align-items:baseline;">
+      <strong>Horario de pico (maior fluxo):</strong>
+      <span id="peakHour">—</span>
+    </div>
+    <div style="font-size:12px;max-width:900px;margin:8px 0 16px 0;overflow-x:auto;">
+      <table id="hourlyTable" style="border-collapse:collapse;width:100%;min-width:640px;">
+        <thead><tr id="hourlyHead"></tr></thead>
+        <tbody><tr id="hourlyIn"></tr><tr id="hourlyOut"></tr><tr id="hourlySum"></tr></tbody>
+      </table>
+    </div>
     <div id="sexPanel" style="display:none;margin:12px 0;padding:12px;background:#1a1a2e;border-radius:8px;font-size:14px;max-width:520px;">
       <p style="color:#9cf;margin:0 0 8px 0;">Entradas por classe (agregado; abstencao se confianca baixa). Ver docs/04_privacidade_etica.md.</p>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">
         <span>F: <b id="sexF">0</b></span>
         <span>M: <b id="sexM">0</b></span>
         <span>Incerto: <b id="sexU">0</b></span>
+      </div>
+    </div>
+    <div id="agePanel" style="display:none;margin:12px 0;padding:12px;background:#1a2e1a;border-radius:8px;font-size:14px;max-width:720px;">
+      <p style="color:#9f9;margin:0 0 8px 0;">Entradas por faixa etaria (agregado; requer YOLO_AGE_MODEL e classes nomeadas no .pt).</p>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">
+        <span>Crianca: <b id="ageChild">0</b></span>
+        <span>Adolescente: <b id="ageAdolescent">0</b></span>
+        <span>Jovem: <b id="ageYoung">0</b></span>
+        <span>Adulto: <b id="ageAdult">0</b></span>
+        <span>Idoso: <b id="ageElderly">0</b></span>
+        <span>Incerto: <b id="ageUnknown">0</b></span>
       </div>
     </div>
     <div class="row">
@@ -1088,6 +1424,25 @@ def create_app(shared: SharedState) -> Flask:
           document.getElementById('calibStatus').textContent = 'Erro: ' + e;
         }
       });
+      function buildHourlyTable(he, hx) {
+        const head = document.getElementById('hourlyHead');
+        const rin = document.getElementById('hourlyIn');
+        const rout = document.getElementById('hourlyOut');
+        const rsum = document.getElementById('hourlySum');
+        head.innerHTML = '<th style="text-align:left;padding:4px 6px;">Hora</th>';
+        rin.innerHTML = '<td style="padding:4px 6px;">Entr.</td>';
+        rout.innerHTML = '<td style="padding:4px 6px;">Saida</td>';
+        rsum.innerHTML = '<td style="padding:4px 6px;font-weight:bold;">Fluxo</td>';
+        for (let h = 0; h < 24; h++) {
+          const e = he[h] || 0;
+          const x = hx[h] || 0;
+          const s = e + x;
+          head.innerHTML += '<th style="padding:2px 4px;font-size:11px;">' + h + 'h</th>';
+          rin.innerHTML += '<td style="padding:2px 4px;text-align:center;">' + e + '</td>';
+          rout.innerHTML += '<td style="padding:2px 4px;text-align:center;">' + x + '</td>';
+          rsum.innerHTML += '<td style="padding:2px 4px;text-align:center;background:#222;">' + s + '</td>';
+        }
+      }
       async function refresh() {
         const r = await fetch('/api/stats');
         const j = await r.json();
@@ -1095,6 +1450,14 @@ def create_app(shared: SharedState) -> Flask:
         document.getElementById('exits').textContent = j.exits;
         document.getElementById('total').textContent = j.total_passages;
         document.getElementById('status').textContent = j.error ? ('Erro: ' + j.error) : 'Online';
+        const he = j.hourly_entries || [];
+        const hx = j.hourly_exits || [];
+        buildHourlyTable(he, hx);
+        const pf = j.peak_flow != null ? j.peak_flow : 0;
+        const ph = j.peak_hour != null ? j.peak_hour : 0;
+        document.getElementById('peakHour').textContent = pf > 0
+          ? (ph + 'h–' + (ph + 1) + 'h (' + pf + ' passagens no total nessa hora)')
+          : '— (ainda sem passagens nesta sessao)';
         const sp = document.getElementById('sexPanel');
         if (j.sex_classifier_enabled) {
           sp.style.display = 'block';
@@ -1103,6 +1466,18 @@ def create_app(shared: SharedState) -> Flask:
           document.getElementById('sexU').textContent = j.sex_unknown_agg;
         } else {
           sp.style.display = 'none';
+        }
+        const ap = document.getElementById('agePanel');
+        if (j.age_classifier_enabled) {
+          ap.style.display = 'block';
+          document.getElementById('ageChild').textContent = j.age_child_agg;
+          document.getElementById('ageAdolescent').textContent = j.age_adolescent_agg;
+          document.getElementById('ageYoung').textContent = j.age_young_agg;
+          document.getElementById('ageAdult').textContent = j.age_adult_agg;
+          document.getElementById('ageElderly').textContent = j.age_elderly_agg;
+          document.getElementById('ageUnknown').textContent = j.age_unknown_agg;
+        } else {
+          ap.style.display = 'none';
         }
       }
       async function exportCsv() {
@@ -1243,6 +1618,7 @@ def create_app(shared: SharedState) -> Flask:
     @app.get("/api/stats")
     def stats() -> Response:
         with shared.lock:
+            peak_h, peak_v = _peak_hour_stats(shared)
             payload = {
                 "entries": shared.counter.entries,
                 "exits": shared.counter.exits,
@@ -1252,6 +1628,17 @@ def create_app(shared: SharedState) -> Flask:
                 "sex_female_agg": shared.sex_agg.female,
                 "sex_male_agg": shared.sex_agg.male,
                 "sex_unknown_agg": shared.sex_agg.unknown,
+                "age_classifier_enabled": shared.age_classifier_enabled,
+                "age_child_agg": shared.age_agg.child,
+                "age_adolescent_agg": shared.age_agg.adolescent,
+                "age_young_agg": shared.age_agg.young,
+                "age_adult_agg": shared.age_agg.adult,
+                "age_elderly_agg": shared.age_agg.elderly,
+                "age_unknown_agg": shared.age_agg.unknown,
+                "hourly_entries": list(shared.hourly_entries),
+                "hourly_exits": list(shared.hourly_exits),
+                "peak_hour": peak_h,
+                "peak_flow": peak_v,
             }
         return jsonify(payload)
 
@@ -1261,7 +1648,8 @@ def create_app(shared: SharedState) -> Flask:
         csv_path = Path("outputs") / f"count_summary_web_{ts}.csv"
         with shared.lock:
             sex = shared.sex_agg if shared.sex_classifier_enabled else None
-            write_summary_csv(csv_path, shared.counter, shared.started_at, sex=sex)
+            age = shared.age_agg if shared.age_classifier_enabled else None
+            write_summary_csv(csv_path, shared.counter, shared.started_at, sex=sex, age=age)
         return jsonify({"csv_path": str(csv_path)})
 
     @app.get("/video_feed")
