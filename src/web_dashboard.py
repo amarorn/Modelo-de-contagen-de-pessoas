@@ -142,7 +142,11 @@ def _peak_hour_stats(shared: SharedState) -> tuple[int, int]:
 
 
 class SharedState:
-    def __init__(self, line_default: tuple[int, int, int, int]) -> None:
+    def __init__(
+        self,
+        line_default: tuple[int, int, int, int],
+        loitering_threshold_sec: float = 10.0,
+    ) -> None:
         self.counter = CounterState()
         self.sex_agg = SexAggregateStats()
         self.age_agg = AgeAggregateStats()
@@ -159,6 +163,13 @@ class SharedState:
         self.count_mode: str = "line"
         self.polygon_default: list[tuple[int, int]] = []
         self.polygon_live: list[tuple[int, int]] = []
+        self.occupancy_now: int = 0
+        self.moving_now: int = 0
+        self.stationary_now: int = 0
+        self.loitering_now: int = 0
+        self.avg_dwell_sec: float = 0.0
+        self.max_dwell_sec: float = 0.0
+        self.loitering_threshold_sec: float = max(0.0, float(loitering_threshold_sec))
 
 
 class HeatmapAccumulator:
@@ -468,6 +479,24 @@ def parse_args() -> argparse.Namespace:
         default=0.05,
         help="Comprimento medio minimo por segmento do rastro (px/frame).",
     )
+    p.add_argument(
+        "--stationary-min-points",
+        type=int,
+        default=6,
+        help="Minimo de pontos no rastro para classificar pessoa como parada/em movimento.",
+    )
+    p.add_argument(
+        "--stationary-max-speed",
+        type=float,
+        default=2.2,
+        help="Velocidade media maxima (px/frame) para considerar pessoa parada.",
+    )
+    p.add_argument(
+        "--loitering-seconds",
+        type=float,
+        default=10.0,
+        help="Segundos continuos parada para marcar permanencia prolongada.",
+    )
     return p.parse_args()
 
 
@@ -634,6 +663,27 @@ def predict_trail_heading_pca(
     return ux, uy, 0.35
 
 
+def estimate_trail_speed(
+    pts: list[tuple[int, int]],
+    *,
+    max_points: int = 12,
+) -> float | None:
+    """Velocidade media recente do rastro em px/frame."""
+    if len(pts) < 2:
+        return None
+    seg = pts[-max(2, max_points):]
+    if len(seg) < 2:
+        return None
+    xs = np.array([p[0] for p in seg], dtype=np.float64)
+    ys = np.array([p[1] for p in seg], dtype=np.float64)
+    dx = np.diff(xs)
+    dy = np.diff(ys)
+    seg_len = np.hypot(dx, dy)
+    if seg_len.size == 0:
+        return None
+    return float(np.mean(seg_len))
+
+
 def resolve_person_class_id(model: YOLO, forced_id: int | None) -> int:
     if forced_id is not None:
         return forced_id
@@ -790,6 +840,8 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
         last_side_by_id: dict[int, float] = {}
         prev_inside_by_id: dict[int, bool] = {}
         prev_config_sig: str | None = None
+        zone_entered_at_by_id: dict[int, float] = {}
+        stationary_since_by_id: dict[int, float] = {}
         heat: HeatmapAccumulator | None = None
         if not args.no_heatmap:
             heat = HeatmapAccumulator(
@@ -864,14 +916,18 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 last_side_by_id.clear()
                 prev_inside_by_id.clear()
                 foot_trail_by_id.clear()
+                zone_entered_at_by_id.clear()
+                stationary_since_by_id.clear()
             prev_config_sig = cfg_sig
 
             x1, y1, x2, y2 = clamp_line(*raw_line, fw, fh)
             poly_pts = clamp_polygon(poly_raw, fw, fh) if len(poly_raw) >= 3 else []
+            frame_ts = time.monotonic()
 
             entry_boxes: list[tuple[float, float, float, float]] = []
 
             foot_points: list[tuple[float, float]] = []
+            current_present_ids: set[int] = set()
 
             if result.boxes is not None and len(result.boxes) > 0:
                 xys = result.boxes.xyxy.tolist()
@@ -917,8 +973,14 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 for track_id, (x_min, y_min, x_max, y_max) in zip(ids_list, xys_raw):
                     foot_x = (x_min + x_max) / 2.0
                     foot_y = float(y_max)
+                    inside_for_presence = True
                     if count_mode == "polygon" and len(poly_pts) >= 3:
-                        inside = foot_inside_polygon(foot_x, foot_y, poly_pts)
+                        inside_for_presence = foot_inside_polygon(foot_x, foot_y, poly_pts)
+                    if inside_for_presence:
+                        current_present_ids.add(track_id)
+                        zone_entered_at_by_id.setdefault(track_id, frame_ts)
+                    if count_mode == "polygon" and len(poly_pts) >= 3:
+                        inside = inside_for_presence
                         with shared.lock:
                             prev_b = prev_inside_by_id.get(track_id)
                             if prev_b is not None and not prev_b and inside:
@@ -987,6 +1049,12 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
             for tid in list(foot_trail_by_id.keys()):
                 if tid not in active_ids:
                     del foot_trail_by_id[tid]
+            for tid in list(zone_entered_at_by_id.keys()):
+                if tid not in current_present_ids:
+                    del zone_entered_at_by_id[tid]
+            for tid in list(stationary_since_by_id.keys()):
+                if tid not in current_present_ids:
+                    del stationary_since_by_id[tid]
 
             for track_id, (xa, ya, xb, yb), stale in draw_items:
                 if track_id in raw_foot_by_id:
@@ -1081,8 +1149,46 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                                 cv2.circle(frame, p1, 5, (0, 0, 0), -1, lineType=cv2.LINE_AA)
                                 cv2.circle(frame, p1, 4, (255, 255, 255), -1, lineType=cv2.LINE_AA)
 
+            moving_now = 0
+            stationary_now = 0
+            loitering_now = 0
+            dwell_values: list[float] = []
+            trail_eval_max = max(2, min(trail_max, 12))
+            for tid in current_present_ids:
+                entered_at = zone_entered_at_by_id.get(tid, frame_ts)
+                dwell_values.append(max(0.0, frame_ts - entered_at))
+                dq = foot_trail_by_id.get(tid)
+                speed = estimate_trail_speed(list(dq), max_points=trail_eval_max) if dq is not None else None
+                is_stationary = (
+                    dq is not None
+                    and len(dq) >= max(2, args.stationary_min_points)
+                    and speed is not None
+                    and speed <= args.stationary_max_speed
+                )
+                if is_stationary:
+                    stationary_now += 1
+                    stationary_since_by_id.setdefault(tid, frame_ts)
+                    if frame_ts - stationary_since_by_id[tid] >= args.loitering_seconds:
+                        loitering_now += 1
+                else:
+                    moving_now += 1
+                    stationary_since_by_id.pop(tid, None)
+
+            occupancy_now = len(current_present_ids)
+            avg_dwell_sec = float(sum(dwell_values) / len(dwell_values)) if dwell_values else 0.0
+            max_dwell_sec = float(max(dwell_values)) if dwell_values else 0.0
             with shared.lock:
                 text = f"in={shared.counter.entries} out={shared.counter.exits} total={shared.counter.total}"
+                live_text = (
+                    f"presentes={occupancy_now} mov={moving_now} "
+                    f"paradas={stationary_now} fila={loitering_now}"
+                )
+                shared.occupancy_now = occupancy_now
+                shared.moving_now = moving_now
+                shared.stationary_now = stationary_now
+                shared.loitering_now = loitering_now
+                shared.avg_dwell_sec = avg_dwell_sec
+                shared.max_dwell_sec = max_dwell_sec
             if count_mode == "polygon" and len(poly_pts) >= 3:
                 arr = np.array(poly_pts, dtype=np.int32).reshape(-1, 1, 2)
                 cv2.polylines(frame, [arr], isClosed=True, color=(255, 200, 0), thickness=2)
@@ -1096,6 +1202,7 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                     2,
                 )
                 cv2.putText(frame, text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+                cv2.putText(frame, live_text, (20, 76), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             elif count_mode == "polygon":
                 cv2.putText(
                     frame,
@@ -1107,9 +1214,11 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                     2,
                 )
                 cv2.putText(frame, text, (20, 72), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+                cv2.putText(frame, live_text, (20, 106), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             else:
                 cv2.line(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
                 cv2.putText(frame, text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+                cv2.putText(frame, live_text, (20, 76), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                 cv2.putText(
                     frame,
                     "A/B=lados | linha= trajeto | seta (topo bbox)= tendencia (PCA)",
@@ -1301,7 +1410,7 @@ def create_app(shared: SharedState) -> Flask:
     <title>People Counter</title>
     <style>
       body { font-family: Arial, sans-serif; margin: 20px; background: #111; color: #fff; }
-      .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
       .card { background: #1e1e1e; padding: 12px; border-radius: 8px; }
       .video-wrap { display: inline-block; position: relative; max-width: 100%; }
       #feed { max-width: 100%; border-radius: 8px; border: 1px solid #444; display: block; }
@@ -1319,6 +1428,14 @@ def create_app(shared: SharedState) -> Flask:
       <div class="card">Entradas: <b id="entries">0</b></div>
       <div class="card">Saidas: <b id="exits">0</b></div>
       <div class="card">Total: <b id="total">0</b></div>
+      <div class="card">Presentes agora: <b id="occupancyNow">0</b></div>
+      <div class="card">Em movimento: <b id="movingNow">0</b></div>
+      <div class="card">Paradas: <b id="stationaryNow">0</b></div>
+      <div class="card">Paradas longas: <b id="loiteringNow">0</b></div>
+    </div>
+    <div class="row" style="flex-wrap:wrap;gap:8px;align-items:baseline;">
+      <strong>Permanencia atual na zona:</strong>
+      <span id="dwellInfo">media 0s | max 0s</span>
     </div>
     <div class="row" style="flex-wrap:wrap;gap:8px;align-items:baseline;">
       <strong>Horario de pico (maior fluxo):</strong>
@@ -1475,7 +1592,18 @@ def create_app(shared: SharedState) -> Flask:
         document.getElementById('entries').textContent = j.entries;
         document.getElementById('exits').textContent = j.exits;
         document.getElementById('total').textContent = j.total_passages;
+        document.getElementById('occupancyNow').textContent = j.occupancy_now || 0;
+        document.getElementById('movingNow').textContent = j.moving_now || 0;
+        document.getElementById('stationaryNow').textContent = j.stationary_now || 0;
+        const loiteringCount = j.loitering_now || 0;
+        document.getElementById('loiteringNow').textContent = loiteringCount;
         document.getElementById('status').textContent = j.error ? ('Erro: ' + j.error) : 'Online';
+        const avgDwell = Math.round(j.avg_dwell_sec || 0);
+        const maxDwell = Math.round(j.max_dwell_sec || 0);
+        const loiteringThreshold = Math.round(j.loitering_threshold_sec || 0);
+        document.getElementById('dwellInfo').textContent =
+          'media ' + avgDwell + 's | max ' + maxDwell + 's | alerta de parada longa: ' +
+          loiteringThreshold + 's (' + loiteringCount + ' pessoa(s))';
         const he = j.hourly_entries || [];
         const hx = j.hourly_exits || [];
         buildHourlyTable(he, hx);
@@ -1649,6 +1777,13 @@ def create_app(shared: SharedState) -> Flask:
                 "entries": shared.counter.entries,
                 "exits": shared.counter.exits,
                 "total_passages": shared.counter.total,
+                "occupancy_now": shared.occupancy_now,
+                "moving_now": shared.moving_now,
+                "stationary_now": shared.stationary_now,
+                "loitering_now": shared.loitering_now,
+                "avg_dwell_sec": shared.avg_dwell_sec,
+                "max_dwell_sec": shared.max_dwell_sec,
+                "loitering_threshold_sec": shared.loitering_threshold_sec,
                 "error": shared.last_error,
                 "sex_classifier_enabled": shared.sex_classifier_enabled,
                 "sex_female_agg": shared.sex_agg.female,
@@ -1702,7 +1837,10 @@ def main() -> None:
     args = parse_args()
     args.port = _resolve_listen_port(args.host, args.port)
     line_init = tuple(int(v) for v in args.line.split(","))
-    shared = SharedState(line_default=line_init)
+    shared = SharedState(
+        line_default=line_init,
+        loitering_threshold_sec=args.loitering_seconds,
+    )
     stop_event = threading.Event()
 
     t = threading.Thread(target=inference_loop, args=(args, shared, stop_event), daemon=True)
