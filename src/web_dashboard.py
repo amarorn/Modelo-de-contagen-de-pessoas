@@ -54,6 +54,9 @@ from env_settings import (
     snapshot_editable_env,
 )
 from persistence.emitter import emit_config_event, shutdown_emitter, start_stats_emitter_thread
+from persistence.db import get_session_factory
+
+import persistence.camera_calibration_store as cam_cal
 
 
 def _resolve_listen_port(host: str, preferred: int) -> int:
@@ -243,6 +246,45 @@ def _preset_id_for_url(presets: list[dict[str, str]], url: str) -> str:
         if str(p.get("url", "")).strip() == u:
             return str(p.get("id", "")).strip()
     return ""
+
+
+def _apply_default_calibration(shared: SharedState) -> None:
+    with shared.lock:
+        shared.count_mode = "line"
+        shared.line_live = shared.line_default
+        shared.polygon_live = []
+
+
+def _load_calibration_for_preset(shared: SharedState, preset_id: str) -> None:
+    pid = str(preset_id or "").strip()
+    if not pid:
+        _apply_default_calibration(shared)
+        return
+    data = cam_cal.load(cam_cal.site_id(), pid)
+    if not data:
+        _apply_default_calibration(shared)
+        return
+    with shared.lock:
+        shared.count_mode = data["count_mode"]
+        shared.line_live = tuple(data["line"])
+        shared.polygon_live = list(data["polygon"])
+
+
+def _save_calibration_for_preset(shared: SharedState, preset_id: str) -> None:
+    pid = str(preset_id or "").strip()
+    if not pid:
+        return
+    with shared.lock:
+        mode = shared.count_mode
+        line = shared.line_live
+        poly = list(shared.polygon_live)
+    cam_cal.save(
+        cam_cal.site_id(),
+        pid,
+        count_mode=mode,
+        line=tuple(int(x) for x in line),
+        polygon=poly,
+    )
 
 
 class SharedState:
@@ -2030,6 +2072,7 @@ def create_app(shared: SharedState) -> Flask:
             pdef = [{"x": a, "y": b} for a, b in shared.polygon_default]
             show_trail = shared.show_trail_overlay
             show_heading = shared.show_heading_overlay
+            apid = str(shared.active_preset_id or "").strip()
         return jsonify(
             {
                 "mode": mode,
@@ -2039,6 +2082,7 @@ def create_app(shared: SharedState) -> Flask:
                 "default_polygon": pdef,
                 "show_trail": show_trail,
                 "show_heading": show_heading,
+                "active_preset_id": apid,
             }
         )
 
@@ -2092,8 +2136,15 @@ def create_app(shared: SharedState) -> Flask:
         _persist_config_event(
             shared,
             "line",
-            {"line": {"x1": x1, "y1": y1, "x2": x2, "y2": y2}, "reset_counters": reset_counters},
+            {
+                "line": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                "reset_counters": reset_counters,
+                "preset_id": str(shared.active_preset_id or "").strip(),
+            },
         )
+        with shared.lock:
+            ap = str(shared.active_preset_id or "").strip()
+        _save_calibration_for_preset(shared, ap)
         return jsonify({"ok": True, "line": {"x1": x1, "y1": y1, "x2": x2, "y2": y2}})
 
     @app.post("/api/line/reset")
@@ -2106,7 +2157,14 @@ def create_app(shared: SharedState) -> Flask:
                 reset_entry_exit_counters(shared)
         with shared.lock:
             x1, y1, x2, y2 = shared.line_live
-        _persist_config_event(shared, "line_reset", {"reset_counters": reset_counters})
+        _persist_config_event(
+            shared,
+            "line_reset",
+            {"reset_counters": reset_counters, "preset_id": str(shared.active_preset_id or "").strip()},
+        )
+        with shared.lock:
+            ap = str(shared.active_preset_id or "").strip()
+        _save_calibration_for_preset(shared, ap)
         return jsonify({"ok": True, "line": {"x1": x1, "y1": y1, "x2": x2, "y2": y2}})
 
     @app.post("/api/polygon")
@@ -2135,8 +2193,12 @@ def create_app(shared: SharedState) -> Flask:
             {
                 "vertices": len(pts),
                 "reset_counters": reset_counters,
+                "preset_id": str(shared.active_preset_id or "").strip(),
             },
         )
+        with shared.lock:
+            ap = str(shared.active_preset_id or "").strip()
+        _save_calibration_for_preset(shared, ap)
         return jsonify(
             {"ok": True, "polygon": [{"x": a, "y": b} for a, b in pts], "mode": "polygon"}
         )
@@ -2152,7 +2214,14 @@ def create_app(shared: SharedState) -> Flask:
                 reset_entry_exit_counters(shared)
         with shared.lock:
             poly = [{"x": a, "y": b} for a, b in shared.polygon_live]
-        _persist_config_event(shared, "polygon_reset", {"reset_counters": reset_counters})
+        _persist_config_event(
+            shared,
+            "polygon_reset",
+            {"reset_counters": reset_counters, "preset_id": str(shared.active_preset_id or "").strip()},
+        )
+        with shared.lock:
+            ap = str(shared.active_preset_id or "").strip()
+        _save_calibration_for_preset(shared, ap)
         return jsonify({"ok": True, "polygon": poly, "mode": "line"})
 
     @app.post("/api/mode")
@@ -2172,7 +2241,18 @@ def create_app(shared: SharedState) -> Flask:
             shared.count_mode = m
             if reset_counters:
                 reset_entry_exit_counters(shared)
-        _persist_config_event(shared, "mode", {"mode": m, "reset_counters": reset_counters})
+        _persist_config_event(
+            shared,
+            "mode",
+            {
+                "mode": m,
+                "reset_counters": reset_counters,
+                "preset_id": str(shared.active_preset_id or "").strip(),
+            },
+        )
+        with shared.lock:
+            ap = str(shared.active_preset_id or "").strip()
+        _save_calibration_for_preset(shared, ap)
         return jsonify({"ok": True, "mode": m})
 
     @app.get("/api/source")
@@ -2194,12 +2274,18 @@ def create_app(shared: SharedState) -> Flask:
         if len(new_src) > 4096:
             return jsonify({"error": "source demasiado longo"}), 400
         with shared.lock:
+            old_pid = str(shared.active_preset_id or "").strip()
+            presets = list(shared.source_presets)
+        _save_calibration_for_preset(shared, old_pid)
+        new_pid = _preset_id_for_url(presets, new_src)
+        with shared.lock:
             shared.source_live = new_src
             shared.source_changed = True
-            shared.active_preset_id = _preset_id_for_url(shared.source_presets, new_src)
+            shared.active_preset_id = new_pid
             reset_entry_exit_counters(shared)
             presets = list(shared.source_presets)
             apid = shared.active_preset_id
+        _load_calibration_for_preset(shared, apid)
         print(f"[web] Fonte de video alterada para: {new_src!r}")
         _persist_config_event(shared, "source", {"source_len": len(new_src)})
         return jsonify({"ok": True, "source": new_src, "active_preset_id": apid, "presets": presets})
@@ -2228,6 +2314,7 @@ def create_app(shared: SharedState) -> Flask:
             if shared.active_preset_id == preset_id:
                 shared.active_preset_id = ""
             presets = list(shared.source_presets)
+        cam_cal.delete(cam_cal.site_id(), preset_id)
         _save_source_presets_to_file(presets)
         _persist_config_event(shared, "preset_delete", {"preset_id": preset_id})
         return jsonify({"ok": True, "presets": presets})
@@ -2238,6 +2325,9 @@ def create_app(shared: SharedState) -> Flask:
         preset_id = str(data.get("preset_id", "")).strip()
         if not preset_id:
             return jsonify({"error": "preset_id obrigatorio"}), 400
+        with shared.lock:
+            old_pid = str(shared.active_preset_id or "").strip()
+        _save_calibration_for_preset(shared, old_pid)
         with shared.lock:
             url = ""
             for p in shared.source_presets:
@@ -2251,6 +2341,7 @@ def create_app(shared: SharedState) -> Flask:
             shared.active_preset_id = preset_id
             reset_entry_exit_counters(shared)
             presets = list(shared.source_presets)
+        _load_calibration_for_preset(shared, preset_id)
         print(f"[web] Fonte (preset {preset_id}) alterada para: {url!r}")
         _persist_config_event(shared, "source_select", {"preset_id": preset_id})
         return jsonify(
@@ -2305,6 +2396,14 @@ def main() -> None:
     with shared.lock:
         shared.source_presets = presets
         shared.active_preset_id = _preset_id_for_url(presets, str(args.source).strip())
+    try:
+        get_session_factory()
+        ap_boot = ""
+        with shared.lock:
+            ap_boot = str(shared.active_preset_id or "").strip()
+        _load_calibration_for_preset(shared, ap_boot)
+    except Exception as exc:
+        print(f"[web] Calibracao por camera (SQL): {exc}", flush=True)
     stop_event = threading.Event()
 
     t = threading.Thread(target=inference_loop, args=(args, shared, stop_event), daemon=True)
