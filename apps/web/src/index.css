@@ -114,7 +114,7 @@ body {
 /* ── Analytics grid (below ops layout) ─────────────────────── */
 .analytics-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(0, 0.95fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 0.9fr);
   gap: clamp(10px, 1.5vw, 14px);
   align-items: stretch;
   margin-bottom: 14px;

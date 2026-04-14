@@ -48,8 +48,8 @@ export function OccupancyGauge({
           value: {
             show: true,
             fontSize: "32px",
-            fontWeight: 800,
-            fontFamily: "JetBrains Mono",
+            fontWeight: 600,
+            fontFamily: "IBM Plex Mono",
             color,
             offsetY: 8,
             formatter: () => String(occupancy),

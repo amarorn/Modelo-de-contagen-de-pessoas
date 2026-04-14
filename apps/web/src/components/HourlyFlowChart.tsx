@@ -20,7 +20,7 @@ export function HourlyFlowChart({ hourlyEntries, hourlyExits, peakHour }: Props)
       animations: { enabled: true, speed: 400 },
     },
     theme: { mode: "dark" },
-    colors: ["#00D4FF", "#EF4444"],
+    colors: ["#2EB87A", "#E04E4E"],
     plotOptions: {
       bar: {
         columnWidth: "60%",
@@ -38,7 +38,7 @@ export function HourlyFlowChart({ hourlyEntries, hourlyExits, peakHour }: Props)
     xaxis: {
       categories: HOURS,
       labels: {
-        style: { colors: "#6B7280", fontSize: "11px" },
+        style: { colors: "#484858", fontSize: "10px", fontFamily: "IBM Plex Mono, monospace" },
         rotate: 0,
       },
       axisBorder: { show: false },
@@ -46,12 +46,13 @@ export function HourlyFlowChart({ hourlyEntries, hourlyExits, peakHour }: Props)
     },
     yaxis: {
       labels: {
-        style: { colors: "#6B7280", fontSize: "11px" },
+        style: { colors: "#484858", fontSize: "10px", fontFamily: "IBM Plex Mono, monospace" },
         formatter: (v) => String(Math.round(v)),
       },
     },
     legend: {
-      labels: { colors: "#9CA3AF" },
+      labels: { colors: "#888898" },
+      fontFamily: "Barlow Condensed, system-ui, sans-serif",
       markers: { shape: "circle" },
     },
     tooltip: {
@@ -85,7 +86,7 @@ export function HourlyFlowChart({ hourlyEntries, hourlyExits, peakHour }: Props)
   };
 
   return (
-    <div className="card" style={{ gridColumn: "span 2" }}>
+    <div className="card" style={{ height: "100%" }}>
       <div
         style={{
           display: "flex",

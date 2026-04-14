@@ -19,47 +19,129 @@ const HOURS = Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2, "0")
 
 export function FlowSummaryCard({ entries, exits, total, peakFlow, peakHour }: Props) {
   const balance = entries - exits;
+  const balanceColor = balance >= 0 ? "var(--green)" : "var(--red)";
 
   return (
     <div
       className="card"
       style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fit, minmax(118px, 1fr))",
-        gap: 10,
-        alignItems: "stretch",
+        display: "flex",
+        flexDirection: "column",
+        padding: 0,
+        overflow: "hidden",
         height: "100%",
       }}
     >
-      <FlowRow label="Entradas" value={entries} color="var(--green)"  icon={<IconArrowUp size={15}/>} />
-      <FlowRow label="Saídas"   value={exits}   color="var(--red)"    icon={<IconArrowDown size={15}/>} />
-      <FlowRow label="Total"    value={total}   color="var(--cyan)"   icon={<IconArrowsUpDown size={15}/>} />
-      <FlowRow
-        label="Saldo"
-        value={Math.abs(balance)}
-        color={balance >= 0 ? "var(--green)" : "var(--red)"}
-        icon={<IconBalance size={15} color={balance >= 0 ? "var(--green)" : "var(--red)"} />}
-      />
+      {/* Header */}
+      <div
+        style={{
+          padding: "12px 16px 10px",
+          borderBottom: "1px solid var(--border)",
+        }}
+      >
+        <p className="section-label" style={{ marginBottom: 0 }}>Resumo de Fluxo</p>
+      </div>
 
-      {/* Peak */}
-      <div style={{
-        display: "flex", alignItems: "center", justifyContent: "space-between",
-        padding: "10px 14px", background: "var(--amber-dim)",
-        borderRadius: "var(--radius-sm)", border: "1px solid rgba(245,158,11,0.2)", height: "100%",
-      }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-            <IconZap size={12} color="var(--amber)" />
-            <span style={{ fontSize: 10, color: "var(--amber)", fontWeight: 700, letterSpacing: "0.06em" }}>PICO</span>
+      {/* Rows */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+        <FlowRow
+          icon={<IconArrowUp size={14} />}
+          label="Entradas"
+          value={entries.toLocaleString("pt-BR")}
+          color="var(--green)"
+        />
+        <FlowRow
+          icon={<IconArrowDown size={14} />}
+          label="Saídas"
+          value={exits.toLocaleString("pt-BR")}
+          color="var(--red)"
+        />
+        <FlowRow
+          icon={<IconArrowsUpDown size={14} />}
+          label="Total"
+          value={total.toLocaleString("pt-BR")}
+          color="var(--cyan)"
+        />
+        <FlowRow
+          icon={<IconBalance size={14} color={balanceColor} />}
+          label="Saldo"
+          value={Math.abs(balance).toLocaleString("pt-BR")}
+          color={balanceColor}
+        />
+
+        {/* Peak — accent block at bottom */}
+        <div
+          style={{
+            marginTop: "auto",
+            borderTop: "1px solid var(--border)",
+            padding: "14px 16px",
+            background: "var(--amber-dim)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
+          <div>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 5,
+                marginBottom: 4,
+              }}
+            >
+              <IconZap size={11} color="var(--amber)" />
+              <span
+                style={{
+                  fontFamily: "var(--font-display)",
+                  fontSize: 10,
+                  fontWeight: 700,
+                  letterSpacing: "0.16em",
+                  textTransform: "uppercase",
+                  color: "var(--amber)",
+                }}
+              >
+                Hora Pico
+              </span>
+            </div>
+            <div
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: 24,
+                fontWeight: 600,
+                color: "var(--amber)",
+                lineHeight: 1,
+              }}
+            >
+              {HOURS[peakHour]}
+            </div>
           </div>
-          <div style={{ fontSize: 20, fontWeight: 800, color: "var(--amber)", fontFamily: "var(--font-mono)" }}>
-            {HOURS[peakHour]}
-          </div>
-        </div>
-        <div style={{ textAlign: "right" }}>
-          <div style={{ fontSize: 10, color: "var(--text-muted)" }}>passagens</div>
-          <div style={{ fontSize: 22, fontWeight: 800, color: "var(--amber)", fontFamily: "var(--font-mono)" }}>
-            {peakFlow}
+
+          <div style={{ textAlign: "right" }}>
+            <div
+              style={{
+                fontFamily: "var(--font-display)",
+                fontSize: 10,
+                fontWeight: 700,
+                letterSpacing: "0.1em",
+                textTransform: "uppercase",
+                color: "var(--text-muted)",
+                marginBottom: 4,
+              }}
+            >
+              Passagens
+            </div>
+            <div
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: 24,
+                fontWeight: 600,
+                color: "var(--amber)",
+                lineHeight: 1,
+              }}
+            >
+              {peakFlow.toLocaleString("pt-BR")}
+            </div>
           </div>
         </div>
       </div>
@@ -67,20 +149,66 @@ export function FlowSummaryCard({ entries, exits, total, peakFlow, peakHour }: P
   );
 }
 
-function FlowRow({ label, value, color, icon }: { label: string; value: number; color: string; icon: ReactNode }) {
+function FlowRow({
+  icon, label, value, color,
+}: { icon: ReactNode; label: string; value: string; color: string }) {
   return (
-    <div style={{ padding: "10px 12px", background: "var(--bg-elevated)",
-      borderRadius: "var(--radius-sm)", display: "flex", alignItems: "center", gap: 10 }}>
-      <span style={{ width: 28, height: 28, borderRadius: 6, background: `${color}22`,
-        display: "grid", placeItems: "center", color }}>
-        {icon}
-      </span>
-      <div>
-        <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{label}</div>
-        <div style={{ fontSize: 20, fontWeight: 700, color, fontFamily: "var(--font-mono)" }}>
-          {value.toLocaleString("pt-BR")}
-        </div>
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        padding: "10px 16px",
+        borderBottom: "1px solid var(--border)",
+        gap: 10,
+        transition: "background 0.15s",
+      }}
+      onMouseEnter={(e) => {
+        (e.currentTarget as HTMLDivElement).style.background = "var(--bg-elevated)";
+      }}
+      onMouseLeave={(e) => {
+        (e.currentTarget as HTMLDivElement).style.background = "transparent";
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span
+          style={{
+            width: 26,
+            height: 26,
+            borderRadius: "var(--radius-sm)",
+            background: `${color}18`,
+            display: "grid",
+            placeItems: "center",
+            color,
+            flexShrink: 0,
+          }}
+        >
+          {icon}
+        </span>
+        <span
+          style={{
+            fontFamily: "var(--font-display)",
+            fontSize: 12,
+            fontWeight: 700,
+            letterSpacing: "0.1em",
+            textTransform: "uppercase",
+            color: "var(--text-muted)",
+          }}
+        >
+          {label}
+        </span>
       </div>
+      <span
+        style={{
+          fontFamily: "var(--font-mono)",
+          fontSize: 18,
+          fontWeight: 600,
+          color,
+          letterSpacing: "-0.02em",
+        }}
+      >
+        {value}
+      </span>
     </div>
   );
 }
