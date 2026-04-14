@@ -2,9 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 interface Props {
   apiBase: string;
+  /** Área principal: vídeo maior, enquadramento sem cortar tanto o quadro */
+  hero?: boolean;
 }
 
-export function LiveFeed({ apiBase }: Props) {
+export function LiveFeed({ apiBase, hero = false }: Props) {
   const [error, setError]       = useState(false);
   const [loading, setLoading]   = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -144,7 +146,11 @@ export function LiveFeed({ apiBase }: Props) {
           position: "relative",
           width: "100%",
           flex: 1,
-          minHeight: isFullscreen ? "100vh" : 340,
+          minHeight: isFullscreen
+            ? "100vh"
+            : hero
+              ? "clamp(420px, min(72vh, 88vw), 960px)"
+              : 340,
           background: "#000",
           display: "flex",
           alignItems: "center",
@@ -188,7 +194,7 @@ export function LiveFeed({ apiBase }: Props) {
             style={{
               width: "100%",
               height: "100%",
-              objectFit: isFullscreen ? "contain" : "cover",
+              objectFit: isFullscreen || hero ? "contain" : "cover",
               display: loading ? "none" : "block",
               ...(isFullscreen ? { maxHeight: "100vh" } : {}),
             }}

@@ -41,69 +41,82 @@ export default function App() {
       <main
         style={{
           flex: 1,
-          padding: "20px 20px 32px",
-          maxWidth: 1600,
-          margin: "0 auto",
+          padding: "16px clamp(16px, 3vw, 32px) 28px",
           width: "100%",
+          maxWidth: "min(1920px, 100%)",
+          margin: "0 auto",
         }}
       >
-        {/* ── Top KPI row ─────────────────────────────────────── */}
-        <div
+        {/* ── Hero: vídeo em largura total ───────────────────── */}
+        <section
           style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(4, 1fr)",
-            gap: 16,
-            marginBottom: 16,
+            marginBottom: 20,
+            borderRadius: "var(--radius-lg)",
+            overflow: "hidden",
+            border: "1px solid var(--border)",
+            boxShadow: "var(--shadow-card), 0 0 0 1px rgba(0,212,255,0.04)",
+            background: "var(--bg-surface)",
           }}
         >
-          <StatCard label="Entradas"        value={stats.entries}       icon={<IconArrowUp size={18}/>}       color="var(--green)"  colorDim="var(--green-dim)"  subtitle="Total acumulado" />
-          <StatCard label="Saídas"          value={stats.exits}         icon={<IconArrowDown size={18}/>}     color="var(--red)"    colorDim="var(--red-dim)"    subtitle="Total acumulado" />
-          <StatCard label="Ocupação"        value={stats.occupancy_now} icon={<IconUsers size={18}/>}         color="var(--cyan)"   colorDim="var(--cyan-dim)"   subtitle="Pessoas em cena" />
-          <StatCard label="Total Passagens" value={stats.total_passages} icon={<IconArrowsUpDown size={18}/>} color="var(--indigo)" colorDim="var(--indigo-dim)" subtitle={`Pico: ${stats.peak_flow} às ${String(stats.peak_hour).padStart(2,"0")}h`} />
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              minHeight: 0,
+            }}
+          >
+            <LiveFeed apiBase={API_BASE} hero />
+            <div
+              style={{
+                padding: "12px clamp(12px, 2vw, 20px)",
+                borderTop: "1px solid var(--border)",
+                background: "linear-gradient(180deg, var(--bg-elevated) 0%, var(--bg-surface) 100%)",
+                display: "flex",
+                flexWrap: "wrap",
+                alignItems: "center",
+                gap: 12,
+                justifyContent: "space-between",
+              }}
+            >
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(2, minmax(0, 160px))",
+                  gap: 8,
+                }}
+              >
+                <ActionButton icon={<IconTarget size={14} />} label="Configurar ROI" onClick={() => setRoiOpen(true)} />
+                <ActionButton icon={<IconVideo size={14} />} label="Fonte de Vídeo" onClick={() => setSourceOpen(true)} />
+              </div>
+              <div style={{ flex: "1 1 260px", minWidth: 0 }}>
+                <DisplayOverlayToggles apiBase={API_BASE} />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* ── KPIs (faixa compacta sob o vídeo) ──────────────── */}
+        <div
+          className="kpi-strip"
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+            gap: "clamp(10px, 1.5vw, 16px)",
+            marginBottom: 20,
+          }}
+        >
+          <StatCard label="Entradas" value={stats.entries} icon={<IconArrowUp size={18} />} color="var(--green)" colorDim="var(--green-dim)" subtitle="Total acumulado" />
+          <StatCard label="Saídas" value={stats.exits} icon={<IconArrowDown size={18} />} color="var(--red)" colorDim="var(--red-dim)" subtitle="Total acumulado" />
+          <StatCard label="Ocupação" value={stats.occupancy_now} icon={<IconUsers size={18} />} color="var(--cyan)" colorDim="var(--cyan-dim)" subtitle="Pessoas em cena" />
+          <StatCard label="Total Passagens" value={stats.total_passages} icon={<IconArrowsUpDown size={18} />} color="var(--indigo)" colorDim="var(--indigo-dim)" subtitle={`Pico: ${stats.peak_flow} às ${String(stats.peak_hour).padStart(2, "0")}h`} />
         </div>
 
-        {/* ── Main grid ───────────────────────────────────────── */}
-        {/*
-          Layout:
-          Col 1 (55%)   | Col 2 (25%)    | Col 3 (20%)
-          ─────────────────────────────────────────────
-          Video (r1-r2) | HourlyChart    | OccupancyGauge
-          Video (r1-r2) | FlowSummary   | FlowSummary
-          ─────────────────────────────────────────────
-          Demographics (span 3 cols)
-        */}
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "55fr 27fr 18fr",
-            gridTemplateRows: "auto auto",
-            gap: 16,
-          }}
-        >
-          {/* Video feed — large left column, spans both rows */}
-          <div style={{ gridColumn: "1", gridRow: "1 / 3", minHeight: 0, display: "flex", flexDirection: "column" }}>
-            <LiveFeed apiBase={API_BASE} />
-            {/* Action buttons below feed */}
-            <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-              <ActionButton icon={<IconTarget size={14}/>} label="Configurar ROI" onClick={() => setRoiOpen(true)} />
-              <ActionButton icon={<IconVideo size={14}/>}  label="Fonte de Vídeo"  onClick={() => setSourceOpen(true)} />
-            </div>
-            <div style={{ marginTop: 10 }}>
-              <DisplayOverlayToggles apiBase={API_BASE} />
-            </div>
+        {/* ── Gráficos e resumo (3 colunas fluidas) ──────────── */}
+        <div className="analytics-grid">
+          <div style={{ minWidth: 0 }}>
+            <HourlyFlowChart hourlyEntries={stats.hourly_entries} hourlyExits={stats.hourly_exits} peakHour={stats.peak_hour} />
           </div>
-
-          {/* Hourly chart — middle column, row 1 */}
-          <div style={{ gridColumn: "2", gridRow: "1" }}>
-            <HourlyFlowChart
-              hourlyEntries={stats.hourly_entries}
-              hourlyExits={stats.hourly_exits}
-              peakHour={stats.peak_hour}
-            />
-          </div>
-
-          {/* Occupancy gauge — right column, row 1 */}
-          <div style={{ gridColumn: "3", gridRow: "1" }}>
+          <div style={{ minWidth: 0 }}>
             <OccupancyGauge
               occupancy={stats.occupancy_now}
               moving={stats.moving_now}
@@ -115,9 +128,7 @@ export default function App() {
               avgMovePxPerFrame={stats.avg_move_speed_px_per_frame}
             />
           </div>
-
-          {/* Flow summary — middle+right columns, row 2 */}
-          <div style={{ gridColumn: "2 / 4", gridRow: "2" }}>
+          <div style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>
             <FlowSummaryCard
               entries={stats.entries}
               exits={stats.exits}
@@ -128,8 +139,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* ── Demographics — full width below ─────────────────── */}
-        <div style={{ marginTop: 16 }}>
+        <div style={{ marginTop: 20 }}>
           <DemographicsChart stats={stats} />
         </div>
 

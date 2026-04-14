@@ -21,7 +21,16 @@ export function FlowSummaryCard({ entries, exits, total, peakFlow, peakHour }: P
   const balance = entries - exits;
 
   return (
-    <div className="card" style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10, alignItems: "center" }}>
+    <div
+      className="card"
+      style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(118px, 1fr))",
+        gap: 10,
+        alignItems: "stretch",
+        height: "100%",
+      }}
+    >
       <FlowRow label="Entradas" value={entries} color="var(--green)"  icon={<IconArrowUp size={15}/>} />
       <FlowRow label="Saídas"   value={exits}   color="var(--red)"    icon={<IconArrowDown size={15}/>} />
       <FlowRow label="Total"    value={total}   color="var(--cyan)"   icon={<IconArrowsUpDown size={15}/>} />
