@@ -29,7 +29,16 @@ def make_engine() -> Engine:
             connect_args={"check_same_thread": False},
             future=True,
         )
-    return create_engine(url, future=True)
+    try:
+        return create_engine(url, future=True)
+    except ImportError as exc:
+        if "psycopg2" in str(exc).lower():
+            raise ImportError(
+                "Driver PostgreSQL em falta: pip install psycopg2-binary\n"
+                "Ou, sem servidor Postgres (ex.: so Redpanda no docker-compose.kafka.yml), use no .env:\n"
+                "  DATABASE_URL=sqlite:///data/contagem.db"
+            ) from exc
+        raise
 
 
 def init_db(engine: Engine | None = None) -> Engine:
