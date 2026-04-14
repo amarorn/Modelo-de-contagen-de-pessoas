@@ -43,6 +43,7 @@ from flask_cors import CORS
 from ultralytics import YOLO
 
 from device_utils import resolve_device
+from stream_source_resolve import resolve_stream_source
 from age_classifier_agg import AgeAggregateStats, OptionalAgeClassifier
 from sex_classifier_agg import OptionalSexClassifier, SexAggregateStats
 from env_settings import (
@@ -157,6 +158,7 @@ def _peak_hour_stats(shared: SharedState) -> tuple[int, int]:
 
 
 _MAX_SOURCE_PRESETS = 24
+_SOURCE_PRESETS_FILE = Path("outputs/source_presets_web.json")
 
 
 def _load_source_presets_from_env() -> list[dict[str, str]]:
@@ -191,6 +193,56 @@ def _load_source_presets_from_env() -> list[dict[str, str]]:
                 }
             )
     return out[:_MAX_SOURCE_PRESETS]
+
+
+def _load_source_presets_from_file() -> list[dict[str, str]]:
+    try:
+        if not _SOURCE_PRESETS_FILE.exists():
+            return []
+        data = json.loads(_SOURCE_PRESETS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    out: list[dict[str, str]] = []
+    for i, item in enumerate(data):
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label", "") or f"Câmera {i + 1}").strip()[:128]
+        url = str(item.get("url", "")).strip()
+        if not url or len(url) > 4096:
+            continue
+        pid = str(item.get("id", "")).strip() or uuid.uuid4().hex[:12]
+        out.append({"id": pid, "label": label, "url": url})
+    return out[:_MAX_SOURCE_PRESETS]
+
+
+def _save_source_presets_to_file(presets: list[dict[str, str]]) -> None:
+    try:
+        _SOURCE_PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = [
+            {
+                "id": str(p.get("id", "")).strip() or uuid.uuid4().hex[:12],
+                "label": str(p.get("label", "")).strip()[:128] or "Câmera",
+                "url": str(p.get("url", "")).strip(),
+            }
+            for p in presets[:_MAX_SOURCE_PRESETS]
+            if str(p.get("url", "")).strip()
+        ]
+        _SOURCE_PRESETS_FILE.write_text(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def _preset_id_for_url(presets: list[dict[str, str]], url: str) -> str:
+    u = str(url).strip()
+    for p in presets:
+        if str(p.get("url", "")).strip() == u:
+            return str(p.get("id", "")).strip()
+    return ""
 
 
 class SharedState:
@@ -230,6 +282,8 @@ class SharedState:
         # fonte de vídeo trocável em tempo real
         self.source_live: str = ""
         self.source_changed: bool = False
+        # id do preset em uso (evita ambiguidade se dois presets tiverem a mesma url)
+        self.active_preset_id: str = ""
         # Presets: {"id", "label", "url"} — max 24; preenchido no arranque a partir do .env
         self.source_presets: list[dict[str, str]] = []
         # overlays no MJPEG (caixas/labels mantêm-se; só rastro e seta PCA)
@@ -1053,7 +1107,20 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 raw_src = shared.source_live
                 shared.source_changed = False
 
-            source = int(raw_src) if str(raw_src).strip().isdigit() else raw_src
+            try:
+                stream_src = resolve_stream_source(str(raw_src))
+            except Exception as exc:
+                err_msg = f"Resolucao da fonte: {exc}"
+                print(f"[web] {err_msg}")
+                with shared.lock:
+                    shared.last_error = err_msg
+                time.sleep(5.0)
+                continue
+
+            if stream_src != str(raw_src).strip():
+                print("[web] Pagina SkylineWebcams (.html) resolvida para manifesto HLS.")
+
+            source = int(stream_src) if str(stream_src).strip().isdigit() else stream_src
             try:
                 validate_source(source)
             except Exception as exc:
@@ -1092,6 +1159,7 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
             show_heading_arrow = (not args.no_heading_arrow) and trail_max >= 2
             prev_frame_mono: float | None = None
             ema_infer_fps: float = 0.0
+            _frames_received = 0
 
             for result in stream:
                 if stop_event.is_set():
@@ -1104,6 +1172,7 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 if frame is None:
                     continue
 
+                _frames_received += 1
                 fh, fw = frame.shape[:2]
                 with shared.lock:
                     raw_line = shared.line_live
@@ -1439,7 +1508,19 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 if ok:
                     with shared.lock:
                         shared.last_frame_jpeg = encoded.tobytes()
-                # fim do for — se source_changed, o while recomeça; se stop_event, sai
+
+            # Fim do for: se saímos sem nenhum frame e a fonte não foi trocada,
+            # a URL/câmera falhou ao abrir. Registra erro e faz backoff para não
+            # encher o log com "Failed to open" em loop contínuo.
+            if not stop_event.is_set():
+                with shared.lock:
+                    _src_changed_now = shared.source_changed
+                if not _src_changed_now and _frames_received == 0:
+                    _err_msg = f"Falha ao abrir fonte: {raw_src!r}. Verifique a URL/câmera e tente novamente."
+                    print(f"[web] {_err_msg}")
+                    with shared.lock:
+                        shared.last_error = _err_msg
+                    time.sleep(5.0)
     except Exception as exc:
         with shared.lock:
             shared.last_error = str(exc)
@@ -2100,6 +2181,7 @@ def create_app(shared: SharedState) -> Flask:
             return jsonify({
                 "source": shared.source_live,
                 "changing": shared.source_changed,
+                "active_preset_id": shared.active_preset_id,
                 "presets": list(shared.source_presets),
             })
 
@@ -2114,11 +2196,13 @@ def create_app(shared: SharedState) -> Flask:
         with shared.lock:
             shared.source_live = new_src
             shared.source_changed = True
+            shared.active_preset_id = _preset_id_for_url(shared.source_presets, new_src)
             reset_entry_exit_counters(shared)
             presets = list(shared.source_presets)
+            apid = shared.active_preset_id
         print(f"[web] Fonte de video alterada para: {new_src!r}")
         _persist_config_event(shared, "source", {"source_len": len(new_src)})
-        return jsonify({"ok": True, "source": new_src, "presets": presets})
+        return jsonify({"ok": True, "source": new_src, "active_preset_id": apid, "presets": presets})
 
     @app.post("/api/source/presets")
     def post_source_preset() -> Response:
@@ -2133,6 +2217,7 @@ def create_app(shared: SharedState) -> Flask:
             pid = uuid.uuid4().hex[:12]
             shared.source_presets.append({"id": pid, "label": label, "url": url})
             presets = list(shared.source_presets)
+        _save_source_presets_to_file(presets)
         _persist_config_event(shared, "preset_add", {"id": pid, "label": label})
         return jsonify({"ok": True, "preset": {"id": pid, "label": label, "url": url}, "presets": presets})
 
@@ -2140,7 +2225,10 @@ def create_app(shared: SharedState) -> Flask:
     def delete_source_preset(preset_id: str) -> Response:
         with shared.lock:
             shared.source_presets = [p for p in shared.source_presets if p.get("id") != preset_id]
+            if shared.active_preset_id == preset_id:
+                shared.active_preset_id = ""
             presets = list(shared.source_presets)
+        _save_source_presets_to_file(presets)
         _persist_config_event(shared, "preset_delete", {"preset_id": preset_id})
         return jsonify({"ok": True, "presets": presets})
 
@@ -2160,11 +2248,14 @@ def create_app(shared: SharedState) -> Flask:
                 return jsonify({"error": "Preset nao encontrado"}), 404
             shared.source_live = url
             shared.source_changed = True
+            shared.active_preset_id = preset_id
             reset_entry_exit_counters(shared)
             presets = list(shared.source_presets)
         print(f"[web] Fonte (preset {preset_id}) alterada para: {url!r}")
         _persist_config_event(shared, "source_select", {"preset_id": preset_id})
-        return jsonify({"ok": True, "source": url, "presets": presets})
+        return jsonify(
+            {"ok": True, "source": url, "active_preset_id": preset_id, "presets": presets}
+        )
 
     @app.get("/api/stats")
     def stats() -> Response:
@@ -2208,9 +2299,12 @@ def main() -> None:
         line_default=line_init,
         loitering_threshold_sec=args.loitering_seconds,
     )
-    presets = _load_source_presets_from_env()
+    presets = _load_source_presets_from_file()
+    if not presets:
+        presets = _load_source_presets_from_env()
     with shared.lock:
         shared.source_presets = presets
+        shared.active_preset_id = _preset_id_for_url(presets, str(args.source).strip())
     stop_event = threading.Event()
 
     t = threading.Thread(target=inference_loop, args=(args, shared, stop_event), daemon=True)

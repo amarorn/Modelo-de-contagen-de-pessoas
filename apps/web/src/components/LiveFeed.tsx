@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+interface SourcePreset {
+  id: string;
+  label: string;
+  url: string;
+}
+
 interface Props {
   apiBase: string;
   hero?: boolean;
@@ -9,15 +15,86 @@ export function LiveFeed({ apiBase, hero = false }: Props) {
   const [error, setError]           = useState(false);
   const [loading, setLoading]       = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [reloadKey, setReloadKey]   = useState(() => Date.now());
+
+  /* ── Camera presets ────────────────────────────────────────── */
+  const [presets, setPresets]           = useState<SourcePreset[]>([]);
+  const [currentSource, setCurrentSource] = useState<string>("");
+  const [activePresetId, setActivePresetId] = useState<string>("");
+  const [switching, setSwitching]       = useState(false);
+
   const imgRef       = useRef<HTMLImageElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const src = `${apiBase}/video_feed`;
+  const src = `${apiBase}/video_feed?t=${reloadKey}`;
+
+  /* ── Load presets on mount ─────────────────────────────────── */
+  useEffect(() => {
+    fetch(`${apiBase}/api/source`)
+      .then((r) => r.json())
+      .then((d) => {
+        setCurrentSource(d.source ?? "");
+        setActivePresetId(typeof d.active_preset_id === "string" ? d.active_preset_id : "");
+        if (Array.isArray(d.presets)) setPresets(d.presets);
+      })
+      .catch(() => {});
+  }, [apiBase]);
 
   useEffect(() => {
     setError(false);
     setLoading(true);
   }, [src]);
+
+  /* ── Active preset index ───────────────────────────────────── */
+  const activeIdx = (() => {
+    if (activePresetId) {
+      const i = presets.findIndex((p) => p.id === activePresetId);
+      if (i >= 0) return i;
+    }
+    return presets.findIndex((p) => p.url.trim() === currentSource.trim());
+  })();
+
+  /* ── Switch camera by preset index ────────────────────────── */
+  const switchCamera = async (idx: number) => {
+    if (idx < 0 || idx >= presets.length || switching) return;
+    setSwitching(true);
+    try {
+      const res = await fetch(`${apiBase}/api/source/select`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ preset_id: presets[idx].id }),
+      });
+      if (res.ok) {
+        const j = await res.json();
+        setCurrentSource(j.source ?? presets[idx].url);
+        if (typeof j.active_preset_id === "string") {
+          setActivePresetId(j.active_preset_id);
+        } else {
+          setActivePresetId(presets[idx].id);
+        }
+        setReloadKey(Date.now());
+      }
+    } catch { /* ignore */ } finally {
+      setSwitching(false);
+    }
+  };
+
+  const prevCamera = () => {
+    const next = activeIdx <= 0 ? presets.length - 1 : activeIdx - 1;
+    void switchCamera(next);
+  };
+
+  const nextCamera = () => {
+    const next = activeIdx < 0 || activeIdx >= presets.length - 1 ? 0 : activeIdx + 1;
+    void switchCamera(next);
+  };
+
+  /* ── Reload ────────────────────────────────────────────────── */
+  const handleReload = useCallback(() => {
+    setError(false);
+    setLoading(true);
+    setReloadKey(Date.now());
+  }, []);
 
   /* ── Fullscreen ────────────────────────────────────────────── */
   const toggleFullscreen = useCallback(async () => {
@@ -43,6 +120,8 @@ export function LiveFeed({ apiBase, hero = false }: Props) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [toggleFullscreen]);
+
+  const activeLabel = activeIdx >= 0 ? presets[activeIdx].label : null;
 
   return (
     <div
@@ -73,9 +152,11 @@ export function LiveFeed({ apiBase, hero = false }: Props) {
           right: 0,
           zIndex: 10,
           flexShrink: 0,
+          gap: 8,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        {/* Left: title */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
           <span className="pulse-dot active" />
           <span
             style={{
@@ -91,8 +172,102 @@ export function LiveFeed({ apiBase, hero = false }: Props) {
           </span>
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          {/* LIVE badge */}
+        {/* Right: controls */}
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "nowrap" }}>
+
+          {/* ── Camera picker (only when presets exist) ── */}
+          {presets.length > 0 && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 0,
+                background: "var(--bg-surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-sm)",
+                overflow: "hidden",
+              }}
+            >
+              <button
+                onClick={prevCamera}
+                disabled={switching || presets.length < 2}
+                title="Câmera anterior"
+                style={navBtnStyle}
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                  <polyline points="15 18 9 12 15 6" />
+                </svg>
+              </button>
+
+              <span
+                style={{
+                  fontFamily: "var(--font-display)",
+                  fontSize: 11,
+                  fontWeight: 700,
+                  letterSpacing: "0.06em",
+                  textTransform: "uppercase",
+                  color: switching ? "var(--amber)" : "var(--text-secondary)",
+                  padding: "0 8px",
+                  maxWidth: 110,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  transition: "color 0.15s",
+                }}
+                title={activeLabel ?? currentSource}
+              >
+                {switching ? "…" : (activeLabel ?? (currentSource || "—"))}
+              </span>
+
+              <button
+                onClick={nextCamera}
+                disabled={switching || presets.length < 2}
+                title="Próxima câmera"
+                style={navBtnStyle}
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                  <polyline points="9 18 15 12 9 6" />
+                </svg>
+              </button>
+            </div>
+          )}
+
+          {/* ── Reload button ── */}
+          <button
+            onClick={handleReload}
+            title="Recarregar stream"
+            style={{
+              background: "var(--bg-surface)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-sm)",
+              cursor: "pointer",
+              padding: "4px 8px",
+              color: "var(--text-muted)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              transition: "border-color 0.15s, color 0.15s",
+            }}
+            onMouseEnter={(e) => {
+              const b = e.currentTarget as HTMLButtonElement;
+              b.style.borderColor = "var(--border-accent)";
+              b.style.color = "var(--amber)";
+            }}
+            onMouseLeave={(e) => {
+              const b = e.currentTarget as HTMLButtonElement;
+              b.style.borderColor = "var(--border)";
+              b.style.color = "var(--text-muted)";
+            }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <path d="M23 4v6h-6"/>
+              <path d="M1 20v-6h6"/>
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/>
+              <path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+            </svg>
+          </button>
+
+          {/* ── LIVE badge ── */}
           <div className="badge badge-red" style={{ fontSize: 10, padding: "2px 7px" }}>
             <span
               style={{
@@ -107,7 +282,7 @@ export function LiveFeed({ apiBase, hero = false }: Props) {
             LIVE
           </div>
 
-          {/* Fullscreen toggle */}
+          {/* ── Fullscreen toggle ── */}
           <button
             onClick={toggleFullscreen}
             title={isFullscreen ? "Sair da tela cheia (F)" : "Tela cheia (F)"}
@@ -205,13 +380,7 @@ export function LiveFeed({ apiBase, hero = false }: Props) {
         )}
 
         {error ? (
-          <ErrorState
-            onRetry={() => {
-              setError(false);
-              setLoading(true);
-              if (imgRef.current) imgRef.current.src = src + "?" + Date.now();
-            }}
-          />
+          <ErrorState onRetry={handleReload} />
         ) : (
           <img
             ref={imgRef}
@@ -254,6 +423,20 @@ export function LiveFeed({ apiBase, hero = false }: Props) {
     </div>
   );
 }
+
+/* ── Nav button style (prev/next camera) ──────────────────────── */
+const navBtnStyle: React.CSSProperties = {
+  background: "none",
+  border: "none",
+  cursor: "pointer",
+  padding: "4px 7px",
+  color: "var(--text-muted)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  transition: "color 0.15s",
+  lineHeight: 1,
+};
 
 function LoadingSpinner() {
   return (

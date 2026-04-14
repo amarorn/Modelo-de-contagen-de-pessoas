@@ -117,7 +117,8 @@ const KEY_HINTS: Partial<Record<string, string>> = {
   YOLO_NO_HALF: "1 = FP32 (mais lento na GPU)",
   YOLO_STREAM_BUFFER: "1 = fila Ultralytics (menos “Waiting for stream”, mais latência)",
   YOLO_HIDE_STALE_BOXES: "1 = não desenhar caixas sem deteção neste frame",
-  YOLO_WEB_SOURCE_PRESETS: "JSON: [{\"label\":\"...\",\"url\":\"...\"}, ...]",
+  YOLO_WEB_SOURCE_PRESETS:
+    "JSON: [{\"label\":\"...\",\"url\":\"...\"}, ...]; em url pode ser m3u8 ou página .html skylinewebcams.com/webcam/…",
   WEB_HEATMAP: "0 = desliga heatmap",
   INFER_NO_SHOW: "Uso interno / flags de visualização",
 };

@@ -38,10 +38,17 @@ const PRESETS: Preset[] = [
   { label: "Câmera 1",  value: "1", icon: <IconCamera size={14}/>, hint: "Segunda câmera local" },
   { label: "RTSP",      value: "rtsp://", icon: <IconWifi size={14}/>, hint: "Stream RTSP (IP cam)" },
   { label: "HLS/M3U8",  value: "https://", icon: <IconVideo size={14}/>, hint: "Stream HLS ao vivo" },
+  {
+    label: "Skyline (.html)",
+    value: "https://www.skylinewebcams.com/en/webcam/italia/lazio/roma/via-del-corso.html",
+    icon: <IconLink size={14} />,
+    hint: "Página da webcam SkylineWebcams; o servidor obtém o m3u8 ao reproduzir",
+  },
 ];
 
 export function SourceEditor({ apiBase, onClose }: Props) {
   const [currentSource, setCurrentSource] = useState<string>("");
+  const [activePresetId, setActivePresetId] = useState<string>("");
   const [inputValue, setInputValue]       = useState<string>("");
   const [labelForSave, setLabelForSave]   = useState<string>("");
   const [presets, setPresets]             = useState<SourcePreset[]>([]);
@@ -56,6 +63,7 @@ export function SourceEditor({ apiBase, onClose }: Props) {
     const d = await r.json();
     setCurrentSource(d.source ?? "");
     setInputValue(d.source ?? "");
+    setActivePresetId(typeof d.active_preset_id === "string" ? d.active_preset_id : "");
     setChanging(d.changing ?? false);
     if (Array.isArray(d.presets)) {
       setPresets(d.presets as SourcePreset[]);
@@ -85,6 +93,7 @@ export function SourceEditor({ apiBase, onClose }: Props) {
       }
       const j = await res.json();
       setCurrentSource(value);
+      setActivePresetId(typeof j.active_preset_id === "string" ? j.active_preset_id : "");
       setChanging(true);
       if (Array.isArray(j.presets)) setPresets(j.presets);
       setMsg({ text: "Fonte enviada! O stream está reconectando…", ok: true });
@@ -111,6 +120,7 @@ export function SourceEditor({ apiBase, onClose }: Props) {
       const j = await res.json();
       setCurrentSource(j.source ?? "");
       setInputValue(j.source ?? "");
+      setActivePresetId(typeof j.active_preset_id === "string" ? j.active_preset_id : presetId);
       setChanging(true);
       if (Array.isArray(j.presets)) setPresets(j.presets);
       setMsg({ text: "Câmera selecionada. Reconectando…", ok: true });
@@ -180,8 +190,12 @@ export function SourceEditor({ apiBase, onClose }: Props) {
     setMsg(null);
   };
 
-  const isActiveUrl = (url: string) =>
-    currentSource === url || (!!currentSource && !!url && currentSource.trim() === url.trim());
+  const isPresetActive = (p: SourcePreset) =>
+    (activePresetId !== "" && p.id === activePresetId) ||
+    (activePresetId === "" &&
+      (!!currentSource &&
+        !!p.url &&
+        (currentSource === p.url || currentSource.trim() === p.url.trim())));
 
   return (
     <div style={{
@@ -259,17 +273,17 @@ export function SourceEditor({ apiBase, onClose }: Props) {
                         flex: 1,
                         textAlign: "left",
                         padding: "10px 12px",
-                        background: isActiveUrl(p.url) ? "var(--cyan-dim)" : "var(--bg-elevated)",
-                        border: `1px solid ${isActiveUrl(p.url) ? "var(--border-glow)" : "var(--border)"}`,
+                        background: isPresetActive(p) ? "var(--cyan-dim)" : "var(--bg-elevated)",
+                        border: `1px solid ${isPresetActive(p) ? "var(--border-glow)" : "var(--border)"}`,
                         borderRadius: 8,
-                        color: isActiveUrl(p.url) ? "var(--cyan)" : "var(--text-primary)",
+                        color: isPresetActive(p) ? "var(--cyan)" : "var(--text-primary)",
                         fontSize: 13,
                         fontWeight: 600,
                         cursor: saving ? "wait" : "pointer",
                       }}
                     >
                       {p.label}
-                      {isActiveUrl(p.url) && (
+                      {isPresetActive(p) && (
                         <span style={{ marginLeft: 8, fontSize: 11, opacity: 0.85 }}>(ativa)</span>
                       )}
                     </button>
@@ -325,7 +339,7 @@ export function SourceEditor({ apiBase, onClose }: Props) {
               value={inputValue}
               onChange={(e) => { setInputValue(e.target.value); setMsg(null); }}
               onKeyDown={(e) => e.key === "Enter" && apply()}
-              placeholder="0, rtsp://…, https://…/live.m3u8, /path/to/video.mp4"
+              placeholder="0, rtsp://…, m3u8, ou página .html da SkylineWebcams"
               style={{
                 width: "100%", padding: "9px 12px",
                 background: "var(--bg-elevated)",
@@ -341,7 +355,8 @@ export function SourceEditor({ apiBase, onClose }: Props) {
               onBlur={(e)  => (e.target.style.borderColor = "var(--border)")}
             />
             <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>
-              Número inteiro = câmera local · RTSP/HLS = stream IP · caminho = ficheiro
+              Inteiro = câmera local · RTSP / m3u8 = stream · URL .html skylinewebcams.com/webcam/… = página
+              da webcam (o servidor resolve o manifesto)
             </div>
           </div>
 
