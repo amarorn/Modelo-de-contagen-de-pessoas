@@ -7,11 +7,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session, sessionmaker
 
+from persistence.envutil import strip_env_comment
 from persistence.models import Base
 
 
 def database_url() -> str:
-    return os.environ.get("DATABASE_URL", "sqlite:///data/contagem.db").strip()
+    return strip_env_comment(os.environ.get("DATABASE_URL", "sqlite:///data/contagem.db"))
 
 
 def make_engine() -> Engine:

@@ -8,6 +8,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from persistence.envutil import strip_env_comment
+
 _kafka_configured: bool | None = None
 _producer: Any = None
 _msg_queue: queue.Queue[dict[str, Any] | None] | None = None
@@ -15,17 +17,25 @@ _worker_thread: threading.Thread | None = None
 _stop = threading.Event()
 
 
+def _env_float(key: str, default: str) -> float:
+    return float(strip_env_comment(os.environ.get(key, default)))
+
+
+def _env_int(key: str, default: str) -> int:
+    return int(strip_env_comment(os.environ.get(key, default)))
+
+
 def _bootstrap_servers() -> str:
-    return os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "").strip()
+    return strip_env_comment(os.environ.get("KAFKA_BOOTSTRAP_SERVERS", ""))
 
 
 def _topic() -> str:
-    t = os.environ.get("KAFKA_TOPIC_PERSIST", "contagem.persist").strip()
+    t = strip_env_comment(os.environ.get("KAFKA_TOPIC_PERSIST", "contagem.persist"))
     return t or "contagem.persist"
 
 
 def _site_id() -> str:
-    s = os.environ.get("SITE_ID", "default").strip()
+    s = strip_env_comment(os.environ.get("SITE_ID", "default"))
     return s or "default"
 
 
@@ -75,9 +85,6 @@ def _worker() -> None:
         try:
             item = _msg_queue.get(timeout=0.35)  # type: ignore[union-attr]
         except queue.Empty:
-            p = _ensure_producer()
-            if p is not None:
-                p.poll(0)
             continue
         if item is None:
             break
@@ -86,7 +93,6 @@ def _worker() -> None:
             continue
         try:
             p.send(_topic(), value=item)
-            p.poll(0)
         except Exception as exc:
             print(f"[persist] falha ao enviar (Kafka): {exc}", flush=True)
 
@@ -95,7 +101,7 @@ def _start_queue_worker() -> None:
     global _msg_queue, _worker_thread
     if _msg_queue is not None:
         return
-    maxsz = int(os.environ.get("PERSIST_QUEUE_MAX", "4000"))
+    maxsz = _env_int("PERSIST_QUEUE_MAX", "4000")
     _msg_queue = queue.Queue(maxsize=max(64, maxsz))
     _worker_thread = threading.Thread(target=_worker, name="kafka-persist", daemon=True)
     _worker_thread.start()
@@ -146,10 +152,10 @@ def start_stats_emitter_thread(
 ) -> threading.Thread | None:
     if not _bootstrap_servers():
         return None
-    sec = float(
-        interval_sec
+    sec = (
+        float(interval_sec)
         if interval_sec is not None
-        else os.environ.get("PERSIST_STATS_INTERVAL", "2.0")
+        else _env_float("PERSIST_STATS_INTERVAL", "2.0")
     )
     sec = max(0.5, sec)
     _start_queue_worker()

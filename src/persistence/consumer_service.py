@@ -10,6 +10,7 @@ import sys
 from sqlalchemy.orm import sessionmaker
 
 from persistence.db import init_db, make_engine
+from persistence.envutil import strip_env_comment
 from persistence.models import ConfigEvent, StatsSnapshot
 
 
@@ -42,12 +43,12 @@ def _handle_message(sess: object, data: dict) -> None:
 
 
 def run_consumer() -> None:
-    bs = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:9092").strip()
+    bs = strip_env_comment(os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:9092"))
     if not bs:
         print("Defina KAFKA_BOOTSTRAP_SERVERS", file=sys.stderr)
         raise SystemExit(2)
-    topic = os.environ.get("KAFKA_TOPIC_PERSIST", "contagem.persist").strip() or "contagem.persist"
-    group = os.environ.get("KAFKA_CONSUMER_GROUP", "contagem-persist").strip() or "contagem-persist"
+    topic = strip_env_comment(os.environ.get("KAFKA_TOPIC_PERSIST", "contagem.persist")) or "contagem.persist"
+    group = strip_env_comment(os.environ.get("KAFKA_CONSUMER_GROUP", "contagem-persist")) or "contagem-persist"
 
     try:
         from kafka import KafkaConsumer
