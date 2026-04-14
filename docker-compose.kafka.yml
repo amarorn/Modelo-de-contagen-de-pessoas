@@ -1,0 +1,26 @@
+# Opcional: broker compatível com API Kafka (Redpanda).
+# Uso: docker compose -f docker-compose.kafka.yml up -d
+# Depois no .env: KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:9092
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.11
+    container_name: contagem-redpanda
+    command:
+      - redpanda
+      - start
+      - --smp
+      - "1"
+      - --memory
+      - 1G
+      - --reserve-memory
+      - 0M
+      - --overprovisioned
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr
+      - PLAINTEXT://127.0.0.1:9092
+    ports:
+      - "9092:9092"

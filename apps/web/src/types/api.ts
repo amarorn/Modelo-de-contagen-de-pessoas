@@ -9,6 +9,12 @@ export interface Stats {
   avg_dwell_sec: number;
   max_dwell_sec: number;
   loitering_threshold_sec: number;
+  /** Media do deslocamento no rastro (pes), só para quem nao esta parado; unidade: px por frame de inferencia */
+  avg_move_speed_px_per_frame: number;
+  /** avg_move_speed_px_per_frame * infer_fps_ema (px/s no plano da imagem) */
+  avg_move_speed_px_per_sec: number;
+  /** FPS efectivo do loop de inferencia (suavizado); nao e necessariamente o FPS do video fonte */
+  infer_fps_ema: number;
   error: string | null;
 
   sex_classifier_enabled: boolean;
@@ -34,6 +40,10 @@ export interface ApiConfig {
   mode: "line" | "polygon";
   line: { x1: number; y1: number; x2: number; y2: number } | null;
   polygon: { x: number; y: number }[] | null;
+  /** Rastro dos pés (linha) sobre o vídeo */
+  show_trail?: boolean;
+  /** Seta de direção estimada (PCA) sobre o vídeo */
+  show_heading?: boolean;
 }
 
 export type ConnectionStatus = "connected" | "connecting" | "error";

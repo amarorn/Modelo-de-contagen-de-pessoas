@@ -3,6 +3,8 @@ import type { ConnectionStatus } from "../types/api";
 interface Props {
   status: ConnectionStatus;
   apiBase: string;
+  onOpenSettings?: () => void;
+  onBackToLive?: () => void;
 }
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
@@ -11,7 +13,7 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
   error: "Sem conexão",
 };
 
-export function Header({ status, apiBase }: Props) {
+export function Header({ status, apiBase, onOpenSettings, onBackToLive }: Props) {
   return (
     <header
       style={{
@@ -65,6 +67,42 @@ export function Header({ status, apiBase }: Props) {
 
       {/* Right section */}
       <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+        {onBackToLive && (
+          <button
+            type="button"
+            onClick={onBackToLive}
+            style={{
+              padding: "8px 14px",
+              background: "var(--cyan-dim)",
+              border: "1px solid var(--border-glow)",
+              borderRadius: 8,
+              color: "var(--cyan)",
+              fontSize: 13,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            Dashboard ao vivo
+          </button>
+        )}
+        {onOpenSettings && !onBackToLive && (
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            style={{
+              padding: "8px 14px",
+              background: "var(--bg-elevated)",
+              border: "1px solid var(--border)",
+              borderRadius: 8,
+              color: "var(--text-secondary)",
+              fontSize: 13,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            Configuração e métricas
+          </button>
+        )}
         <div style={{ textAlign: "right" }}>
           <div style={{ fontSize: 11, color: "var(--text-muted)" }}>API</div>
           <div

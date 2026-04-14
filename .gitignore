@@ -5,6 +5,7 @@ __pycache__/
 .DS_Store
 .venv/
 outputs/
+data/contagem.db
 data/gender_classify_7k_view/
 /*.pt
 weights/**/*.pt

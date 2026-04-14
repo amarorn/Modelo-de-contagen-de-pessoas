@@ -104,6 +104,11 @@ body {
 .badge-amber { background: var(--amber-dim); color: var(--amber); }
 .badge-cyan  { background: var(--cyan-dim);  color: var(--cyan); }
 
+/* ── Spinner ───────────────────────────────────────────────── */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 /* ── Pulse dot ─────────────────────────────────────────────── */
 .pulse-dot {
   width: 8px; height: 8px;

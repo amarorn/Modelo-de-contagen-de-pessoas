@@ -3,6 +3,8 @@
 # Depois: rotular (Roboflow/CVAT), dividir train/val/test, treinar com YOLO_MODEL apontando para o teu best.pt.
 #
 # Uso:
+#   ./scripts/extract_frames_from_stream.sh
+#     (sem URL: usa URL_HLS_OU_RTSP_OU_FICHEIRO do .env)
 #   ./scripts/extract_frames_from_stream.sh 'https://.../live.m3u8?...'
 #   FPS=0.5 DURATION_SEC=120 ./scripts/extract_frames_from_stream.sh 'URL'
 #
@@ -23,9 +25,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${ROOT_DIR}"
 
-URL="${1:-}"
+if [ -f .env ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ''|\#*) continue ;;
+    esac
+    if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      export "$line"
+    fi
+  done < .env
+fi
+
+URL="${1:-${URL_HLS_OU_RTSP_OU_FICHEIRO:-}}"
 if [ -z "${URL}" ]; then
-  echo "Uso: $0 'URL_HLS_OU_RTSP_OU_FICHEIRO' [OUT_DIR]" >&2
+  echo "Uso: $0 ['URL_HLS_OU_RTSP_OU_FICHEIRO'] [OUT_DIR]" >&2
+  echo "  Sem argumentos: usa URL_HLS_OU_RTSP_OU_FICHEIRO do ficheiro .env na raiz do projeto." >&2
   echo "Exemplo: $0 'https://hd-auth.skylinewebcams.com/live.m3u8?a=...'" >&2
   exit 1
 fi

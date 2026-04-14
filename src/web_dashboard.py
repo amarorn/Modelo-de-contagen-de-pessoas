@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Dashboard web para contagem de pessoas em tempo real.
 
-Estatistica agregada por sexo (opcional): nao ha base de dados separada. O ambiente
+Persistencia opcional (metricas ao vivo e eventos de configuracao): produtor nao bloqueante
+para Kafka e consumidor que grava em SQL; ver KAFKA_BOOTSTRAP_SERVERS e
+scripts/run_kafka_consumer.sh.
+
+Estatistica agregada por sexo (opcional): nao ha base de dados separada para esses agregados. O ambiente
 `.env` pode definir `YOLO_SEX_MODEL` e `YOLO_SEX_ABSTAIN`; `scripts/run_web.sh`
 passa-os como `--sex-model` e `--sex-abstain`. `YOLO_SEX_MODEL` e o caminho no
 disco para um unico ficheiro de pesos Ultralytics `task=classify` (ex. treino com
@@ -14,7 +18,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
+import uuid
 from collections import deque
 import os
 import socket
@@ -39,6 +45,14 @@ from ultralytics import YOLO
 from device_utils import resolve_device
 from age_classifier_agg import AgeAggregateStats, OptionalAgeClassifier
 from sex_classifier_agg import OptionalSexClassifier, SexAggregateStats
+from env_settings import (
+    EDITABLE_ENV_KEYS,
+    filter_updates,
+    merge_env_file,
+    read_training_metrics_from_weights,
+    snapshot_editable_env,
+)
+from persistence.emitter import emit_config_event, shutdown_emitter, start_stats_emitter_thread
 
 
 def _resolve_listen_port(host: str, preferred: int) -> int:
@@ -142,12 +156,50 @@ def _peak_hour_stats(shared: SharedState) -> tuple[int, int]:
     return best_h, max(0, best_v)
 
 
+_MAX_SOURCE_PRESETS = 24
+
+
+def _load_source_presets_from_env() -> list[dict[str, str]]:
+    """JSON em YOLO_WEB_SOURCE_PRESETS ou um preset a partir de URL_HLS_OU_RTSP_OU_FICHEIRO."""
+    out: list[dict[str, str]] = []
+    raw = os.environ.get("YOLO_WEB_SOURCE_PRESETS", "").strip()
+    if raw:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, list):
+                for i, item in enumerate(data):
+                    if not isinstance(item, dict):
+                        continue
+                    label = str(item.get("label", "") or f"Câmera {i + 1}").strip()[:128]
+                    url = str(item.get("url", "")).strip()
+                    if not url or len(url) > 4096:
+                        continue
+                    pid = str(item.get("id", "")).strip()
+                    if not pid:
+                        pid = uuid.uuid4().hex[:12]
+                    out.append({"id": pid, "label": label, "url": url})
+        except (json.JSONDecodeError, TypeError):
+            pass
+    if not out:
+        fallback = os.environ.get("URL_HLS_OU_RTSP_OU_FICHEIRO", "").strip()
+        if fallback:
+            out.append(
+                {
+                    "id": uuid.uuid4().hex[:12],
+                    "label": "Stream principal (.env)",
+                    "url": fallback,
+                }
+            )
+    return out[:_MAX_SOURCE_PRESETS]
+
+
 class SharedState:
     def __init__(
         self,
         line_default: tuple[int, int, int, int],
         loitering_threshold_sec: float = 10.0,
     ) -> None:
+        self.session_id: str = uuid.uuid4().hex
         self.counter = CounterState()
         self.sex_agg = SexAggregateStats()
         self.age_agg = AgeAggregateStats()
@@ -171,6 +223,18 @@ class SharedState:
         self.avg_dwell_sec: float = 0.0
         self.max_dwell_sec: float = 0.0
         self.loitering_threshold_sec: float = max(0.0, float(loitering_threshold_sec))
+        # Media do rastro dos pes (px/frame) só para quem nao esta "parado"; px/s = * infer_fps_ema
+        self.avg_move_speed_px_per_frame: float = 0.0
+        self.avg_move_speed_px_per_sec: float = 0.0
+        self.infer_fps_ema: float = 0.0
+        # fonte de vídeo trocável em tempo real
+        self.source_live: str = ""
+        self.source_changed: bool = False
+        # Presets: {"id", "label", "url"} — max 24; preenchido no arranque a partir do .env
+        self.source_presets: list[dict[str, str]] = []
+        # overlays no MJPEG (caixas/labels mantêm-se; só rastro e seta PCA)
+        self.show_trail_overlay: bool = True
+        self.show_heading_overlay: bool = True
 
 
 class HeatmapAccumulator:
@@ -510,6 +574,115 @@ def resolve_tracker_yaml(spec: str) -> str:
     return spec
 
 
+# ── Dashboard visual theme (BGR) ────────────────────────────────────────────
+# Cores alinhadas com o frontend: #00D4FF cyan, #10B981 verde, #6366F1 indigo
+_C_CYAN        = (255, 212,   0)   # #00D4FF — movendo lado A / entrada
+_C_CYAN_DIM    = (170, 140,   0)   # stale
+_C_GREEN       = (129, 185,  16)   # #10B981 — movendo lado B / saída
+_C_GREEN_DIM   = ( 85, 120,  10)
+_C_GRAY        = (170, 170, 170)
+_C_GRAY_DIM    = (100, 100, 100)
+_C_AMBER       = ( 11, 158, 245)   # #F59E0B — parado
+_C_AMBER_DIM   = (  7, 105, 163)   # stale parado
+_C_RED         = ( 68,  68, 239)   # #EF4444 — loitering
+_C_RED_DIM     = ( 45,  45, 160)   # stale loitering
+_C_WHITE       = (255, 255, 255)
+_C_BLACK       = (  0,   0,   0)
+
+
+def _draw_corner_box(
+    frame: np.ndarray,
+    xa: int, ya: int, xb: int, yb: int,
+    color: tuple[int, int, int],
+    thickness: int = 2,
+    corner_frac: float = 0.22,
+) -> None:
+    """Bounding-box elegante: desenha apenas os cantos em vez do retângulo completo."""
+    w = xb - xa
+    h = yb - ya
+    cl = max(8, int(min(w, h) * corner_frac))
+    pts = [
+        ((xa, ya), (xa + cl, ya), (xa, ya + cl)),          # top-left
+        ((xb, ya), (xb - cl, ya), (xb, ya + cl)),          # top-right
+        ((xa, yb), (xa + cl, yb), (xa, yb - cl)),          # bottom-left
+        ((xb, yb), (xb - cl, yb), (xb, yb - cl)),          # bottom-right
+    ]
+    for corner, h_end, v_end in pts:
+        cv2.line(frame, corner, h_end, color, thickness, lineType=cv2.LINE_AA)
+        cv2.line(frame, corner, v_end, color, thickness, lineType=cv2.LINE_AA)
+
+
+def _draw_footstep_trail(
+    frame: np.ndarray,
+    pts: np.ndarray,
+    color: tuple[int, int, int],
+) -> None:
+    """Rastro em pegadas: círculos que crescem e ficam mais brilhantes do início ao fim."""
+    n = len(pts)
+    if n < 2:
+        return
+    shadow = tuple(max(0, int(c * 0.20)) for c in color)
+    for i, pt in enumerate(pts):
+        x, y = int(pt[0][0]), int(pt[0][1])
+        # progresso 0.0 (cauda) → 1.0 (cabeça)
+        t = i / (n - 1)
+        # raio: 2px na cauda → 5px na cabeça
+        r = max(2, int(2 + t * 3))
+        # cor: escura na cauda, plena na cabeça
+        faded = tuple(max(0, int(c * (0.25 + 0.75 * t))) for c in color)
+        # sombra preta para contraste
+        cv2.circle(frame, (x, y), r + 1, shadow, -1, lineType=cv2.LINE_AA)  # type: ignore[arg-type]
+        cv2.circle(frame, (x, y), r,     faded,  -1, lineType=cv2.LINE_AA)  # type: ignore[arg-type]
+
+
+def _draw_count_line(
+    frame: np.ndarray,
+    x1: int, y1: int, x2: int, y2: int,
+) -> None:
+    """Linha de contagem estilizada: glow escuro + cyan + marcadores nas extremidades."""
+    shadow = tuple(int(c * 0.3) for c in _C_CYAN)
+    cv2.line(frame, (x1, y1), (x2, y2), shadow, 6, lineType=cv2.LINE_AA)   # type: ignore[arg-type]
+    cv2.line(frame, (x1, y1), (x2, y2), _C_CYAN, 2, lineType=cv2.LINE_AA)
+    for pt in ((x1, y1), (x2, y2)):
+        cv2.circle(frame, pt, 6, _C_BLACK, -1, lineType=cv2.LINE_AA)
+        cv2.circle(frame, pt, 4, _C_CYAN,  -1, lineType=cv2.LINE_AA)
+
+
+def _draw_heading_arrow(
+    frame: np.ndarray,
+    p0: tuple[int, int], p1: tuple[int, int],
+    color: tuple[int, int, int],
+) -> None:
+    """Seta de direção com glow: contorno escuro + cor do tema."""
+    # arrowedLine(img, pt1, pt2, color, thickness, lineType, shift, tipLength)
+    cv2.arrowedLine(frame, p0, p1, _C_BLACK, 5, cv2.LINE_AA, 0, 0.30)
+    cv2.arrowedLine(frame, p0, p1, color,    2, cv2.LINE_AA, 0, 0.30)
+    # circle(img, center, radius, color, thickness, lineType, shift)
+    cv2.circle(frame, p1, 5, _C_BLACK, -1, cv2.LINE_AA)
+    cv2.circle(frame, p1, 3, color,    -1, cv2.LINE_AA)
+
+
+def _overlay_text(
+    frame: np.ndarray,
+    text: str,
+    live_text: str,
+    fw: int,
+    fh: int,
+) -> None:
+    """Textos de contagem no canto superior esquerdo com fundo escuro."""
+    pad = 10
+    for i, (line, scale, thick) in enumerate([
+        (text,      0.85, 2),
+        (live_text, 0.58, 1),
+    ]):
+        (tw, th), _ = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, scale, thick)
+        y = pad + (i * (th + 10)) + th
+        cv2.rectangle(frame, (pad - 4, y - th - 4), (pad + tw + 4, y + 4),
+                      (0, 0, 0), -1)
+        cv2.putText(frame, line, (pad, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, scale, _C_WHITE, thick, lineType=cv2.LINE_AA)
+
+
 def side_of_line(x: float, y: float, x1: int, y1: int, x2: int, y2: int) -> float:
     return (x - x1) * (y2 - y1) - (y - y1) * (x2 - x1)
 
@@ -801,8 +974,10 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
             f"[web] Modo contagem={_mode} | linha (pixels): {_ld} | poligono: {_np} vertices. "
             "Linha: pes cruzam segmento. Poligono: entrada/saida pela area (UI /roi)."
         )
-        source = int(args.source) if args.source.isdigit() else args.source
-        validate_source(source)
+        # Inicializa fonte no SharedState
+        with shared.lock:
+            if not shared.source_live:
+                shared.source_live = args.source
 
         sex_clf: OptionalSexClassifier | None = None
         if args.sex_model:
@@ -872,368 +1047,399 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 f"max_area_frac={args.max_box_area_frac} min_h_px={args.min_person_height_px}"
             )
 
-        track_kw: dict = {
-            "source": source,
-            "stream": True,
-            "conf": args.conf,
-            "iou": args.iou,
-            "imgsz": args.imgsz,
-            "max_det": args.max_det,
-            "classes": [person_class_id],
-            "tracker": tracker_yaml,
-            "persist": True,
-            "verbose": False,
-            "device": resolved_device,
-            "vid_stride": max(1, args.vid_stride),
-            "stream_buffer": args.stream_buffer,
-        }
-        if use_half:
-            track_kw["half"] = True
-        if args.augment:
-            track_kw["augment"] = True
-        if args.agnostic_nms:
-            track_kw["agnostic_nms"] = True
+        # ── Loop externo: reinicia o stream ao trocar fonte ─────────────────
+        while not stop_event.is_set():
+            with shared.lock:
+                raw_src = shared.source_live
+                shared.source_changed = False
 
-        stream = model.track(**track_kw)
-        foot_trail_by_id: dict[int, deque[tuple[int, int]]] = {}
-        trail_max = max(0, int(args.trail_len))
-        show_heading_arrow = (not args.no_heading_arrow) and trail_max >= 2
-
-        for result in stream:
-            if stop_event.is_set():
-                break
-
-            frame = result.orig_img
-            if frame is None:
+            source = int(raw_src) if str(raw_src).strip().isdigit() else raw_src
+            try:
+                validate_source(source)
+            except Exception as exc:
+                with shared.lock:
+                    shared.last_error = f"Fonte inválida: {exc}"
+                time.sleep(2.0)
                 continue
 
-            fh, fw = frame.shape[:2]
-            with shared.lock:
-                raw_line = shared.line_live
-                count_mode = shared.count_mode
-                poly_raw = list(shared.polygon_live)
-            cfg_sig = f"{count_mode}|{raw_line}|{poly_raw}"
-            if prev_config_sig is not None and cfg_sig != prev_config_sig:
-                last_side_by_id.clear()
-                prev_inside_by_id.clear()
-                foot_trail_by_id.clear()
-                zone_entered_at_by_id.clear()
-                stationary_since_by_id.clear()
-            prev_config_sig = cfg_sig
+            print(f"[web] Abrindo fonte: {source!r}")
 
-            x1, y1, x2, y2 = clamp_line(*raw_line, fw, fh)
-            poly_pts = clamp_polygon(poly_raw, fw, fh) if len(poly_raw) >= 3 else []
-            frame_ts = time.monotonic()
+            track_kw: dict = {
+                "source": source,
+                "stream": True,
+                "conf": args.conf,
+                "iou": args.iou,
+                "imgsz": args.imgsz,
+                "max_det": args.max_det,
+                "classes": [person_class_id],
+                "tracker": tracker_yaml,
+                "persist": True,
+                "verbose": False,
+                "device": resolved_device,
+                "vid_stride": max(1, args.vid_stride),
+                "stream_buffer": args.stream_buffer,
+            }
+            if use_half:
+                track_kw["half"] = True
+            if args.augment:
+                track_kw["augment"] = True
+            if args.agnostic_nms:
+                track_kw["agnostic_nms"] = True
 
-            entry_boxes: list[tuple[float, float, float, float]] = []
+            stream = model.track(**track_kw)
+            foot_trail_by_id: dict[int, deque[tuple[int, int]]] = {}
+            trail_max = max(0, int(args.trail_len))
+            show_heading_arrow = (not args.no_heading_arrow) and trail_max >= 2
+            prev_frame_mono: float | None = None
+            ema_infer_fps: float = 0.0
 
-            foot_points: list[tuple[float, float]] = []
-            current_present_ids: set[int] = set()
-
-            if result.boxes is not None and len(result.boxes) > 0:
-                xys = result.boxes.xyxy.tolist()
-                for x_min, y_min, x_max, y_max in xys:
-                    box = (float(x_min), float(y_min), float(x_max), float(y_max))
-                    if not args.no_shape_filter and not bbox_looks_like_person(
-                        box,
-                        fw,
-                        fh,
-                        args.min_person_ar,
-                        args.max_person_ar,
-                        args.max_box_area_frac,
-                        args.min_person_height_px,
-                    ):
-                        continue
-                    foot_x = (x_min + x_max) / 2.0
-                    foot_y = float(y_max)
-                    if count_mode == "polygon" and len(poly_pts) >= 3:
-                        if not foot_inside_polygon(foot_x, foot_y, poly_pts):
-                            continue
-                    foot_points.append((foot_x, foot_y))
-
-            if heat is not None:
-                heat.step(fh, fw, foot_points)
-                frame = heat.blend_over(frame)
-
-            ids_list: list[int] | None = None
-            xys_raw: list[tuple[float, float, float, float]] | None = None
-            if result.boxes is not None and len(result.boxes) > 0 and result.boxes.id is not None:
-                ids_list = [int(t) for t in result.boxes.id.int().tolist()]
-                xys_raw = [tuple(map(float, t)) for t in result.boxes.xyxy.tolist()]
-                if not args.no_shape_filter:
-                    ids_list, xys_raw = filter_boxes_by_shape(
-                        ids_list,
-                        xys_raw,
-                        fw,
-                        fh,
-                        args.min_person_ar,
-                        args.max_person_ar,
-                        args.max_box_area_frac,
-                        args.min_person_height_px,
-                    )
-                for track_id, (x_min, y_min, x_max, y_max) in zip(ids_list, xys_raw):
-                    foot_x = (x_min + x_max) / 2.0
-                    foot_y = float(y_max)
-                    inside_for_presence = True
-                    if count_mode == "polygon" and len(poly_pts) >= 3:
-                        inside_for_presence = foot_inside_polygon(foot_x, foot_y, poly_pts)
-                    if inside_for_presence:
-                        current_present_ids.add(track_id)
-                        zone_entered_at_by_id.setdefault(track_id, frame_ts)
-                    if count_mode == "polygon" and len(poly_pts) >= 3:
-                        inside = inside_for_presence
-                        with shared.lock:
-                            prev_b = prev_inside_by_id.get(track_id)
-                            if prev_b is not None and not prev_b and inside:
-                                shared.counter.entries += 1
-                                _bump_hourly(shared, "entry")
-                                entry_boxes.append((x_min, y_min, x_max, y_max))
-                            elif prev_b is not None and prev_b and not inside:
-                                shared.counter.exits += 1
-                                _bump_hourly(shared, "exit")
-                        prev_inside_by_id[track_id] = inside
-                    elif count_mode == "line":
-                        side = side_of_line(foot_x, foot_y, x1, y1, x2, y2)
-                        with shared.lock:
-                            prev = last_side_by_id.get(track_id)
-                            if prev is not None and prev < 0 <= side:
-                                shared.counter.entries += 1
-                                _bump_hourly(shared, "entry")
-                                entry_boxes.append((x_min, y_min, x_max, y_max))
-                            elif prev is not None and prev > 0 >= side:
-                                shared.counter.exits += 1
-                                _bump_hourly(shared, "exit")
-                        last_side_by_id[track_id] = side
-
-                if entry_boxes and result.orig_img is not None:
-                    for box in entry_boxes:
-                        if sex_clf and sex_clf.enabled:
-                            bucket = sex_clf.classify_crop(result.orig_img, box)
-                            with shared.lock:
-                                if bucket == "female":
-                                    shared.sex_agg.female += 1
-                                elif bucket == "male":
-                                    shared.sex_agg.male += 1
-                                else:
-                                    shared.sex_agg.unknown += 1
-                        if age_clf and age_clf.enabled:
-                            ab = age_clf.classify_crop(result.orig_img, box)
-                            with shared.lock:
-                                if ab == "child":
-                                    shared.age_agg.child += 1
-                                elif ab == "adolescent":
-                                    shared.age_agg.adolescent += 1
-                                elif ab == "young":
-                                    shared.age_agg.young += 1
-                                elif ab == "adult":
-                                    shared.age_agg.adult += 1
-                                elif ab == "elderly":
-                                    shared.age_agg.elderly += 1
-                                else:
-                                    shared.age_agg.unknown += 1
-
-            draw_items = box_overlay.step(ids_list, xys_raw)
-            active_ids = {t for t, _, _ in draw_items}
-            raw_foot_by_id: dict[int, tuple[int, int]] = {}
-            if ids_list is not None and xys_raw is not None and len(ids_list) == len(xys_raw):
-                for tid, (rx1, ry1, rx2, ry2) in zip(ids_list, xys_raw):
-                    raw_foot_by_id[int(tid)] = (
-                        int(round((rx1 + rx2) / 2.0)),
-                        int(round(float(ry2))),
-                    )
-            for tid in list(last_side_by_id.keys()):
-                if tid not in active_ids:
-                    del last_side_by_id[tid]
-            for tid in list(prev_inside_by_id.keys()):
-                if tid not in active_ids:
-                    del prev_inside_by_id[tid]
-            for tid in list(foot_trail_by_id.keys()):
-                if tid not in active_ids:
-                    del foot_trail_by_id[tid]
-            for tid in list(zone_entered_at_by_id.keys()):
-                if tid not in current_present_ids:
-                    del zone_entered_at_by_id[tid]
-            for tid in list(stationary_since_by_id.keys()):
-                if tid not in current_present_ids:
-                    del stationary_since_by_id[tid]
-
-            for track_id, (xa, ya, xb, yb), stale in draw_items:
-                if track_id in raw_foot_by_id:
-                    fcx, fcy = raw_foot_by_id[track_id]
-                else:
-                    fcx = int(round((xa + xb) / 2.0))
-                    fcy = int(yb)
-                side_v = last_side_by_id.get(track_id) if count_mode == "line" else None
-                if count_mode == "line" and side_v is not None:
-                    if side_v < 0:
-                        color = (60, 100, 200) if stale else (80, 140, 255)
-                        side_tag = "A"
-                    elif side_v > 0:
-                        color = (50, 160, 50) if stale else (70, 210, 70)
-                        side_tag = "B"
-                    else:
-                        color = (140, 140, 140) if stale else (180, 180, 180)
-                        side_tag = "|"
-                    label = f"id={track_id} {side_tag}" + (" ~" if stale else "")
-                else:
-                    color = (0, 200, 100) if stale else (0, 255, 0)
-                    label = f"id={track_id}" + (" ~" if stale else "")
-                if trail_max >= 2:
-                    dq = foot_trail_by_id.get(track_id)
-                    if dq is None:
-                        dq = deque(maxlen=trail_max)
-                        foot_trail_by_id[track_id] = dq
-                    if not dq or dq[-1] != (fcx, fcy):
-                        dq.append((fcx, fcy))
-                    if len(dq) >= 2:
-                        pts = np.array(list(dq), dtype=np.int32).reshape((-1, 1, 2))
-                        cv2.polylines(
-                            frame,
-                            [pts],
-                            isClosed=False,
-                            color=color,
-                            thickness=3,
-                            lineType=cv2.LINE_AA,
-                        )
-                cv2.rectangle(frame, (xa, ya), (xb, yb), color, 2)
-                cv2.putText(
-                    frame,
-                    label,
-                    (xa, ya - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    color,
-                    1,
-                )
-                if trail_max >= 2 and show_heading_arrow:
-                    dq = foot_trail_by_id.get(track_id)
-                    if dq is not None and len(dq) >= args.heading_min_points:
-                        hdg = predict_trail_heading_pca(
-                            list(dq),
-                            max_points=min(trail_max, 28),
-                            min_points=args.heading_min_points,
-                            min_anisotropy=args.heading_min_anisotropy,
-                            min_speed=args.heading_min_speed,
-                        )
-                        if hdg is not None:
-                            ux, uy, _conf = hdg
-                            L = max(24, int(args.heading_arrow_len))
-                            box_h = max(1, int(yb - ya))
-                            acx = int(round((xa + xb) / 2.0))
-                            off = max(8, min(28, box_h // 4))
-                            acy = int(np.clip(ya + off, ya + 1, max(ya + 1, yb - 2)))
-                            tx = int(round(acx + ux * L))
-                            ty = int(round(acy + uy * L))
-                            tx = int(np.clip(tx, 0, fw - 1))
-                            ty = int(np.clip(ty, 0, fh - 1))
-                            p0 = (acx, acy)
-                            p1 = (tx, ty)
-                            if (tx - acx) ** 2 + (ty - acy) ** 2 >= 16:
-                                cv2.arrowedLine(
-                                    frame,
-                                    p0,
-                                    p1,
-                                    (0, 0, 0),
-                                    5,
-                                    lineType=cv2.LINE_AA,
-                                    tipLength=0.28,
-                                )
-                                cv2.arrowedLine(
-                                    frame,
-                                    p0,
-                                    p1,
-                                    (255, 255, 255),
-                                    3,
-                                    lineType=cv2.LINE_AA,
-                                    tipLength=0.28,
-                                )
-                                cv2.circle(frame, p1, 5, (0, 0, 0), -1, lineType=cv2.LINE_AA)
-                                cv2.circle(frame, p1, 4, (255, 255, 255), -1, lineType=cv2.LINE_AA)
-
-            moving_now = 0
-            stationary_now = 0
-            loitering_now = 0
-            dwell_values: list[float] = []
-            trail_eval_max = max(2, min(trail_max, 12))
-            for tid in current_present_ids:
-                entered_at = zone_entered_at_by_id.get(tid, frame_ts)
-                dwell_values.append(max(0.0, frame_ts - entered_at))
-                dq = foot_trail_by_id.get(tid)
-                speed = estimate_trail_speed(list(dq), max_points=trail_eval_max) if dq is not None else None
-                is_stationary = (
-                    dq is not None
-                    and len(dq) >= max(2, args.stationary_min_points)
-                    and speed is not None
-                    and speed <= args.stationary_max_speed
-                )
-                if is_stationary:
-                    stationary_now += 1
-                    stationary_since_by_id.setdefault(tid, frame_ts)
-                    if frame_ts - stationary_since_by_id[tid] >= args.loitering_seconds:
-                        loitering_now += 1
-                else:
-                    moving_now += 1
-                    stationary_since_by_id.pop(tid, None)
-
-            occupancy_now = len(current_present_ids)
-            avg_dwell_sec = float(sum(dwell_values) / len(dwell_values)) if dwell_values else 0.0
-            max_dwell_sec = float(max(dwell_values)) if dwell_values else 0.0
-            with shared.lock:
-                text = f"in={shared.counter.entries} out={shared.counter.exits} total={shared.counter.total}"
-                live_text = (
-                    f"presentes={occupancy_now} mov={moving_now} "
-                    f"paradas={stationary_now} fila={loitering_now}"
-                )
-                shared.occupancy_now = occupancy_now
-                shared.moving_now = moving_now
-                shared.stationary_now = stationary_now
-                shared.loitering_now = loitering_now
-                shared.avg_dwell_sec = avg_dwell_sec
-                shared.max_dwell_sec = max_dwell_sec
-            if count_mode == "polygon" and len(poly_pts) >= 3:
-                arr = np.array(poly_pts, dtype=np.int32).reshape(-1, 1, 2)
-                cv2.polylines(frame, [arr], isClosed=True, color=(255, 200, 0), thickness=2)
-                cv2.putText(
-                    frame,
-                    "ROI poligonal",
-                    (20, fh - 20),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (255, 200, 0),
-                    2,
-                )
-                cv2.putText(frame, text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-                cv2.putText(frame, live_text, (20, 76), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            elif count_mode == "polygon":
-                cv2.putText(
-                    frame,
-                    "Defina poligono em /roi (min. 3 pontos)",
-                    (20, 36),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.65,
-                    (0, 165, 255),
-                    2,
-                )
-                cv2.putText(frame, text, (20, 72), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-                cv2.putText(frame, live_text, (20, 106), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            else:
-                cv2.line(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                cv2.putText(frame, text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-                cv2.putText(frame, live_text, (20, 76), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                cv2.putText(
-                    frame,
-                    "A/B=lados | linha= trajeto | seta (topo bbox)= tendencia (PCA)",
-                    (20, fh - 24),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (200, 200, 200),
-                    1,
-                )
-
-            ok, encoded = cv2.imencode(".jpg", frame)
-            if ok:
+            for result in stream:
+                if stop_event.is_set():
+                    break
                 with shared.lock:
-                    shared.last_frame_jpeg = encoded.tobytes()
+                    if shared.source_changed:
+                        break
+
+                frame = result.orig_img
+                if frame is None:
+                    continue
+
+                fh, fw = frame.shape[:2]
+                with shared.lock:
+                    raw_line = shared.line_live
+                    count_mode = shared.count_mode
+                    poly_raw = list(shared.polygon_live)
+                cfg_sig = f"{count_mode}|{raw_line}|{poly_raw}"
+                if prev_config_sig is not None and cfg_sig != prev_config_sig:
+                    last_side_by_id.clear()
+                    prev_inside_by_id.clear()
+                    foot_trail_by_id.clear()
+                    zone_entered_at_by_id.clear()
+                    stationary_since_by_id.clear()
+                prev_config_sig = cfg_sig
+
+                x1, y1, x2, y2 = clamp_line(*raw_line, fw, fh)
+                poly_pts = clamp_polygon(poly_raw, fw, fh) if len(poly_raw) >= 3 else []
+                frame_ts = time.monotonic()
+                if prev_frame_mono is not None:
+                    dt = frame_ts - prev_frame_mono
+                    if dt > 1e-6:
+                        inst_fps = 1.0 / dt
+                        ema_infer_fps = (
+                            inst_fps if ema_infer_fps <= 0 else 0.92 * ema_infer_fps + 0.08 * inst_fps
+                        )
+                prev_frame_mono = frame_ts
+
+                entry_boxes: list[tuple[float, float, float, float]] = []
+
+                foot_points: list[tuple[float, float]] = []
+                current_present_ids: set[int] = set()
+                # conjuntos de status do frame anterior — usados na colorização
+                _stationary_ids: set[int] = set()
+                _loitering_ids: set[int] = set()
+
+                if result.boxes is not None and len(result.boxes) > 0:
+                    xys = result.boxes.xyxy.tolist()
+                    for x_min, y_min, x_max, y_max in xys:
+                        box = (float(x_min), float(y_min), float(x_max), float(y_max))
+                        if not args.no_shape_filter and not bbox_looks_like_person(
+                            box,
+                            fw,
+                            fh,
+                            args.min_person_ar,
+                            args.max_person_ar,
+                            args.max_box_area_frac,
+                            args.min_person_height_px,
+                        ):
+                            continue
+                        foot_x = (x_min + x_max) / 2.0
+                        foot_y = float(y_max)
+                        if count_mode == "polygon" and len(poly_pts) >= 3:
+                            if not foot_inside_polygon(foot_x, foot_y, poly_pts):
+                                continue
+                        foot_points.append((foot_x, foot_y))
+
+                if heat is not None:
+                    heat.step(fh, fw, foot_points)
+                    frame = heat.blend_over(frame)
+
+                ids_list: list[int] | None = None
+                xys_raw: list[tuple[float, float, float, float]] | None = None
+                if result.boxes is not None and len(result.boxes) > 0 and result.boxes.id is not None:
+                    ids_list = [int(t) for t in result.boxes.id.int().tolist()]
+                    xys_raw = [tuple(map(float, t)) for t in result.boxes.xyxy.tolist()]
+                    if not args.no_shape_filter:
+                        ids_list, xys_raw = filter_boxes_by_shape(
+                            ids_list,
+                            xys_raw,
+                            fw,
+                            fh,
+                            args.min_person_ar,
+                            args.max_person_ar,
+                            args.max_box_area_frac,
+                            args.min_person_height_px,
+                        )
+                    for track_id, (x_min, y_min, x_max, y_max) in zip(ids_list, xys_raw):
+                        foot_x = (x_min + x_max) / 2.0
+                        foot_y = float(y_max)
+                        inside_for_presence = True
+                        if count_mode == "polygon" and len(poly_pts) >= 3:
+                            inside_for_presence = foot_inside_polygon(foot_x, foot_y, poly_pts)
+                        if inside_for_presence:
+                            current_present_ids.add(track_id)
+                            zone_entered_at_by_id.setdefault(track_id, frame_ts)
+                        if count_mode == "polygon" and len(poly_pts) >= 3:
+                            inside = inside_for_presence
+                            with shared.lock:
+                                prev_b = prev_inside_by_id.get(track_id)
+                                if prev_b is not None and not prev_b and inside:
+                                    shared.counter.entries += 1
+                                    _bump_hourly(shared, "entry")
+                                    entry_boxes.append((x_min, y_min, x_max, y_max))
+                                elif prev_b is not None and prev_b and not inside:
+                                    shared.counter.exits += 1
+                                    _bump_hourly(shared, "exit")
+                            prev_inside_by_id[track_id] = inside
+                        elif count_mode == "line":
+                            side = side_of_line(foot_x, foot_y, x1, y1, x2, y2)
+                            with shared.lock:
+                                prev = last_side_by_id.get(track_id)
+                                if prev is not None and prev < 0 <= side:
+                                    shared.counter.entries += 1
+                                    _bump_hourly(shared, "entry")
+                                    entry_boxes.append((x_min, y_min, x_max, y_max))
+                                elif prev is not None and prev > 0 >= side:
+                                    shared.counter.exits += 1
+                                    _bump_hourly(shared, "exit")
+                            last_side_by_id[track_id] = side
+
+                    if entry_boxes and result.orig_img is not None:
+                        for box in entry_boxes:
+                            if sex_clf and sex_clf.enabled:
+                                bucket = sex_clf.classify_crop(result.orig_img, box)
+                                with shared.lock:
+                                    if bucket == "female":
+                                        shared.sex_agg.female += 1
+                                    elif bucket == "male":
+                                        shared.sex_agg.male += 1
+                                    else:
+                                        shared.sex_agg.unknown += 1
+                            if age_clf and age_clf.enabled:
+                                ab = age_clf.classify_crop(result.orig_img, box)
+                                with shared.lock:
+                                    if ab == "child":
+                                        shared.age_agg.child += 1
+                                    elif ab == "adolescent":
+                                        shared.age_agg.adolescent += 1
+                                    elif ab == "young":
+                                        shared.age_agg.young += 1
+                                    elif ab == "adult":
+                                        shared.age_agg.adult += 1
+                                    elif ab == "elderly":
+                                        shared.age_agg.elderly += 1
+                                    else:
+                                        shared.age_agg.unknown += 1
+
+                draw_items = box_overlay.step(ids_list, xys_raw)
+                active_ids = {t for t, _, _ in draw_items}
+                raw_foot_by_id: dict[int, tuple[int, int]] = {}
+                if ids_list is not None and xys_raw is not None and len(ids_list) == len(xys_raw):
+                    for tid, (rx1, ry1, rx2, ry2) in zip(ids_list, xys_raw):
+                        raw_foot_by_id[int(tid)] = (
+                            int(round((rx1 + rx2) / 2.0)),
+                            int(round(float(ry2))),
+                        )
+                for tid in list(last_side_by_id.keys()):
+                    if tid not in active_ids:
+                        del last_side_by_id[tid]
+                for tid in list(prev_inside_by_id.keys()):
+                    if tid not in active_ids:
+                        del prev_inside_by_id[tid]
+                for tid in list(foot_trail_by_id.keys()):
+                    if tid not in active_ids:
+                        del foot_trail_by_id[tid]
+                for tid in list(zone_entered_at_by_id.keys()):
+                    if tid not in current_present_ids:
+                        del zone_entered_at_by_id[tid]
+                for tid in list(stationary_since_by_id.keys()):
+                    if tid not in current_present_ids:
+                        del stationary_since_by_id[tid]
+
+                with shared.lock:
+                    show_trail_ui = shared.show_trail_overlay
+                    show_heading_ui = shared.show_heading_overlay
+
+                for track_id, (xa, ya, xb, yb), stale in draw_items:
+                    if track_id in raw_foot_by_id:
+                        fcx, fcy = raw_foot_by_id[track_id]
+                    else:
+                        fcx = int(round((xa + xb) / 2.0))
+                        fcy = int(yb)
+
+                    # ── Estado de movimento (usa frame anterior) ──────────
+                    is_loiter = track_id in _loitering_ids
+                    is_static = track_id in _stationary_ids
+
+                    # ── Cor base pelo lado da linha ───────────────────────
+                    side_v = last_side_by_id.get(track_id) if count_mode == "line" else None
+                    if count_mode == "line" and side_v is not None:
+                        if side_v < 0:
+                            base_mv = _C_CYAN
+                            base_mv_dim = _C_CYAN_DIM
+                            side_tag = "A"
+                        elif side_v > 0:
+                            base_mv = _C_GREEN
+                            base_mv_dim = _C_GREEN_DIM
+                            side_tag = "B"
+                        else:
+                            base_mv = _C_GRAY
+                            base_mv_dim = _C_GRAY_DIM
+                            side_tag = "|"
+                        label = f"{track_id}{side_tag}" + ("~" if stale else "")
+                    else:
+                        base_mv = _C_CYAN
+                        base_mv_dim = _C_CYAN_DIM
+                        side_tag = ""
+                        label = f"{track_id}" + ("~" if stale else "")
+
+                    # ── Cor final: loitering > parado > movendo ───────────
+                    if is_loiter:
+                        color = _C_RED_DIM if stale else _C_RED
+                        label = f"{track_id}!" + ("~" if stale else "")
+                    elif is_static:
+                        color = _C_AMBER_DIM if stale else _C_AMBER
+                        label = f"{track_id}■" + ("~" if stale else "")
+                    else:
+                        color = base_mv_dim if stale else base_mv
+                    if trail_max >= 2:
+                        dq = foot_trail_by_id.get(track_id)
+                        if dq is None:
+                            dq = deque(maxlen=trail_max)
+                            foot_trail_by_id[track_id] = dq
+                        if not dq or dq[-1] != (fcx, fcy):
+                            dq.append((fcx, fcy))
+                        if show_trail_ui and len(dq) >= 2:
+                            pts = np.array(list(dq), dtype=np.int32).reshape((-1, 1, 2))
+                            _draw_footstep_trail(frame, pts, color)
+                    _draw_corner_box(frame, xa, ya, xb, yb, color, thickness=2)
+                    # Label compacto com fundo escuro semi-transparente
+                    lx, ly = xa + 4, ya - 12
+                    if ly < 14:
+                        ly = ya + 16
+                    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+                    cv2.rectangle(frame, (lx - 2, ly - th - 2), (lx + tw + 2, ly + 2),
+                                  _C_BLACK, -1)
+                    cv2.putText(frame, label, (lx, ly),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.42, color, 1, lineType=cv2.LINE_AA)
+                    if show_heading_ui and trail_max >= 2 and show_heading_arrow:
+                        dq = foot_trail_by_id.get(track_id)
+                        if dq is not None and len(dq) >= args.heading_min_points:
+                            hdg = predict_trail_heading_pca(
+                                list(dq),
+                                max_points=min(trail_max, 28),
+                                min_points=args.heading_min_points,
+                                min_anisotropy=args.heading_min_anisotropy,
+                                min_speed=args.heading_min_speed,
+                            )
+                            if hdg is not None:
+                                ux, uy, _conf = hdg
+                                L = max(24, int(args.heading_arrow_len))
+                                box_h = max(1, int(yb - ya))
+                                acx = int(round((xa + xb) / 2.0))
+                                off = max(8, min(28, box_h // 4))
+                                acy = int(np.clip(ya + off, ya + 1, max(ya + 1, yb - 2)))
+                                tx = int(round(acx + ux * L))
+                                ty = int(round(acy + uy * L))
+                                tx = int(np.clip(tx, 0, fw - 1))
+                                ty = int(np.clip(ty, 0, fh - 1))
+                                p0 = (acx, acy)
+                                p1 = (tx, ty)
+                                if (tx - acx) ** 2 + (ty - acy) ** 2 >= 16:
+                                    _draw_heading_arrow(frame, p0, p1, color)
+
+                moving_now = 0
+                stationary_now = 0
+                loitering_now = 0
+                dwell_values: list[float] = []
+                move_speed_samples: list[float] = []
+                trail_eval_max = max(2, min(trail_max, 12))
+                for tid in current_present_ids:
+                    entered_at = zone_entered_at_by_id.get(tid, frame_ts)
+                    dwell_values.append(max(0.0, frame_ts - entered_at))
+                    dq = foot_trail_by_id.get(tid)
+                    speed = estimate_trail_speed(list(dq), max_points=trail_eval_max) if dq is not None else None
+                    is_stationary = (
+                        dq is not None
+                        and len(dq) >= max(2, args.stationary_min_points)
+                        and speed is not None
+                        and speed <= args.stationary_max_speed
+                    )
+                    if is_stationary:
+                        stationary_now += 1
+                        _stationary_ids.add(tid)
+                        stationary_since_by_id.setdefault(tid, frame_ts)
+                        if frame_ts - stationary_since_by_id[tid] >= args.loitering_seconds:
+                            loitering_now += 1
+                            _loitering_ids.add(tid)
+                    else:
+                        moving_now += 1
+                        stationary_since_by_id.pop(tid, None)
+                        if speed is not None:
+                            move_speed_samples.append(speed)
+
+                occupancy_now = len(current_present_ids)
+                avg_dwell_sec = float(sum(dwell_values) / len(dwell_values)) if dwell_values else 0.0
+                max_dwell_sec = float(max(dwell_values)) if dwell_values else 0.0
+                avg_move_px_frame = (
+                    float(sum(move_speed_samples) / len(move_speed_samples)) if move_speed_samples else 0.0
+                )
+                avg_move_px_sec = avg_move_px_frame * ema_infer_fps if ema_infer_fps > 0 else 0.0
+                with shared.lock:
+                    text = f"in={shared.counter.entries} out={shared.counter.exits} total={shared.counter.total}"
+                    live_text = (
+                        f"presentes={occupancy_now} mov={moving_now} "
+                        f"paradas={stationary_now} fila={loitering_now}"
+                    )
+                    shared.occupancy_now = occupancy_now
+                    shared.moving_now = moving_now
+                    shared.stationary_now = stationary_now
+                    shared.loitering_now = loitering_now
+                    shared.avg_dwell_sec = avg_dwell_sec
+                    shared.max_dwell_sec = max_dwell_sec
+                    shared.avg_move_speed_px_per_frame = avg_move_px_frame
+                    shared.avg_move_speed_px_per_sec = avg_move_px_sec
+                    shared.infer_fps_ema = ema_infer_fps
+                if count_mode == "polygon" and len(poly_pts) >= 3:
+                    arr = np.array(poly_pts, dtype=np.int32).reshape(-1, 1, 2)
+                    # Glow do polígono: sombra escura + amber
+                    shadow_poly = tuple(int(c * 0.25) for c in _C_AMBER)
+                    cv2.polylines(frame, [arr], isClosed=True, color=shadow_poly, thickness=5, lineType=cv2.LINE_AA)  # type: ignore[arg-type]
+                    cv2.polylines(frame, [arr], isClosed=True, color=_C_AMBER, thickness=2, lineType=cv2.LINE_AA)
+                    for pt in poly_pts:
+                        cv2.circle(frame, pt, 5, _C_BLACK, -1, lineType=cv2.LINE_AA)
+                        cv2.circle(frame, pt, 3, _C_AMBER,  -1, lineType=cv2.LINE_AA)
+                    _overlay_text(frame, text, live_text, fw, fh)
+                elif count_mode == "polygon":
+                    cv2.putText(
+                        frame,
+                        "Defina poligono em /roi (min. 3 pontos)",
+                        (20, 36),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.65,
+                        _C_AMBER,
+                        2,
+                        lineType=cv2.LINE_AA,
+                    )
+                    _overlay_text(frame, text, live_text, fw, fh)
+                else:
+                    _draw_count_line(frame, x1, y1, x2, y2)
+                    _overlay_text(frame, text, live_text, fw, fh)
+
+                ok, encoded = cv2.imencode(".jpg", frame)
+                if ok:
+                    with shared.lock:
+                        shared.last_frame_jpeg = encoded.tobytes()
+                # fim do for — se source_changed, o while recomeça; se stop_event, sai
     except Exception as exc:
         with shared.lock:
             shared.last_error = str(exc)
@@ -1394,9 +1600,93 @@ _ROI_PAGE_HTML = """
 """
 
 
+def _persist_config_event(shared: SharedState, event_type: str, payload: dict) -> None:
+    try:
+        emit_config_event(session_id=shared.session_id, event_type=event_type, payload=payload)
+    except Exception as exc:
+        if os.environ.get("YOLO_WEB_VERBOSE", "").strip() == "1":
+            print(f"[persist] {event_type}: {exc}", flush=True)
+
+
+def build_stats_payload(shared: SharedState) -> dict:
+    """Mesmo conteudo que GET /api/stats (para fila Kafka / espelho)."""
+    with shared.lock:
+        peak_h, peak_v = _peak_hour_stats(shared)
+        return {
+            "entries": shared.counter.entries,
+            "exits": shared.counter.exits,
+            "total_passages": shared.counter.total,
+            "occupancy_now": shared.occupancy_now,
+            "moving_now": shared.moving_now,
+            "stationary_now": shared.stationary_now,
+            "loitering_now": shared.loitering_now,
+            "avg_dwell_sec": shared.avg_dwell_sec,
+            "max_dwell_sec": shared.max_dwell_sec,
+            "loitering_threshold_sec": shared.loitering_threshold_sec,
+            "avg_move_speed_px_per_frame": shared.avg_move_speed_px_per_frame,
+            "avg_move_speed_px_per_sec": shared.avg_move_speed_px_per_sec,
+            "infer_fps_ema": shared.infer_fps_ema,
+            "error": shared.last_error,
+            "sex_classifier_enabled": shared.sex_classifier_enabled,
+            "sex_female_agg": shared.sex_agg.female,
+            "sex_male_agg": shared.sex_agg.male,
+            "sex_unknown_agg": shared.sex_agg.unknown,
+            "age_classifier_enabled": shared.age_classifier_enabled,
+            "age_child_agg": shared.age_agg.child,
+            "age_adolescent_agg": shared.age_agg.adolescent,
+            "age_young_agg": shared.age_agg.young,
+            "age_adult_agg": shared.age_agg.adult,
+            "age_elderly_agg": shared.age_agg.elderly,
+            "age_unknown_agg": shared.age_agg.unknown,
+            "hourly_entries": list(shared.hourly_entries),
+            "hourly_exits": list(shared.hourly_exits),
+            "peak_hour": peak_h,
+            "peak_flow": peak_v,
+        }
+
+
 def create_app(shared: SharedState) -> Flask:
     app = Flask(__name__)
     CORS(app, resources={r"/api/*": {"origins": "*"}, r"/video_feed": {"origins": "*"}})
+    env_file = Path(__file__).resolve().parent.parent / ".env"
+
+    @app.get("/api/settings")
+    def get_settings() -> Response:
+        data = snapshot_editable_env()
+        model_path = str(os.environ.get("YOLO_INFER_MODEL", "") or "").strip()
+        metrics = read_training_metrics_from_weights(model_path) if model_path else None
+        return jsonify(
+            {
+                "env": data,
+                "metrics": metrics,
+                "editable_keys": list(EDITABLE_ENV_KEYS),
+                "env_file": str(env_file),
+            }
+        )
+
+    @app.post("/api/settings")
+    def post_settings() -> Response:
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return jsonify({"error": "JSON invalido"}), 400
+        updates = filter_updates(body)
+        if not updates:
+            return jsonify({"error": "Nenhuma chave editavel reconhecida"}), 400
+        if not env_file.is_file():
+            return jsonify({"error": f".env nao encontrado: {env_file}"}), 404
+        try:
+            merge_env_file(env_file, updates)
+        except OSError as exc:
+            return jsonify({"error": str(exc)}), 500
+        _persist_config_event(shared, "settings", {"updated_keys": list(updates.keys())})
+        return jsonify(
+            {
+                "ok": True,
+                "updated": list(updates.keys()),
+                "restart_required": True,
+                "hint": "Reinicie o servidor (bash scripts/run_web.sh) para carregar os novos valores.",
+            }
+        )
 
     @app.get("/roi")
     def roi_page() -> str:
@@ -1657,6 +1947,8 @@ def create_app(shared: SharedState) -> Flask:
             d1, d2, d3, d4 = shared.line_default
             poly = [{"x": a, "y": b} for a, b in shared.polygon_live]
             pdef = [{"x": a, "y": b} for a, b in shared.polygon_default]
+            show_trail = shared.show_trail_overlay
+            show_heading = shared.show_heading_overlay
         return jsonify(
             {
                 "mode": mode,
@@ -1664,8 +1956,23 @@ def create_app(shared: SharedState) -> Flask:
                 "default_line": {"x1": d1, "y1": d2, "x2": d3, "y2": d4},
                 "polygon": poly,
                 "default_polygon": pdef,
+                "show_trail": show_trail,
+                "show_heading": show_heading,
             }
         )
+
+    @app.post("/api/overlay")
+    def post_overlay() -> Response:
+        data = request.get_json(silent=True) or {}
+        with shared.lock:
+            if "show_trail" in data:
+                shared.show_trail_overlay = bool(data["show_trail"])
+            if "show_heading" in data:
+                shared.show_heading_overlay = bool(data["show_heading"])
+            st = shared.show_trail_overlay
+            sh = shared.show_heading_overlay
+        _persist_config_event(shared, "overlay", {"show_trail": st, "show_heading": sh})
+        return jsonify({"ok": True, "show_trail": st, "show_heading": sh})
 
     @app.get("/api/line")
     def get_line() -> Response:
@@ -1701,6 +2008,11 @@ def create_app(shared: SharedState) -> Flask:
             shared.line_live = (x1, y1, x2, y2)
             if reset_counters:
                 reset_entry_exit_counters(shared)
+        _persist_config_event(
+            shared,
+            "line",
+            {"line": {"x1": x1, "y1": y1, "x2": x2, "y2": y2}, "reset_counters": reset_counters},
+        )
         return jsonify({"ok": True, "line": {"x1": x1, "y1": y1, "x2": x2, "y2": y2}})
 
     @app.post("/api/line/reset")
@@ -1713,6 +2025,7 @@ def create_app(shared: SharedState) -> Flask:
                 reset_entry_exit_counters(shared)
         with shared.lock:
             x1, y1, x2, y2 = shared.line_live
+        _persist_config_event(shared, "line_reset", {"reset_counters": reset_counters})
         return jsonify({"ok": True, "line": {"x1": x1, "y1": y1, "x2": x2, "y2": y2}})
 
     @app.post("/api/polygon")
@@ -1735,6 +2048,14 @@ def create_app(shared: SharedState) -> Flask:
             shared.count_mode = "polygon"
             if reset_counters:
                 reset_entry_exit_counters(shared)
+        _persist_config_event(
+            shared,
+            "polygon",
+            {
+                "vertices": len(pts),
+                "reset_counters": reset_counters,
+            },
+        )
         return jsonify(
             {"ok": True, "polygon": [{"x": a, "y": b} for a, b in pts], "mode": "polygon"}
         )
@@ -1750,6 +2071,7 @@ def create_app(shared: SharedState) -> Flask:
                 reset_entry_exit_counters(shared)
         with shared.lock:
             poly = [{"x": a, "y": b} for a, b in shared.polygon_live]
+        _persist_config_event(shared, "polygon_reset", {"reset_counters": reset_counters})
         return jsonify({"ok": True, "polygon": poly, "mode": "line"})
 
     @app.post("/api/mode")
@@ -1769,41 +2091,84 @@ def create_app(shared: SharedState) -> Flask:
             shared.count_mode = m
             if reset_counters:
                 reset_entry_exit_counters(shared)
+        _persist_config_event(shared, "mode", {"mode": m, "reset_counters": reset_counters})
         return jsonify({"ok": True, "mode": m})
+
+    @app.get("/api/source")
+    def get_source() -> Response:
+        with shared.lock:
+            return jsonify({
+                "source": shared.source_live,
+                "changing": shared.source_changed,
+                "presets": list(shared.source_presets),
+            })
+
+    @app.post("/api/source")
+    def post_source() -> Response:
+        data = request.get_json(silent=True) or {}
+        new_src = str(data.get("source", "")).strip()
+        if not new_src:
+            return jsonify({"error": "source vazio"}), 400
+        if len(new_src) > 4096:
+            return jsonify({"error": "source demasiado longo"}), 400
+        with shared.lock:
+            shared.source_live = new_src
+            shared.source_changed = True
+            reset_entry_exit_counters(shared)
+            presets = list(shared.source_presets)
+        print(f"[web] Fonte de video alterada para: {new_src!r}")
+        _persist_config_event(shared, "source", {"source_len": len(new_src)})
+        return jsonify({"ok": True, "source": new_src, "presets": presets})
+
+    @app.post("/api/source/presets")
+    def post_source_preset() -> Response:
+        data = request.get_json(silent=True) or {}
+        url = str(data.get("url", "")).strip()
+        if not url or len(url) > 4096:
+            return jsonify({"error": "url invalido"}), 400
+        label = str(data.get("label", "") or "").strip()[:128] or "Câmera"
+        with shared.lock:
+            if len(shared.source_presets) >= _MAX_SOURCE_PRESETS:
+                return jsonify({"error": f"No maximo {_MAX_SOURCE_PRESETS} câmaras"}), 400
+            pid = uuid.uuid4().hex[:12]
+            shared.source_presets.append({"id": pid, "label": label, "url": url})
+            presets = list(shared.source_presets)
+        _persist_config_event(shared, "preset_add", {"id": pid, "label": label})
+        return jsonify({"ok": True, "preset": {"id": pid, "label": label, "url": url}, "presets": presets})
+
+    @app.delete("/api/source/presets/<preset_id>")
+    def delete_source_preset(preset_id: str) -> Response:
+        with shared.lock:
+            shared.source_presets = [p for p in shared.source_presets if p.get("id") != preset_id]
+            presets = list(shared.source_presets)
+        _persist_config_event(shared, "preset_delete", {"preset_id": preset_id})
+        return jsonify({"ok": True, "presets": presets})
+
+    @app.post("/api/source/select")
+    def post_source_select() -> Response:
+        data = request.get_json(silent=True) or {}
+        preset_id = str(data.get("preset_id", "")).strip()
+        if not preset_id:
+            return jsonify({"error": "preset_id obrigatorio"}), 400
+        with shared.lock:
+            url = ""
+            for p in shared.source_presets:
+                if p.get("id") == preset_id:
+                    url = str(p.get("url", "")).strip()
+                    break
+            if not url:
+                return jsonify({"error": "Preset nao encontrado"}), 404
+            shared.source_live = url
+            shared.source_changed = True
+            reset_entry_exit_counters(shared)
+            presets = list(shared.source_presets)
+        print(f"[web] Fonte (preset {preset_id}) alterada para: {url!r}")
+        _persist_config_event(shared, "source_select", {"preset_id": preset_id})
+        return jsonify({"ok": True, "source": url, "presets": presets})
 
     @app.get("/api/stats")
     def stats() -> Response:
-        with shared.lock:
-            peak_h, peak_v = _peak_hour_stats(shared)
-            payload = {
-                "entries": shared.counter.entries,
-                "exits": shared.counter.exits,
-                "total_passages": shared.counter.total,
-                "occupancy_now": shared.occupancy_now,
-                "moving_now": shared.moving_now,
-                "stationary_now": shared.stationary_now,
-                "loitering_now": shared.loitering_now,
-                "avg_dwell_sec": shared.avg_dwell_sec,
-                "max_dwell_sec": shared.max_dwell_sec,
-                "loitering_threshold_sec": shared.loitering_threshold_sec,
-                "error": shared.last_error,
-                "sex_classifier_enabled": shared.sex_classifier_enabled,
-                "sex_female_agg": shared.sex_agg.female,
-                "sex_male_agg": shared.sex_agg.male,
-                "sex_unknown_agg": shared.sex_agg.unknown,
-                "age_classifier_enabled": shared.age_classifier_enabled,
-                "age_child_agg": shared.age_agg.child,
-                "age_adolescent_agg": shared.age_agg.adolescent,
-                "age_young_agg": shared.age_agg.young,
-                "age_adult_agg": shared.age_agg.adult,
-                "age_elderly_agg": shared.age_agg.elderly,
-                "age_unknown_agg": shared.age_agg.unknown,
-                "hourly_entries": list(shared.hourly_entries),
-                "hourly_exits": list(shared.hourly_exits),
-                "peak_hour": peak_h,
-                "peak_flow": peak_v,
-            }
-        return jsonify(payload)
+        return jsonify(build_stats_payload(shared))
 
     @app.post("/api/export")
     def export_csv() -> Response:
@@ -1843,10 +2208,18 @@ def main() -> None:
         line_default=line_init,
         loitering_threshold_sec=args.loitering_seconds,
     )
+    presets = _load_source_presets_from_env()
+    with shared.lock:
+        shared.source_presets = presets
     stop_event = threading.Event()
 
     t = threading.Thread(target=inference_loop, args=(args, shared, stop_event), daemon=True)
     t.start()
+
+    start_stats_emitter_thread(
+        session_id=shared.session_id,
+        get_stats=lambda: build_stats_payload(shared),
+    )
 
     app = create_app(shared)
     try:
@@ -1861,6 +2234,7 @@ def main() -> None:
         pass
     finally:
         stop_event.set()
+        shutdown_emitter()
         t.join(timeout=8.0)
 
 
