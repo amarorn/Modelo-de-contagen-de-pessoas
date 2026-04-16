@@ -1,13 +1,16 @@
 /**
- * RoiEditor — permite desenhar a linha de contagem ou o polígono ROI
- * diretamente sobre o frame do vídeo e enviar para a API Flask.
+ * RoiEditor — desenha linha de contagem ou polígono ROI sobre o frame do vídeo.
  *
- * Como funciona:
- *  - Mostra o último frame como imagem de fundo (snapshot via <img>)
- *  - Canvas transparente por cima captura cliques
- *  - Modo "line": 2 cliques definem os dois extremos
- *  - Modo "polygon": N cliques definem os vértices (duplo-clique fecha)
- *  - Botão "Aplicar" envia via POST /api/line ou /api/polygon
+ * Melhorias v2:
+ *  - Layout duas colunas: canvas (esquerda) + painel de controlo (direita)
+ *  - Linha/segmento fantasma que segue o cursor em tempo real
+ *  - Crosshair customizado desenhado no canvas
+ *  - Coordenadas X/Y ao vivo sob o cursor
+ *  - Lista de pontos interativa na sidebar (com remoção individual)
+ *  - Atalhos de teclado: Z=desfazer, C=limpar, Enter=aplicar, Esc=fechar
+ *  - Instrução dinâmica que guia o utilizador passo a passo
+ *  - Animação de entrada do modal
+ *  - Botões desabilitados contextualmente
  */
 
 import {
@@ -32,23 +35,24 @@ interface Props {
 type DrawMode = "line" | "polygon";
 type Point = { x: number; y: number };
 
-const CYAN   = "#00D4FF";
-const AMBER  = "#F59E0B";
-const GREEN  = "#10B981";
+const CYAN  = "#00D4FF";
+const AMBER = "#F59E0B";
+const GREEN = "#10B981";
 
 export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
-  const canvasRef   = useRef<HTMLCanvasElement>(null);
+  const canvasRef    = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const imgRef      = useRef<HTMLImageElement>(null);
+  const imgRef       = useRef<HTMLImageElement>(null);
+  const cursorRef    = useRef<{ cx: number; cy: number } | null>(null);
 
-  const [mode, setMode]         = useState<DrawMode>(config?.mode ?? "line");
+  const [mode, setMode]             = useState<DrawMode>(config?.mode ?? "line");
   const [linePoints, setLinePoints] = useState<Point[]>([]);
   const [polyPoints, setPolyPoints] = useState<Point[]>([]);
-  const [imgSize, setImgSize]   = useState({ w: 1, h: 1 });   // natural frame size
-  const [saving, setSaving]     = useState(false);
-  const [msg, setMsg]           = useState<{ text: string; ok: boolean } | null>(null);
+  const [imgSize, setImgSize]       = useState({ w: 1, h: 1 });
+  const [saving, setSaving]         = useState(false);
+  const [msg, setMsg]               = useState<{ text: string; ok: boolean } | null>(null);
+  const [coords, setCoords]         = useState<Point | null>(null);
 
-  /* ── Load snapshot from video_feed (single frame) ─── */
   const snapSrc = `${apiBase}/video_feed`;
 
   const onImgLoad = useCallback(() => {
@@ -56,17 +60,15 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
     if (img) setImgSize({ w: img.naturalWidth, h: img.naturalHeight });
   }, []);
 
-  /* ── Coordinate conversion: canvas px → frame px ─── */
+  /* ── Coordinate conversion ──────────────────────────── */
   const toFrameCoords = useCallback(
     (cx: number, cy: number): Point => {
       const canvas = canvasRef.current;
       if (!canvas) return { x: cx, y: cy };
       const rect = canvas.getBoundingClientRect();
-      const scaleX = imgSize.w / rect.width;
-      const scaleY = imgSize.h / rect.height;
       return {
-        x: Math.round(cx * scaleX),
-        y: Math.round(cy * scaleY),
+        x: Math.round((cx / rect.width)  * imgSize.w),
+        y: Math.round((cy / rect.height) * imgSize.h),
       };
     },
     [imgSize],
@@ -85,7 +87,7 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
     [imgSize],
   );
 
-  /* ── Draw canvas overlay ──────────────────────────── */
+  /* ── Draw canvas ────────────────────────────────────── */
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -93,82 +95,180 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    if (mode === "line" && linePoints.length > 0) {
+    const cursor = cursorRef.current;
+
+    /* -- LINE MODE -- */
+    if (mode === "line") {
       const pts = linePoints.map((p) => toCanvasCoords(p.x, p.y));
-      ctx.save();
-      // Glow shadow
-      ctx.strokeStyle = "rgba(0,212,255,0.25)";
-      ctx.lineWidth = 8;
-      ctx.lineCap = "round";
-      if (pts[0] && pts[1]) {
+
+      // Ghost preview from last point to cursor
+      if (pts.length === 1 && cursor) {
+        ctx.save();
+        ctx.strokeStyle = "rgba(0,212,255,0.28)";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([5, 5]);
+        ctx.lineCap = "round";
         ctx.beginPath();
         ctx.moveTo(pts[0].x, pts[0].y);
-        ctx.lineTo(pts[1].x, pts[1].y);
+        ctx.lineTo(cursor.cx, cursor.cy);
         ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
       }
-      // Bright line
-      ctx.strokeStyle = CYAN;
-      ctx.lineWidth = 2;
-      ctx.setLineDash([]);
-      if (pts[0] && pts[1]) {
-        ctx.beginPath();
-        ctx.moveTo(pts[0].x, pts[0].y);
-        ctx.lineTo(pts[1].x, pts[1].y);
-        ctx.stroke();
+
+      if (pts.length >= 1) {
+        ctx.save();
+        if (pts[0] && pts[1]) {
+          // Outer glow
+          ctx.strokeStyle = "rgba(0,212,255,0.18)";
+          ctx.lineWidth = 10;
+          ctx.lineCap = "round";
+          ctx.beginPath();
+          ctx.moveTo(pts[0].x, pts[0].y);
+          ctx.lineTo(pts[1].x, pts[1].y);
+          ctx.stroke();
+          // Inner glow
+          ctx.strokeStyle = "rgba(0,212,255,0.45)";
+          ctx.lineWidth = 4;
+          ctx.beginPath();
+          ctx.moveTo(pts[0].x, pts[0].y);
+          ctx.lineTo(pts[1].x, pts[1].y);
+          ctx.stroke();
+          // Bright line
+          ctx.strokeStyle = CYAN;
+          ctx.lineWidth = 2;
+          ctx.setLineDash([]);
+          ctx.beginPath();
+          ctx.moveTo(pts[0].x, pts[0].y);
+          ctx.lineTo(pts[1].x, pts[1].y);
+          ctx.stroke();
+        }
+        // Endpoint markers
+        const labels = ["A", "B"];
+        for (let i = 0; i < pts.length; i++) {
+          const p = pts[i];
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 11, 0, Math.PI * 2);
+          ctx.strokeStyle = "rgba(0,212,255,0.18)";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(0,0,0,0.85)";
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+          ctx.fillStyle = CYAN;
+          ctx.fill();
+          ctx.fillStyle = CYAN;
+          ctx.font = "bold 9px monospace";
+          ctx.fillText(labels[i] ?? "", p.x + 10, p.y - 8);
+        }
+        ctx.restore();
       }
-      // Endpoint circles
-      for (const p of pts) {
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
-        ctx.fillStyle = "#000";
-        ctx.fill();
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
-        ctx.fillStyle = CYAN;
-        ctx.fill();
-      }
-      ctx.restore();
     }
 
+    /* -- POLYGON MODE -- */
     if (mode === "polygon" && polyPoints.length > 0) {
       const pts = polyPoints.map((p) => toCanvasCoords(p.x, p.y));
+
+      // Ghost segment to cursor
+      if (cursor) {
+        const last = pts[pts.length - 1];
+        ctx.save();
+        ctx.strokeStyle = "rgba(245,158,11,0.32)";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([5, 5]);
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(last.x, last.y);
+        ctx.lineTo(cursor.cx, cursor.cy);
+        ctx.stroke();
+        // Closing ghost (≥3 pts)
+        if (pts.length >= 3) {
+          ctx.strokeStyle = "rgba(245,158,11,0.14)";
+          ctx.beginPath();
+          ctx.moveTo(pts[0].x, pts[0].y);
+          ctx.lineTo(cursor.cx, cursor.cy);
+          ctx.stroke();
+        }
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+
       ctx.save();
-      // Glow fill
-      ctx.strokeStyle = AMBER;
-      ctx.fillStyle   = "rgba(245,158,11,0.08)";
-      ctx.lineWidth   = 2;
-      ctx.setLineDash(polyPoints.length < 3 ? [6, 4] : []);
       ctx.beginPath();
       ctx.moveTo(pts[0].x, pts[0].y);
       for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
       if (polyPoints.length >= 3) ctx.closePath();
+
+      // Outer glow stroke
+      ctx.strokeStyle = "rgba(245,158,11,0.22)";
+      ctx.lineWidth = 7;
+      ctx.lineJoin = "round";
+      ctx.setLineDash(polyPoints.length < 3 ? [6, 4] : []);
       ctx.stroke();
-      if (polyPoints.length >= 3) ctx.fill();
-      // Vertex dots
+      // Bright stroke
+      ctx.strokeStyle = AMBER;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // Fill
+      if (polyPoints.length >= 3) {
+        ctx.fillStyle = "rgba(245,158,11,0.07)";
+        ctx.fill();
+      }
+      // Vertex markers
       for (let i = 0; i < pts.length; i++) {
         const p = pts[i];
+        const isFirst = i === 0;
+        const color = isFirst ? GREEN : AMBER;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 10, 0, Math.PI * 2);
+        ctx.strokeStyle = isFirst ? "rgba(16,185,129,0.2)" : "rgba(245,158,11,0.2)";
+        ctx.lineWidth = 2;
+        ctx.stroke();
         ctx.beginPath();
         ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
-        ctx.fillStyle = "#000";
+        ctx.fillStyle = "rgba(0,0,0,0.85)";
         ctx.fill();
         ctx.beginPath();
         ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
-        ctx.fillStyle = i === 0 ? GREEN : AMBER;
+        ctx.fillStyle = color;
         ctx.fill();
-        // Index label
         ctx.fillStyle = "#fff";
-        ctx.font = "bold 10px Inter, sans-serif";
-        ctx.fillText(String(i + 1), p.x + 8, p.y - 6);
+        ctx.font = "bold 9px monospace";
+        ctx.fillText(String(i + 1), p.x + 10, p.y - 8);
       }
+      ctx.restore();
+    }
+
+    /* -- CURSOR CROSSHAIR -- */
+    if (cursor) {
+      ctx.save();
+      ctx.strokeStyle = "rgba(255,255,255,0.22)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 5]);
+      ctx.beginPath();
+      ctx.moveTo(0, cursor.cy);
+      ctx.lineTo(canvas.width, cursor.cy);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(cursor.cx, 0);
+      ctx.lineTo(cursor.cx, canvas.height);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.arc(cursor.cx, cursor.cy, 3, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(255,255,255,0.55)";
+      ctx.fill();
       ctx.restore();
     }
   }, [mode, linePoints, polyPoints, toCanvasCoords]);
 
-  useEffect(() => {
-    draw();
-  }, [draw]);
+  useEffect(() => { draw(); }, [draw]);
 
-  /* ── Resize canvas to match container ────────────── */
+  /* ── Resize canvas ──────────────────────────────────── */
   useEffect(() => {
     const canvas = canvasRef.current;
     const container = containerRef.current;
@@ -184,21 +284,38 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
     return () => obs.disconnect();
   }, [draw]);
 
-  /* ── Click handler ───────────────────────────────── */
+  /* ── Mouse handlers ─────────────────────────────────── */
+  const handleMouseMove = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const cx = e.clientX - rect.left;
+      const cy = e.clientY - rect.top;
+      cursorRef.current = { cx, cy };
+      setCoords(toFrameCoords(cx, cy));
+      draw();
+    },
+    [toFrameCoords, draw],
+  );
+
+  const handleMouseLeave = useCallback(() => {
+    cursorRef.current = null;
+    setCoords(null);
+    draw();
+  }, [draw]);
+
   const handleClick = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       const canvas = canvasRef.current;
       if (!canvas) return;
       const rect  = canvas.getBoundingClientRect();
-      const cx    = e.clientX - rect.left;
-      const cy    = e.clientY - rect.top;
-      const frame = toFrameCoords(cx, cy);
-
+      const frame = toFrameCoords(e.clientX - rect.left, e.clientY - rect.top);
       if (mode === "line") {
         setLinePoints((prev) => {
           if (prev.length === 0) return [frame];
           if (prev.length === 1) return [prev[0], frame];
-          return [frame]; // reset
+          return [frame];
         });
       } else {
         setPolyPoints((prev) => [...prev, frame]);
@@ -211,15 +328,26 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       if (mode === "polygon") {
         e.preventDefault();
-        // Remove the last point added by the second click of dblclick
         setPolyPoints((prev) => (prev.length > 1 ? prev.slice(0, -1) : prev));
       }
     },
     [mode],
   );
 
-  /* ── Apply / reset ───────────────────────────────── */
-  const apply = async () => {
+  /* ── Actions ────────────────────────────────────────── */
+  const resetPoints = useCallback(() => {
+    setLinePoints([]);
+    setPolyPoints([]);
+    setMsg(null);
+  }, []);
+
+  const undoLast = useCallback(() => {
+    if (mode === "line") setLinePoints((p) => p.slice(0, -1));
+    else setPolyPoints((p) => p.slice(0, -1));
+    setMsg(null);
+  }, [mode]);
+
+  const apply = useCallback(async () => {
     setSaving(true);
     setMsg(null);
     try {
@@ -232,11 +360,7 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
         const res = await fetch(`${apiBase}/api/line`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            x1: p1.x, y1: p1.y,
-            x2: p2.x, y2: p2.y,
-            reset_counters: true,
-          }),
+          body: JSON.stringify({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, reset_counters: true }),
         });
         if (!res.ok) throw new Error(await res.text());
         setMsg({ text: "Linha aplicada com sucesso!", ok: true });
@@ -248,13 +372,9 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
         const res = await fetch(`${apiBase}/api/polygon`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            points: polyPoints,
-            reset_counters: true,
-          }),
+          body: JSON.stringify({ points: polyPoints, reset_counters: true }),
         });
         if (!res.ok) throw new Error(await res.text());
-        // Also switch mode on API
         await fetch(`${apiBase}/api/mode`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -268,235 +388,615 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
     } finally {
       setSaving(false);
     }
-  };
+  }, [mode, linePoints, polyPoints, apiBase, onApplied]);
 
-  const resetPoints = () => {
-    setLinePoints([]);
-    setPolyPoints([]);
-    setMsg(null);
-  };
+  /* ── Keyboard shortcuts ─────────────────────────────── */
+  const applyRef   = useRef(apply);
+  const undoRef    = useRef(undoLast);
+  const resetRef   = useRef(resetPoints);
+  useEffect(() => { applyRef.current   = apply;       });
+  useEffect(() => { undoRef.current    = undoLast;    });
+  useEffect(() => { resetRef.current   = resetPoints; });
 
-  const undoLast = () => {
-    if (mode === "line") setLinePoints((p) => p.slice(0, -1));
-    else setPolyPoints((p) => p.slice(0, -1));
-  };
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.target as HTMLElement).tagName === "INPUT") return;
+      if (e.key === "Escape") { onClose(); return; }
+      if (e.key === "z" || e.key === "Z") { undoRef.current(); return; }
+      if (e.key === "c" || e.key === "C") { resetRef.current(); return; }
+      if (e.key === "Enter") { void applyRef.current(); return; }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
 
-  /* ── Render ──────────────────────────────────────── */
+  /* ── Derived state ──────────────────────────────────── */
+  const points   = mode === "line" ? linePoints : polyPoints;
+  const canApply = mode === "line" ? linePoints.length === 2 : polyPoints.length >= 3;
+
+  const accent     = mode === "line" ? "var(--cyan)"         : "var(--amber)";
+  const accentDim  = mode === "line" ? "var(--cyan-dim)"     : "var(--amber-dim)";
+  const accentBdr  = mode === "line" ? "var(--border-glow)"  : "var(--border-accent)";
+
+  const instruction = (() => {
+    if (mode === "line") {
+      if (linePoints.length === 0) return "Clique no frame para definir o ponto inicial (A)";
+      if (linePoints.length === 1) return "Clique para definir o ponto final (B)";
+      return "Linha pronta · pressione Aplicar ou reposicione clicando";
+    }
+    if (polyPoints.length === 0) return "Clique para adicionar o primeiro vértice";
+    if (polyPoints.length < 3)   return `Mais ${3 - polyPoints.length} vértice${3 - polyPoints.length !== 1 ? "s" : ""} para fechar`;
+    return "Duplo-clique para finalizar · ou pressione Aplicar";
+  })();
+
+  /* ── Render ─────────────────────────────────────────── */
   return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 999,
-        background: "rgba(0,0,0,0.82)",
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 20,
-        backdropFilter: "blur(4px)",
-      }}
-    >
-      {/* Modal */}
-      <div
-        style={{
+    <>
+      <style>{`
+        @keyframes roi-in {
+          from { opacity: 0; transform: scale(0.97) translateY(8px); }
+          to   { opacity: 1; transform: scale(1)    translateY(0); }
+        }
+        @keyframes roi-row-in {
+          from { opacity: 0; transform: translateX(-5px); }
+          to   { opacity: 1; transform: translateX(0); }
+        }
+        @keyframes roi-msg-in {
+          from { opacity: 0; transform: translateY(3px); }
+          to   { opacity: 1; transform: translateY(0); }
+        }
+        .roi-row { animation: roi-row-in 0.18s ease both; }
+      `}</style>
+
+      {/* ── Backdrop ── */}
+      <div style={{
+        position: "fixed", inset: 0, zIndex: 999,
+        background: "rgba(0,0,0,0.87)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        padding: 16,
+        backdropFilter: "blur(6px)",
+      }}>
+        {/* ── Modal ── */}
+        <div style={{
           background: "var(--bg-surface)",
           border: "1px solid var(--border)",
           borderRadius: "var(--radius-xl)",
           width: "100%",
-          maxWidth: 900,
+          maxWidth: 980,
+          maxHeight: "92vh",
           display: "flex",
           flexDirection: "column",
-          gap: 0,
           overflow: "hidden",
-          boxShadow: "0 24px 64px rgba(0,0,0,0.7)",
-        }}
-      >
-        {/* Header */}
-        <div
-          style={{
-            padding: "14px 20px",
+          boxShadow: "0 32px 80px rgba(0,0,0,0.75), 0 0 0 1px rgba(255,255,255,0.04)",
+          animation: "roi-in 0.22s ease both",
+        }}>
+
+          {/* ── Header ── */}
+          <div style={{
+            padding: "11px 16px",
             borderBottom: "1px solid var(--border)",
+            background: "var(--bg-elevated)",
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
-          }}
-        >
-          <div>
-            <div style={{ fontWeight: 700, fontSize: 15 }}>Editor de ROI</div>
-            <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>
-              {mode === "line"
-                ? "Clique em 2 pontos para definir a linha de contagem"
-                : "Clique para adicionar vértices · Duplo-clique para fechar"}
+            flexShrink: 0,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{
+                width: 30, height: 30, borderRadius: 7,
+                background: accentDim,
+                border: `1px solid ${accentBdr}`,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                color: accent, flexShrink: 0,
+                transition: "all 0.2s",
+              }}>
+                {mode === "line" ? <IconRuler size={14} /> : <IconPolygon size={14} />}
+              </div>
+              <div>
+                <div style={{
+                  fontFamily: "var(--font-display)",
+                  fontSize: 13, fontWeight: 700,
+                  letterSpacing: "0.07em", textTransform: "uppercase",
+                  color: "var(--text-primary)", lineHeight: 1.2,
+                }}>
+                  Editor de ROI
+                </div>
+                <div style={{
+                  fontSize: 11, color: "var(--text-muted)",
+                  fontFamily: "var(--font-mono)", marginTop: 2,
+                }}>
+                  {instruction}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              {/* Live point counter */}
+              {points.length > 0 && (
+                <div style={{
+                  padding: "2px 10px",
+                  background: accentDim,
+                  border: `1px solid ${accentBdr}`,
+                  borderRadius: 20,
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 10, fontWeight: 700,
+                  color: accent,
+                  transition: "all 0.2s",
+                }}>
+                  {mode === "line"
+                    ? `${linePoints.length} / 2`
+                    : `${polyPoints.length} vértice${polyPoints.length !== 1 ? "s" : ""}`}
+                </div>
+              )}
+              <button
+                onClick={onClose}
+                title="Fechar (Esc)"
+                style={{
+                  background: "none", border: "1px solid var(--border)",
+                  borderRadius: 6, color: "var(--text-muted)",
+                  cursor: "pointer", padding: 5,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  transition: "border-color 0.15s, color 0.15s",
+                }}
+                onMouseEnter={(e) => {
+                  const b = e.currentTarget as HTMLButtonElement;
+                  b.style.borderColor = "rgba(239,68,68,0.4)";
+                  b.style.color = "var(--red)";
+                }}
+                onMouseLeave={(e) => {
+                  const b = e.currentTarget as HTMLButtonElement;
+                  b.style.borderColor = "var(--border)";
+                  b.style.color = "var(--text-muted)";
+                }}
+              >
+                <IconX size={14} />
+              </button>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            style={{
-              background: "none", border: "none", color: "var(--text-muted)",
-              cursor: "pointer", padding: 6, borderRadius: 6,
-              display: "flex", alignItems: "center", justifyContent: "center",
-            }}
-          >
-            <IconX size={16} />
-          </button>
-        </div>
 
-        {/* Mode tabs */}
-        <div
-          style={{
-            display: "flex",
-            gap: 8,
-            padding: "10px 20px",
-            borderBottom: "1px solid var(--border)",
-            background: "var(--bg-elevated)",
-          }}
-        >
-          {(["line", "polygon"] as DrawMode[]).map((m) => (
-            <button
-              key={m}
-              onClick={() => { setMode(m); resetPoints(); }}
-              style={{
-                padding: "6px 16px",
-                borderRadius: 8,
-                border: "1px solid",
-                borderColor: mode === m ? (m === "line" ? "var(--cyan)" : "var(--amber)") : "var(--border)",
-                background: mode === m
-                  ? m === "line" ? "var(--cyan-dim)" : "var(--amber-dim)"
-                  : "transparent",
-                color: mode === m
-                  ? m === "line" ? "var(--cyan)" : "var(--amber)"
-                  : "var(--text-secondary)",
-                fontWeight: 600,
-                fontSize: 13,
-                cursor: "pointer",
-              }}
-            >
-              {m === "line"
-                ? <><IconRuler size={13}/> Linha</>
-                : <><IconPolygon size={13}/> Polígono</>
-              }
-            </button>
-          ))}
-        </div>
+          {/* ── Body ── */}
+          <div style={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden" }}>
 
-        {/* Canvas area */}
-        <div
-          ref={containerRef}
-          style={{
-            position: "relative",
-            width: "100%",
-            aspectRatio: "16/9",
-            background: "#000",
-            cursor: "crosshair",
-            overflow: "hidden",
-          }}
-        >
-          {/* Background: live snapshot */}
-          <img
-            ref={imgRef}
-            src={snapSrc}
-            alt="frame"
-            onLoad={onImgLoad}
-            style={{
-              position: "absolute",
-              inset: 0,
-              width: "100%",
-              height: "100%",
-              objectFit: "contain",
-              opacity: 0.75,
-            }}
-          />
-          {/* Drawing canvas */}
-          <canvas
-            ref={canvasRef}
-            onClick={handleClick}
-            onDoubleClick={handleDblClick}
-            style={{
-              position: "absolute",
-              inset: 0,
-              width: "100%",
-              height: "100%",
-            }}
-          />
-          {/* Instructions overlay */}
-          <div
-            style={{
-              position: "absolute",
-              top: 10,
-              left: 10,
-              fontSize: 11,
-              color: "rgba(255,255,255,0.5)",
-              pointerEvents: "none",
-            }}
-          >
-            {mode === "line"
-              ? `${linePoints.length}/2 pontos`
-              : `${polyPoints.length} vértice${polyPoints.length !== 1 ? "s" : ""}`}
+            {/* ── Canvas column ── */}
+            <div style={{
+              flex: 1, minWidth: 0,
+              display: "flex", flexDirection: "column",
+              borderRight: "1px solid var(--border)",
+            }}>
+              {/* Mode tabs */}
+              <div style={{
+                display: "flex", gap: 6,
+                padding: "8px 12px",
+                borderBottom: "1px solid var(--border)",
+                background: "var(--bg-elevated)",
+                flexShrink: 0,
+              }}>
+                {(["line", "polygon"] as DrawMode[]).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => { setMode(m); resetPoints(); }}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 5,
+                      padding: "5px 13px",
+                      borderRadius: 6,
+                      border: "1px solid",
+                      borderColor: mode === m
+                        ? (m === "line" ? "var(--border-glow)" : "var(--border-accent)")
+                        : "var(--border)",
+                      background: mode === m
+                        ? (m === "line" ? "var(--cyan-dim)" : "var(--amber-dim)")
+                        : "transparent",
+                      color: mode === m
+                        ? (m === "line" ? "var(--cyan)" : "var(--amber)")
+                        : "var(--text-muted)",
+                      fontFamily: "var(--font-display)",
+                      fontSize: 10, fontWeight: 700,
+                      letterSpacing: "0.1em", textTransform: "uppercase",
+                      cursor: "pointer",
+                      transition: "all 0.15s",
+                    }}
+                  >
+                    {m === "line" ? <IconRuler size={11}/> : <IconPolygon size={11}/>}
+                    {m === "line" ? "Linha" : "Polígono"}
+                  </button>
+                ))}
+              </div>
+
+              {/* Canvas */}
+              <div
+                ref={containerRef}
+                style={{
+                  position: "relative",
+                  flex: 1,
+                  background: "#000",
+                  cursor: "none",
+                  overflow: "hidden",
+                }}
+              >
+                <img
+                  ref={imgRef}
+                  src={snapSrc}
+                  alt="frame"
+                  onLoad={onImgLoad}
+                  style={{
+                    position: "absolute", inset: 0,
+                    width: "100%", height: "100%",
+                    objectFit: "contain",
+                    opacity: 0.78,
+                  }}
+                />
+                <canvas
+                  ref={canvasRef}
+                  onClick={handleClick}
+                  onDoubleClick={handleDblClick}
+                  onMouseMove={handleMouseMove}
+                  onMouseLeave={handleMouseLeave}
+                  style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
+                />
+
+                {/* Coordinate readout */}
+                {coords && (
+                  <div style={{
+                    position: "absolute", bottom: 10, left: 10,
+                    fontFamily: "var(--font-mono)", fontSize: 10,
+                    color: "rgba(255,255,255,0.55)",
+                    background: "rgba(0,0,0,0.52)",
+                    padding: "3px 9px", borderRadius: 4,
+                    border: "1px solid rgba(255,255,255,0.07)",
+                    pointerEvents: "none", letterSpacing: "0.06em",
+                  }}>
+                    X {String(coords.x).padStart(4, "\u2007")} · Y {String(coords.y).padStart(4, "\u2007")}
+                  </div>
+                )}
+
+                {/* Empty state hint */}
+                {points.length === 0 && (
+                  <div style={{
+                    position: "absolute", inset: 0,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    pointerEvents: "none",
+                  }}>
+                    <div style={{
+                      padding: "9px 18px",
+                      background: "rgba(0,0,0,0.55)",
+                      border: `1px solid ${accentBdr}`,
+                      borderRadius: 7,
+                      fontFamily: "var(--font-display)",
+                      fontSize: 10, fontWeight: 700,
+                      letterSpacing: "0.14em", textTransform: "uppercase",
+                      color: accent, opacity: 0.7,
+                    }}>
+                      {mode === "line" ? "Clique para iniciar a linha" : "Clique para adicionar vértices"}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* ── Sidebar ── */}
+            <div style={{
+              width: 224, flexShrink: 0,
+              display: "flex", flexDirection: "column",
+              background: "var(--bg-elevated)",
+              overflow: "hidden",
+            }}>
+              {/* Points list */}
+              <div style={{
+                flex: 1, overflowY: "auto",
+                padding: "12px 10px",
+                display: "flex", flexDirection: "column", gap: 6,
+              }}>
+                {/* Section header */}
+                <div style={{
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                  marginBottom: 6,
+                }}>
+                  <span style={{
+                    fontFamily: "var(--font-display)",
+                    fontSize: 9, fontWeight: 700,
+                    letterSpacing: "0.18em", textTransform: "uppercase",
+                    color: "var(--text-muted)",
+                  }}>
+                    Pontos
+                  </span>
+                  <span style={{
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 9, fontWeight: 700,
+                    color: points.length > 0 ? accent : "var(--text-muted)",
+                    transition: "color 0.2s",
+                  }}>
+                    {points.length}{mode === "line" ? " / 2" : ""}
+                  </span>
+                </div>
+
+                {/* LINE: slots A & B */}
+                {mode === "line" && (
+                  <>
+                    {(["A", "B"] as const).map((label, i) => {
+                      const p = linePoints[i];
+                      return (
+                        <div
+                          key={label}
+                          className={p ? "roi-row" : ""}
+                          style={{
+                            padding: "8px 9px",
+                            background: p ? "var(--bg-surface)" : "transparent",
+                            border: `1px solid ${p ? "var(--border-glow)" : "var(--border)"}`,
+                            borderRadius: 6,
+                            display: "flex", alignItems: "center", gap: 7,
+                            opacity: p ? 1 : 0.38,
+                            transition: "opacity 0.2s, border-color 0.2s, background 0.2s",
+                          }}
+                        >
+                          <span style={{
+                            width: 18, height: 18, borderRadius: 4, flexShrink: 0,
+                            background: p ? "var(--cyan-dim)" : "var(--bg-elevated)",
+                            border: `1px solid ${p ? "var(--border-glow)" : "var(--border)"}`,
+                            display: "flex", alignItems: "center", justifyContent: "center",
+                            fontFamily: "var(--font-mono)", fontSize: 9, fontWeight: 700,
+                            color: p ? "var(--cyan)" : "var(--text-muted)",
+                            transition: "all 0.2s",
+                          }}>
+                            {label}
+                          </span>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            {p ? (
+                              <div style={{
+                                fontFamily: "var(--font-mono)", fontSize: 10,
+                                color: "var(--text-secondary)", lineHeight: 1.6,
+                              }}>
+                                <div>X <span style={{ color: "var(--cyan)" }}>{p.x}</span></div>
+                                <div>Y <span style={{ color: "var(--cyan)" }}>{p.y}</span></div>
+                              </div>
+                            ) : (
+                              <div style={{
+                                fontFamily: "var(--font-mono)", fontSize: 10,
+                                color: "var(--text-muted)",
+                              }}>
+                                aguardando…
+                              </div>
+                            )}
+                          </div>
+                          {p && (
+                            <button
+                              onClick={() => setLinePoints((ps) => ps.filter((_, idx) => idx !== i))}
+                              title="Remover ponto"
+                              style={{
+                                background: "none", border: "none",
+                                color: "var(--text-muted)", cursor: "pointer",
+                                padding: 2, borderRadius: 3, flexShrink: 0,
+                                display: "flex", alignItems: "center",
+                                transition: "color 0.15s",
+                              }}
+                              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "var(--red)"; }}
+                              onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "var(--text-muted)"; }}
+                            >
+                              <IconX size={10} />
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </>
+                )}
+
+                {/* POLYGON: dynamic vertex list */}
+                {mode === "polygon" && (
+                  <>
+                    {polyPoints.length === 0 ? (
+                      <div style={{
+                        padding: "14px 10px", textAlign: "center",
+                        border: "1px dashed var(--border)", borderRadius: 6,
+                        fontFamily: "var(--font-mono)", fontSize: 10,
+                        color: "var(--text-muted)", opacity: 0.45,
+                      }}>
+                        Nenhum vértice
+                      </div>
+                    ) : (
+                      polyPoints.map((p, i) => (
+                        <div
+                          key={i}
+                          className="roi-row"
+                          style={{
+                            padding: "7px 9px",
+                            background: "var(--bg-surface)",
+                            border: `1px solid ${i === 0 ? "rgba(16,185,129,0.28)" : "var(--border)"}`,
+                            borderRadius: 6,
+                            display: "flex", alignItems: "center", gap: 7,
+                            animationDelay: `${Math.min(i * 0.03, 0.15)}s`,
+                          }}
+                        >
+                          <span style={{
+                            width: 18, height: 18, borderRadius: 4, flexShrink: 0,
+                            background: i === 0 ? "rgba(16,185,129,0.12)" : "var(--amber-dim)",
+                            border: `1px solid ${i === 0 ? "rgba(16,185,129,0.28)" : "var(--border-accent)"}`,
+                            display: "flex", alignItems: "center", justifyContent: "center",
+                            fontFamily: "var(--font-mono)", fontSize: 9, fontWeight: 700,
+                            color: i === 0 ? "var(--green)" : "var(--amber)",
+                          }}>
+                            {String(i + 1).padStart(2, "0")}
+                          </span>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{
+                              fontFamily: "var(--font-mono)", fontSize: 10,
+                              color: "var(--text-secondary)",
+                              display: "flex", gap: 8,
+                            }}>
+                              <span>X <span style={{ color: "var(--amber)" }}>{p.x}</span></span>
+                              <span>Y <span style={{ color: "var(--amber)" }}>{p.y}</span></span>
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => setPolyPoints((ps) => ps.filter((_, idx) => idx !== i))}
+                            title="Remover vértice"
+                            style={{
+                              background: "none", border: "none",
+                              color: "var(--text-muted)", cursor: "pointer",
+                              padding: 2, borderRadius: 3, flexShrink: 0,
+                              display: "flex", alignItems: "center",
+                              transition: "color 0.15s",
+                            }}
+                            onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "var(--red)"; }}
+                            onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "var(--text-muted)"; }}
+                          >
+                            <IconX size={10} />
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </>
+                )}
+              </div>
+
+              {/* Keyboard shortcuts */}
+              <div style={{
+                padding: "10px 12px",
+                borderTop: "1px solid var(--border)",
+              }}>
+                <div style={{
+                  fontFamily: "var(--font-display)",
+                  fontSize: 9, fontWeight: 700,
+                  letterSpacing: "0.18em", textTransform: "uppercase",
+                  color: "var(--text-muted)", marginBottom: 8,
+                }}>
+                  Atalhos
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                  {[
+                    ["Z", "Desfazer"],
+                    ["C", "Limpar"],
+                    ["↵", "Aplicar"],
+                    ["Esc", "Fechar"],
+                  ].map(([key, label]) => (
+                    <div key={key} style={{
+                      display: "flex", alignItems: "center", justifyContent: "space-between",
+                    }}>
+                      <span style={{
+                        fontFamily: "var(--font-mono)",
+                        fontSize: 10, color: "var(--text-muted)",
+                      }}>
+                        {label}
+                      </span>
+                      <kbd style={{
+                        padding: "1px 6px",
+                        background: "var(--bg-surface)",
+                        border: "1px solid var(--border)",
+                        borderRadius: 3,
+                        fontFamily: "var(--font-mono)",
+                        fontSize: 9,
+                        color: "var(--text-secondary)",
+                      }}>
+                        {key}
+                      </kbd>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
           </div>
-        </div>
 
-        {/* Footer */}
-        <div
-          style={{
-            padding: "12px 20px",
+          {/* ── Footer ── */}
+          <div style={{
+            padding: "10px 16px",
             borderTop: "1px solid var(--border)",
+            background: "var(--bg-elevated)",
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
             gap: 10,
-            flexWrap: "wrap",
-          }}
-        >
-          {/* Left: status message */}
-          <div style={{ fontSize: 13, minHeight: 20 }}>
-            {msg && (
-              <span style={{ color: msg.ok ? "var(--green)" : "var(--red)", display: "flex", alignItems: "center", gap: 6 }}>
-                {msg.ok ? <IconCheck size={13}/> : <IconAlertTriangle size={13}/>} {msg.text}
-              </span>
-            )}
-          </div>
+            flexShrink: 0,
+          }}>
+            {/* Status message */}
+            <div style={{ fontSize: 12, minHeight: 20, flex: 1 }}>
+              {msg && (
+                <span
+                  style={{
+                    color: msg.ok ? "var(--green)" : "var(--red)",
+                    display: "flex", alignItems: "center", gap: 6,
+                    fontFamily: "var(--font-mono)", fontSize: 11,
+                    animation: "roi-msg-in 0.18s ease",
+                  }}
+                >
+                  {msg.ok ? <IconCheck size={12}/> : <IconAlertTriangle size={12}/>}
+                  {msg.text}
+                </span>
+              )}
+            </div>
 
-          {/* Right: actions */}
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={undoLast} style={{ ...btnStyle("secondary"), display:"flex", alignItems:"center", gap:6 }}>
-              <IconRotateCcw size={13}/> Desfazer
-            </button>
-            <button onClick={resetPoints} style={{ ...btnStyle("secondary"), display:"flex", alignItems:"center", gap:6 }}>
-              <IconTrash size={13}/> Limpar
-            </button>
-            <button onClick={apply} disabled={saving}
-              style={{ ...btnStyle("primary"), display:"flex", alignItems:"center", gap:6 }}>
-              <IconCheck size={13}/> {saving ? "Enviando…" : "Aplicar"}
-            </button>
+            {/* Action buttons */}
+            <div style={{ display: "flex", gap: 6 }}>
+              <button
+                onClick={undoLast}
+                disabled={points.length === 0}
+                title="Desfazer (Z)"
+                style={{
+                  display: "flex", alignItems: "center", gap: 5,
+                  padding: "6px 12px",
+                  background: "var(--bg-surface)",
+                  color: points.length === 0 ? "var(--text-muted)" : "var(--text-secondary)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 6, cursor: points.length === 0 ? "not-allowed" : "pointer",
+                  fontFamily: "var(--font-display)", fontSize: 10, fontWeight: 700,
+                  letterSpacing: "0.08em", textTransform: "uppercase",
+                  opacity: points.length === 0 ? 0.38 : 1,
+                  transition: "all 0.15s",
+                }}
+              >
+                <IconRotateCcw size={11}/> Desfazer
+              </button>
+              <button
+                onClick={resetPoints}
+                disabled={points.length === 0}
+                title="Limpar (C)"
+                style={{
+                  display: "flex", alignItems: "center", gap: 5,
+                  padding: "6px 12px",
+                  background: "var(--bg-surface)",
+                  color: points.length === 0 ? "var(--text-muted)" : "var(--text-secondary)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 6, cursor: points.length === 0 ? "not-allowed" : "pointer",
+                  fontFamily: "var(--font-display)", fontSize: 10, fontWeight: 700,
+                  letterSpacing: "0.08em", textTransform: "uppercase",
+                  opacity: points.length === 0 ? 0.38 : 1,
+                  transition: "all 0.15s",
+                }}
+              >
+                <IconTrash size={11}/> Limpar
+              </button>
+              <button
+                onClick={() => void apply()}
+                disabled={saving || !canApply}
+                title="Aplicar (Enter)"
+                style={{
+                  display: "flex", alignItems: "center", gap: 5,
+                  padding: "6px 20px",
+                  background: canApply && !saving ? accentDim : "var(--bg-surface)",
+                  color: canApply && !saving ? accent : "var(--text-muted)",
+                  border: `1px solid ${canApply && !saving ? accentBdr : "var(--border)"}`,
+                  borderRadius: 6,
+                  cursor: saving || !canApply ? "not-allowed" : "pointer",
+                  fontFamily: "var(--font-display)", fontSize: 10, fontWeight: 700,
+                  letterSpacing: "0.08em", textTransform: "uppercase",
+                  opacity: saving || !canApply ? 0.45 : 1,
+                  transition: "all 0.2s",
+                }}
+                onMouseEnter={(e) => {
+                  if (canApply && !saving) {
+                    const b = e.currentTarget as HTMLButtonElement;
+                    b.style.opacity = "0.85";
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.opacity = canApply && !saving ? "1" : "0.45";
+                }}
+              >
+                <IconCheck size={11}/>
+                {saving ? "Enviando…" : "Aplicar"}
+              </button>
+            </div>
           </div>
         </div>
       </div>
-    </div>
+    </>
   );
-}
-
-function btnStyle(variant: "primary" | "secondary"): React.CSSProperties {
-  if (variant === "primary") {
-    return {
-      padding: "8px 20px",
-      background: "var(--cyan-dim)",
-      color: "var(--cyan)",
-      border: "1px solid var(--border-glow)",
-      borderRadius: 8,
-      cursor: "pointer",
-      fontSize: 13,
-      fontWeight: 700,
-    };
-  }
-  return {
-    padding: "8px 14px",
-    background: "var(--bg-elevated)",
-    color: "var(--text-secondary)",
-    border: "1px solid var(--border)",
-    borderRadius: 8,
-    cursor: "pointer",
-    fontSize: 13,
-    fontWeight: 600,
-  };
 }
