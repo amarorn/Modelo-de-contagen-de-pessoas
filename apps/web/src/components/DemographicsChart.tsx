@@ -74,7 +74,11 @@ export function DemographicsChart({ stats }: Props) {
         labels={["Feminino", "Masculino", "Indefinido"]}
         series={[stats.sex_female_agg, stats.sex_male_agg, stats.sex_unknown_agg]}
         colors={["#EC4899", "#6366F1", "#6B7280"]}
-        enabled={stats.sex_classifier_enabled}
+        enabled={
+          stats.sex_classifier_enabled &&
+          Boolean(stats.sex_overlay_available) &&
+          Boolean(stats.show_sex_overlay)
+        }
       />
       <DonutCard
         title="Faixa Etária"

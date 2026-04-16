@@ -18,6 +18,10 @@ export interface Stats {
   error: string | null;
 
   sex_classifier_enabled: boolean;
+  /** Modelo de sexo carregado (ligação ao mesmo conceito que mapa de calor disponível) */
+  sex_overlay_available?: boolean;
+  /** Overlay F/M ativo na UI (pode desligar sem retirar o .pt) */
+  show_sex_overlay?: boolean;
   sex_female_agg: number;
   sex_male_agg: number;
   sex_unknown_agg: number;
@@ -44,6 +48,10 @@ export interface ApiConfig {
   show_trail?: boolean;
   /** Seta de direção estimada (PCA) sobre o vídeo */
   show_heading?: boolean;
+  heatmap_available?: boolean;
+  show_heatmap?: boolean;
+  sex_overlay_available?: boolean;
+  show_sex_overlay?: boolean;
 }
 
 export type ConnectionStatus = "connected" | "connecting" | "error";

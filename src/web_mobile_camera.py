@@ -26,6 +26,16 @@ import numpy as np
 from flask import Flask, Response, jsonify, request
 from ultralytics import YOLO
 
+from device_utils import resolve_device
+from sex_classifier_agg import OptionalSexClassifier, PerTrackSexSmoother, SexAggregateStats
+
+# BGR para OpenCV (alinhado as cores hex do browser: F rosa, M azul, ? cinza)
+_SEX_BOX_COLOR_BGR: dict[str, tuple[int, int, int]] = {
+    "female": (140, 29, 225),
+    "male": (235, 99, 37),
+    "unknown": (148, 163, 184),
+}
+
 
 @dataclass
 class TrackState:
@@ -43,6 +53,8 @@ class SessionState:
     next_track_id: int = 1
     tracks: dict[int, TrackState] = field(default_factory=dict)
     updated_at_ts: float = field(default_factory=time.time)
+    sex_agg: SexAggregateStats = field(default_factory=SexAggregateStats)
+    sex_smoother: PerTrackSexSmoother | None = None
 
     @property
     def total(self) -> int:
@@ -60,7 +72,12 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8081)
-    p.add_argument("--conf", type=float, default=0.22)
+    p.add_argument(
+        "--conf",
+        type=float,
+        default=0.02,
+        help="Limiar de confianca YOLO (webcam costuma precisar mais baixo que RTSP; ex. 0.02-0.1).",
+    )
     p.add_argument(
         "--imgsz",
         type=int,
@@ -69,7 +86,17 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--person-class-id", type=int, default=None)
     p.add_argument("--line", default="0.5,0.3,0.5,0.9", help="linha normalizada x1,y1,x2,y2")
+    p.add_argument(
+        "--sex-model",
+        default=None,
+        help="YOLO classify .pt (ex.: .env YOLO_SEX_MODEL); estatistica agregada em entradas.",
+    )
+    p.add_argument("--sex-abstain", type=float, default=0.65, help="Confianca minima top-1; abaixo conta como incerto.")
+    p.add_argument("--device", default="auto", help="Device para o classificador de sexo (auto, cpu, 0, ...)")
     return p.parse_args()
+
+
+_PERSON_NAME_HINTS = frozenset({"person", "pessoa"})
 
 
 def resolve_person_class_id(model: YOLO, forced_id: int | None) -> int:
@@ -78,7 +105,7 @@ def resolve_person_class_id(model: YOLO, forced_id: int | None) -> int:
     names = getattr(model, "names", {})
     if isinstance(names, dict):
         for class_id, class_name in names.items():
-            if str(class_name).strip().lower() == "person":
+            if str(class_name).strip().lower() in _PERSON_NAME_HINTS:
                 return int(class_id)
     return 0
 
@@ -99,11 +126,19 @@ def decode_data_url_to_bgr(data_url: str) -> np.ndarray:
 
 def write_summary_csv(path: Path, session_id: str, session: SessionState) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "session_id",
+        "started_at",
+        "finished_at",
+        "entries",
+        "exits",
+        "total_passages",
+        "sex_female",
+        "sex_male",
+        "sex_unknown",
+    ]
     with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=["session_id", "started_at", "finished_at", "entries", "exits", "total_passages"],
-        )
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerow(
             {
@@ -113,6 +148,9 @@ def write_summary_csv(path: Path, session_id: str, session: SessionState) -> Non
                 "entries": session.entries,
                 "exits": session.exits,
                 "total_passages": session.total,
+                "sex_female": session.sex_agg.female,
+                "sex_male": session.sex_agg.male,
+                "sex_unknown": session.sex_agg.unknown,
             }
         )
 
@@ -124,6 +162,8 @@ class StreamSharedState:
     last_frame_jpeg: bytes | None = None
     last_error: str | None = None
     started_at: datetime = field(default_factory=datetime.now)
+    sex_overlay_available: bool = False
+    show_sex_overlay: bool = True
 
 
 def process_bgr_frame(
@@ -138,6 +178,8 @@ def process_bgr_frame(
     lx2: float,
     ly2: float,
     draw: bool,
+    sex_clf: OptionalSexClassifier | None = None,
+    show_sex_overlay: bool = True,
 ) -> tuple[list[dict], np.ndarray]:
     h, w = frame.shape[:2]
     px1, py1, px2, py2 = lx1 * w, ly1 * h, lx2 * w, ly2 * h
@@ -163,6 +205,9 @@ def process_bgr_frame(
     boxes_out: list[dict] = []
 
     out_frame = frame if not draw else frame.copy()
+    sex_run = bool(
+        sex_clf is not None and sex_clf.enabled and show_sex_overlay
+    )
 
     for x1, y1, x2, y2, cx, cy in detections:
         best_id = None
@@ -178,6 +223,16 @@ def process_bgr_frame(
         side = side_of_line(cx, cy, px1, py1, px2, py2)
         now_ts = time.time()
 
+        tid_smooth = best_id if best_id is not None else sess.next_track_id
+        bucket_live: str | None = None
+        if sex_run:
+            raw_sx = sex_clf.classify_crop(
+                frame, (float(x1), float(y1), float(x2), float(y2))
+            )
+            if sess.sex_smoother is None:
+                sess.sex_smoother = PerTrackSexSmoother.from_env()
+            bucket_live = sess.sex_smoother.update(tid_smooth, raw_sx)
+
         if best_id is None:
             best_id = sess.next_track_id
             sess.next_track_id += 1
@@ -186,27 +241,51 @@ def process_bgr_frame(
             tr = sess.tracks[best_id]
             if tr.side < 0 <= side:
                 sess.entries += 1
+                if sex_run and bucket_live is not None:
+                    if bucket_live == "female":
+                        sess.sex_agg.female += 1
+                    elif bucket_live == "male":
+                        sess.sex_agg.male += 1
+                    else:
+                        sess.sex_agg.unknown += 1
             elif tr.side > 0 >= side:
                 sess.exits += 1
             tr.cx, tr.cy, tr.side, tr.last_seen_ts = cx, cy, side, now_ts
 
         assigned_tracks.add(best_id)
-        boxes_out.append({"id": best_id, "x1": int(x1), "y1": int(y1), "w": int(x2 - x1), "h": int(y2 - y1)})
+        box_item: dict = {"id": best_id, "x1": int(x1), "y1": int(y1), "w": int(x2 - x1), "h": int(y2 - y1)}
+        if sex_run and bucket_live is not None:
+            box_item["sex"] = bucket_live
+        boxes_out.append(box_item)
 
         if draw:
-            cv2.rectangle(out_frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+            color = (
+                _SEX_BOX_COLOR_BGR.get(bucket_live, (0, 255, 0))
+                if (sex_run and bucket_live)
+                else (0, 255, 0)
+            )
+            cv2.rectangle(out_frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
+            tag = f"id={best_id}"
+            if sex_run and bucket_live == "female":
+                tag += " F"
+            elif sex_run and bucket_live == "male":
+                tag += " M"
+            elif sex_run and bucket_live == "unknown":
+                tag += " ?"
             cv2.putText(
                 out_frame,
-                f"id={best_id}",
+                tag,
                 (int(x1), int(y1) - 10),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
-                (0, 255, 0),
+                color,
                 1,
             )
 
     cutoff = time.time() - 2.0
     sess.tracks = {tid: tr for tid, tr in sess.tracks.items() if tr.last_seen_ts >= cutoff}
+    if sess.sex_smoother is not None:
+        sess.sex_smoother.forget_stale(set(sess.tracks.keys()))
 
     if draw:
         cv2.line(out_frame, (int(px1), int(py1)), (int(px2), int(py2)), (0, 0, 255), 2)
@@ -219,6 +298,16 @@ def process_bgr_frame(
             (255, 255, 255),
             2,
         )
+        if sex_run:
+            cv2.putText(
+                out_frame,
+                f"F={sess.sex_agg.female} M={sess.sex_agg.male} ?={sess.sex_agg.unknown}",
+                (20, 78),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (200, 220, 255),
+                2,
+            )
 
     return boxes_out, out_frame
 
@@ -233,6 +322,7 @@ def stream_inference_loop(
     ly2: float,
     shared: StreamSharedState,
     stop_event: threading.Event,
+    sex_clf: OptionalSexClassifier | None,
 ) -> None:
     raw = args.source.strip()
     source: str | int = int(raw) if raw.isdigit() else raw
@@ -251,6 +341,7 @@ def stream_inference_loop(
 
             with shared.lock:
                 sess = shared.session
+                show_sx = shared.show_sex_overlay and shared.sex_overlay_available
 
             _, drawn = process_bgr_frame(
                 frame,
@@ -264,6 +355,8 @@ def stream_inference_loop(
                 lx2,
                 ly2,
                 draw=True,
+                sex_clf=sex_clf,
+                show_sex_overlay=show_sx,
             )
 
             enc_ok, encoded = cv2.imencode(".jpg", drawn)
@@ -277,7 +370,9 @@ def stream_inference_loop(
         cap.release()
 
 
-def create_stream_app(args: argparse.Namespace, shared: StreamSharedState) -> Flask:
+def create_stream_app(
+    args: argparse.Namespace, shared: StreamSharedState, sex_clf: OptionalSexClassifier | None
+) -> Flask:
     app = Flask(__name__)
     stream_session_id = "_stream"
 
@@ -306,6 +401,11 @@ def create_stream_app(args: argparse.Namespace, shared: StreamSharedState) -> Fl
       <div class="card">Saidas<br/><b id="exits">0</b></div>
       <div class="card">Total<br/><b id="total">0</b></div>
     </div>
+    <div id="sex-row" class="cards" style="display:none;margin-top:8px;">
+      <div class="card">Feminino<br/><b id="sex_f">0</b></div>
+      <div class="card">Masculino<br/><b id="sex_m">0</b></div>
+      <div class="card">Incerto<br/><b id="sex_u">0</b></div>
+    </div>
     <img src="/video_feed" alt="feed"/>
     <p style="margin-top:12px"><button onclick="exportCsv()">Exportar CSV</button></p>
     <p id="msg"><small></small></p>
@@ -316,6 +416,9 @@ def create_stream_app(args: argparse.Namespace, shared: StreamSharedState) -> Fl
         document.getElementById('entries').textContent = j.entries;
         document.getElementById('exits').textContent = j.exits;
         document.getElementById('total').textContent = j.total_passages;
+        var sr = document.getElementById('sex-row');
+        if (j.sex_overlay_available && j.show_sex_overlay) { sr.style.display = 'grid'; document.getElementById('sex_f').textContent = j.sex_female; document.getElementById('sex_m').textContent = j.sex_male; document.getElementById('sex_u').textContent = j.sex_unknown; }
+        else { sr.style.display = 'none'; }
         document.getElementById('msg').innerHTML = '<small>' + (j.error ? ('Erro: ' + j.error) : 'Online') + '</small>';
       }
       async function exportCsv() {
@@ -333,13 +436,50 @@ def create_stream_app(args: argparse.Namespace, shared: StreamSharedState) -> Fl
     @app.get("/api/stats")
     def stats() -> Response:
         with shared.lock:
+            sess = shared.session
+            sa = shared.sex_overlay_available
+            ss = shared.show_sex_overlay
             payload = {
-                "entries": shared.session.entries,
-                "exits": shared.session.exits,
-                "total_passages": shared.session.total,
+                "entries": sess.entries,
+                "exits": sess.exits,
+                "total_passages": sess.total,
                 "error": shared.last_error,
+                "sex_classifier_enabled": sex_clf is not None and sex_clf.enabled,
+                "sex_overlay_available": sa,
+                "show_sex_overlay": ss if sa else False,
+                "sex_female": sess.sex_agg.female,
+                "sex_male": sess.sex_agg.male,
+                "sex_unknown": sess.sex_agg.unknown,
             }
         return jsonify(payload)
+
+    @app.get("/api/config")
+    def api_config_stream() -> Response:
+        with shared.lock:
+            sa = shared.sex_overlay_available
+            ss = shared.show_sex_overlay
+        return jsonify(
+            {
+                "sex_overlay_available": sa,
+                "show_sex_overlay": ss if sa else False,
+            }
+        )
+
+    @app.post("/api/overlay")
+    def api_overlay_stream() -> Response:
+        data = request.get_json(silent=True) or {}
+        with shared.lock:
+            if "show_sex_overlay" in data and shared.sex_overlay_available:
+                shared.show_sex_overlay = bool(data["show_sex_overlay"])
+            sa = shared.sex_overlay_available
+            ss = shared.show_sex_overlay
+        return jsonify(
+            {
+                "ok": True,
+                "sex_overlay_available": sa,
+                "show_sex_overlay": ss if sa else False,
+            }
+        )
 
     @app.post("/api/export")
     def export_csv() -> Response:
@@ -367,6 +507,7 @@ def create_stream_app(args: argparse.Namespace, shared: StreamSharedState) -> Fl
 
 def create_app(args: argparse.Namespace) -> Flask:
     app = Flask(__name__)
+    sex_ui = {"show": True}
     model = YOLO(args.model)
     person_class_id = resolve_person_class_id(model, args.person_class_id)
     line_vals = [float(v) for v in args.line.split(",")]
@@ -374,8 +515,17 @@ def create_app(args: argparse.Namespace) -> Flask:
         raise ValueError("Linha deve ter 4 valores: x1,y1,x2,y2")
     lx1, ly1, lx2, ly2 = line_vals
     sessions: dict[str, SessionState] = {}
+    device = resolve_device(args.device)
+    sex_clf = OptionalSexClassifier(args.sex_model, device, args.sex_abstain)
+    if args.sex_model and not sex_clf.enabled:
+        print("[mobile] AVISO: --sex-model invalido ou ficheiro inexistente; classificador de sexo desativado.")
+    elif sex_clf.enabled:
+        print(f"[mobile] sex_model={args.sex_model} sex_abstain={args.sex_abstain} device={device}")
+    sex_avail = sex_clf.enabled
 
-    print(f"[mobile] model={args.model} person_class_id={person_class_id} line={args.line}")
+    print(
+        f"[mobile] model={args.model} person_class_id={person_class_id} line={args.line} conf={args.conf}"
+    )
 
     @app.get("/")
     def index() -> str:
@@ -408,12 +558,21 @@ def create_app(args: argparse.Namespace) -> Flask:
         <div class="card">Saidas<br/><b id="exits">0</b></div>
         <div class="card">Total<br/><b id="total">0</b></div>
       </div>
+      <div id="sex-row" class="cards" style="display:none;margin-top:8px;">
+        <div class="card">Feminino<br/><b id="sex_f">0</b></div>
+        <div class="card">Masculino<br/><b id="sex_m">0</b></div>
+        <div class="card">Incerto<br/><b id="sex_u">0</b></div>
+      </div>
       <video id="video" autoplay playsinline style="display:none"></video>
       <canvas id="canvas"></canvas>
       <div class="actions">
         <button id="start">Iniciar Camera</button>
         <button id="stop">Parar</button>
         <button id="csv">Exportar CSV</button>
+      </div>
+      <div id="sex-toggle-wrap" style="display:none;margin-top:10px;align-items:center;gap:10px;flex-wrap:wrap;">
+        <span style="font-size:13px;color:#8b949e;">Reconhecimento de sexo (F/M)</span>
+        <button type="button" id="sexToggle" style="padding:6px 16px;border-radius:999px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;font-weight:700;font-size:12px;cursor:pointer;">Ligado</button>
       </div>
       <p id="msg"><small>Use HTTPS para camera em celular fora de localhost.</small></p>
     </div>
@@ -429,10 +588,42 @@ def create_app(args: argparse.Namespace) -> Flask:
       const line = [{lx1}, {ly1}, {lx2}, {ly2}];
 
       function setMsg(t) {{ document.getElementById('msg').innerHTML = '<small>' + t + '</small>'; }}
+      let showSexOverlay = true;
+      function updateSexToggleBtn() {{
+        const b = document.getElementById('sexToggle');
+        if (!b) return;
+        b.textContent = showSexOverlay ? 'Ligado' : 'Desligado';
+        b.style.borderColor = showSexOverlay ? 'rgba(236,72,153,0.45)' : '#30363d';
+        b.style.background = showSexOverlay ? 'rgba(236,72,153,0.12)' : '#21262d';
+      }}
+      async function loadSexConfig() {{
+        try {{
+          const r = await fetch('/api/config');
+          if (!r.ok) return;
+          const c = await r.json();
+          if (c.sex_overlay_available) {{
+            const tw = document.getElementById('sex-toggle-wrap');
+            if (tw) {{ tw.style.display = 'flex'; }}
+            if (typeof c.show_sex_overlay === 'boolean') showSexOverlay = c.show_sex_overlay;
+            updateSexToggleBtn();
+          }}
+        }} catch (e) {{}}
+      }}
       function setCounts(j) {{
         document.getElementById('entries').textContent = j.entries;
         document.getElementById('exits').textContent = j.exits;
         document.getElementById('total').textContent = j.total_passages;
+        const sr = document.getElementById('sex-row');
+        if (typeof j.show_sex_overlay === 'boolean') showSexOverlay = j.show_sex_overlay;
+        if (j.sex_overlay_available && j.show_sex_overlay) {{
+          sr.style.display = 'grid';
+          document.getElementById('sex_f').textContent = j.sex_female;
+          document.getElementById('sex_m').textContent = j.sex_male;
+          document.getElementById('sex_u').textContent = j.sex_unknown;
+        }} else {{
+          sr.style.display = 'none';
+        }}
+        updateSexToggleBtn();
       }}
 
       function drawLine() {{
@@ -447,7 +638,7 @@ def create_app(args: argparse.Namespace) -> Flask:
         if (!running) return;
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         drawLine();
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
         const r = await fetch('/api/process_frame', {{
           method: 'POST',
           headers: {{ 'Content-Type': 'application/json' }},
@@ -458,11 +649,18 @@ def create_app(args: argparse.Namespace) -> Flask:
         setCounts(j);
         if (j.boxes) {{
           for (const b of j.boxes) {{
-            ctx.strokeStyle = '#22c55e';
+            let col = '#22c55e';
+            let tag = 'id=' + b.id;
+            if (j.sex_overlay_available && j.show_sex_overlay && b.sex) {{
+              if (b.sex === 'female') {{ col = '#e11d8c'; tag += ' F'; }}
+              else if (b.sex === 'male') {{ col = '#2563eb'; tag += ' M'; }}
+              else {{ col = '#94a3b8'; tag += ' ?'; }}
+            }}
+            ctx.strokeStyle = col;
             ctx.lineWidth = 2;
             ctx.strokeRect(b.x1, b.y1, b.w, b.h);
-            ctx.fillStyle = '#22c55e';
-            ctx.fillText('id=' + b.id, b.x1 + 2, Math.max(12, b.y1 - 4));
+            ctx.fillStyle = col;
+            ctx.fillText(tag, b.x1 + 2, Math.max(12, b.y1 - 4));
           }}
         }}
       }}
@@ -520,6 +718,19 @@ def create_app(args: argparse.Namespace) -> Flask:
       document.getElementById('start').onclick = startCam;
       document.getElementById('stop').onclick = stopCam;
       document.getElementById('csv').onclick = exportCsv;
+      const sexBtn = document.getElementById('sexToggle');
+      if (sexBtn) sexBtn.onclick = async () => {{
+        showSexOverlay = !showSexOverlay;
+        updateSexToggleBtn();
+        try {{
+          await fetch('/api/overlay', {{
+            method: 'POST',
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: JSON.stringify({{ show_sex_overlay: showSexOverlay }})
+          }});
+        }} catch (e) {{}}
+      }};
+      loadSexConfig();
     </script>
   </body>
 </html>
@@ -542,6 +753,7 @@ def create_app(args: argparse.Namespace) -> Flask:
                 sess = SessionState()
                 sessions[session_id] = sess
 
+            show_sx = sex_ui["show"] and sex_avail
             boxes_out, _ = process_bgr_frame(
                 frame,
                 sess,
@@ -554,6 +766,8 @@ def create_app(args: argparse.Namespace) -> Flask:
                 lx2,
                 ly2,
                 draw=False,
+                sex_clf=sex_clf,
+                show_sex_overlay=show_sx,
             )
 
             stale = time.time() - 900
@@ -567,10 +781,38 @@ def create_app(args: argparse.Namespace) -> Flask:
                     "exits": sess.exits,
                     "total_passages": sess.total,
                     "boxes": boxes_out,
+                    "sex_classifier_enabled": sex_avail,
+                    "sex_overlay_available": sex_avail,
+                    "show_sex_overlay": sex_ui["show"] if sex_avail else False,
+                    "sex_female": sess.sex_agg.female,
+                    "sex_male": sess.sex_agg.male,
+                    "sex_unknown": sess.sex_agg.unknown,
                 }
             )
         except Exception as exc:
             return jsonify({"error": str(exc)}), 500
+
+    @app.get("/api/config")
+    def api_config_mobile() -> Response:
+        return jsonify(
+            {
+                "sex_overlay_available": sex_avail,
+                "show_sex_overlay": sex_ui["show"] if sex_avail else False,
+            }
+        )
+
+    @app.post("/api/overlay")
+    def api_overlay_mobile() -> Response:
+        data = request.get_json(silent=True) or {}
+        if "show_sex_overlay" in data and sex_avail:
+            sex_ui["show"] = bool(data["show_sex_overlay"])
+        return jsonify(
+            {
+                "ok": True,
+                "sex_overlay_available": sex_avail,
+                "show_sex_overlay": sex_ui["show"] if sex_avail else False,
+            }
+        )
 
     @app.post("/api/export")
     def export_csv() -> Response:
@@ -600,17 +842,24 @@ def main() -> None:
         lx1, ly1, lx2, ly2 = line_vals
         shared = StreamSharedState(session=SessionState())
         stop_event = threading.Event()
+        device = resolve_device(args.device)
+        sex_clf = OptionalSexClassifier(args.sex_model, device, args.sex_abstain)
+        shared.sex_overlay_available = bool(sex_clf and sex_clf.enabled)
+        if args.sex_model and not sex_clf.enabled:
+            print("[mobile] AVISO: --sex-model invalido ou ficheiro inexistente; classificador de sexo desativado.")
+        elif sex_clf.enabled:
+            print(f"[mobile] sex_model={args.sex_model} sex_abstain={args.sex_abstain} device={device}")
         t = threading.Thread(
             target=stream_inference_loop,
-            args=(args, model, person_class_id, lx1, ly1, lx2, ly2, shared, stop_event),
+            args=(args, model, person_class_id, lx1, ly1, lx2, ly2, shared, stop_event, sex_clf),
             daemon=True,
         )
         t.start()
         print(
             f"[mobile] Modo stream: source={args.source!r} model={args.model} "
-            f"person_class_id={person_class_id} line={args.line}"
+            f"person_class_id={person_class_id} line={args.line} conf={args.conf}"
         )
-        app = create_stream_app(args, shared)
+        app = create_stream_app(args, shared, sex_clf)
         try:
             app.run(host=args.host, port=args.port, debug=False, use_reloader=False)
         finally:

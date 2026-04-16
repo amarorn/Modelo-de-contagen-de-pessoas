@@ -5,11 +5,15 @@ interface Props {
 }
 
 /**
- * Liga/desliga overlays desenhados no servidor: rastro dos pés e seta de direção (PCA).
+ * Liga/desliga overlays no servidor: rastro dos pés, seta (PCA), sexo (F/M) e mapa de calor.
  */
 export function DisplayOverlayToggles({ apiBase }: Props) {
   const [trail, setTrail] = useState(true);
   const [heading, setHeading] = useState(true);
+  const [heatmap, setHeatmap] = useState(true);
+  const [heatmapOk, setHeatmapOk] = useState(false);
+  const [sexOk, setSexOk] = useState(false);
+  const [sexOn, setSexOn] = useState(true);
   const [ready, setReady] = useState(false);
   const [pending, setPending] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -22,9 +26,19 @@ export function DisplayOverlayToggles({ apiBase }: Props) {
       const j = await r.json();
       setTrail(Boolean(j.show_trail ?? true));
       setHeading(Boolean(j.show_heading ?? true));
+      const hmAvail = Boolean(j.heatmap_available);
+      setHeatmapOk(hmAvail);
+      setHeatmap(hmAvail ? Boolean(j.show_heatmap ?? true) : false);
+      const sxAvail = Boolean(j.sex_overlay_available);
+      setSexOk(sxAvail);
+      setSexOn(sxAvail ? Boolean(j.show_sex_overlay ?? true) : false);
       setReady(true);
     } catch {
-      setErr("Config indisponível");
+      const base = apiBase.trim() || window.location.origin;
+      setErr(
+        `Sem ligação a ${base}/api/config. Em desenvolvimento: na pasta apps/web execute pnpm dev (proxy /api → Flask). ` +
+          `Se abrir o build estático, defina VITE_API_BASE=http://127.0.0.1:PORT ao construir (PORT = WEB_PORT do .env, ex. 8080).`,
+      );
     }
   }, [apiBase]);
 
@@ -32,7 +46,12 @@ export function DisplayOverlayToggles({ apiBase }: Props) {
     void load();
   }, [load]);
 
-  const push = async (next: { show_trail?: boolean; show_heading?: boolean }) => {
+  const push = async (next: {
+    show_trail?: boolean;
+    show_heading?: boolean;
+    show_heatmap?: boolean;
+    show_sex_overlay?: boolean;
+  }) => {
     setPending(true);
     setErr(null);
     try {
@@ -45,6 +64,10 @@ export function DisplayOverlayToggles({ apiBase }: Props) {
       const j = await r.json();
       if (typeof j.show_trail === "boolean") setTrail(j.show_trail);
       if (typeof j.show_heading === "boolean") setHeading(j.show_heading);
+      if (typeof j.heatmap_available === "boolean") setHeatmapOk(j.heatmap_available);
+      if (typeof j.show_heatmap === "boolean") setHeatmap(j.show_heatmap);
+      if (typeof j.sex_overlay_available === "boolean") setSexOk(j.sex_overlay_available);
+      if (typeof j.show_sex_overlay === "boolean") setSexOn(j.show_sex_overlay);
     } catch {
       setErr("Não foi possível atualizar");
     } finally {
@@ -76,24 +99,147 @@ export function DisplayOverlayToggles({ apiBase }: Props) {
       <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", width: "100%" }}>
         Visualização no vídeo
       </span>
-      <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: pending ? "wait" : "pointer", fontSize: 13 }}>
-        <input
-          type="checkbox"
-          checked={trail}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>Rastro dos pés</span>
+        <button
+          type="button"
           disabled={pending || !!err}
-          onChange={(e) => void push({ show_trail: e.target.checked })}
-        />
-        Rastro dos pés
-      </label>
-      <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: pending ? "wait" : "pointer", fontSize: 13 }}>
-        <input
-          type="checkbox"
-          checked={heading}
+          aria-pressed={trail}
+          onClick={() => {
+            if (pending || err) return;
+            void push({ show_trail: !trail });
+          }}
+          style={{
+            padding: "6px 16px",
+            minWidth: 96,
+            borderRadius: 999,
+            border: `1px solid ${trail ? "rgba(34, 197, 94, 0.45)" : "var(--border)"}`,
+            background: trail ? "rgba(34, 197, 94, 0.12)" : "var(--bg-hover)",
+            color: trail ? "rgb(34, 197, 94)" : "var(--text-muted)",
+            fontWeight: 700,
+            fontSize: 12,
+            letterSpacing: "0.04em",
+            cursor: pending || !!err ? "not-allowed" : "pointer",
+            transition: "background 0.15s, border-color 0.15s, color 0.15s",
+          }}
+        >
+          {trail ? "Ligado" : "Desligado"}
+        </button>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>Seta de direção (PCA)</span>
+        <button
+          type="button"
           disabled={pending || !!err}
-          onChange={(e) => void push({ show_heading: e.target.checked })}
-        />
-        Seta de direção (PCA)
-      </label>
+          aria-pressed={heading}
+          onClick={() => {
+            if (pending || err) return;
+            void push({ show_heading: !heading });
+          }}
+          style={{
+            padding: "6px 16px",
+            minWidth: 96,
+            borderRadius: 999,
+            border: `1px solid ${heading ? "rgba(59, 130, 246, 0.45)" : "var(--border)"}`,
+            background: heading ? "rgba(59, 130, 246, 0.12)" : "var(--bg-hover)",
+            color: heading ? "rgb(96, 165, 250)" : "var(--text-muted)",
+            fontWeight: 700,
+            fontSize: 12,
+            letterSpacing: "0.04em",
+            cursor: pending || !!err ? "not-allowed" : "pointer",
+            transition: "background 0.15s, border-color 0.15s, color 0.15s",
+          }}
+        >
+          {heading ? "Ligado" : "Desligado"}
+        </button>
+      </div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          flexWrap: "wrap",
+          opacity: sexOk ? 1 : 0.55,
+        }}
+        title={
+          sexOk
+            ? "Classificar sexo (F/M) no vídeo e nas entradas; desligar poupa CPU/GPU."
+            : "Indisponível: sem YOLO_SEX_MODEL válido no arranque. Defina no .env e reinicie."
+        }
+      >
+        <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>Sexo (F/M)</span>
+        <button
+          type="button"
+          disabled={pending || !!err || !sexOk}
+          aria-pressed={sexOk ? sexOn : false}
+          onClick={() => {
+            if (!sexOk || pending || err) return;
+            void push({ show_sex_overlay: !sexOn });
+          }}
+          style={{
+            padding: "6px 16px",
+            minWidth: 96,
+            borderRadius: 999,
+            border: `1px solid ${
+              sexOk && sexOn ? "rgba(236, 72, 153, 0.45)" : "var(--border)"
+            }`,
+            background:
+              sexOk && sexOn ? "rgba(236, 72, 153, 0.12)" : "var(--bg-hover)",
+            color: sexOk && sexOn ? "#f472b6" : "var(--text-muted)",
+            fontWeight: 700,
+            fontSize: 12,
+            letterSpacing: "0.04em",
+            cursor: pending || !!err || !sexOk ? "not-allowed" : "pointer",
+            transition: "background 0.15s, border-color 0.15s, color 0.15s",
+          }}
+        >
+          {!sexOk ? "Indisponível" : sexOn ? "Ligado" : "Desligado"}
+        </button>
+      </div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          flexWrap: "wrap",
+          opacity: heatmapOk ? 1 : 0.55,
+        }}
+        title={
+          heatmapOk
+            ? "Sobrepor mapa de calor agregado (pés) no vídeo"
+            : "Indisponível: o servidor foi iniciado com WEB_HEATMAP=0 (--no-heatmap). Reinicie com WEB_HEATMAP=1."
+        }
+      >
+        <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>Mapa de calor</span>
+        <button
+          type="button"
+          disabled={pending || !!err || !heatmapOk}
+          aria-pressed={heatmapOk ? heatmap : false}
+          onClick={() => {
+            if (!heatmapOk || pending || err) return;
+            void push({ show_heatmap: !heatmap });
+          }}
+          style={{
+            padding: "6px 16px",
+            minWidth: 96,
+            borderRadius: 999,
+            border: `1px solid ${
+              heatmapOk && heatmap ? "rgba(245, 158, 11, 0.45)" : "var(--border)"
+            }`,
+            background:
+              heatmapOk && heatmap ? "var(--amber-dim)" : "var(--bg-hover)",
+            color: heatmapOk && heatmap ? "var(--amber)" : "var(--text-muted)",
+            fontWeight: 700,
+            fontSize: 12,
+            letterSpacing: "0.04em",
+            cursor:
+              pending || !!err || !heatmapOk ? "not-allowed" : "pointer",
+            transition: "background 0.15s, border-color 0.15s, color 0.15s",
+          }}
+        >
+          {!heatmapOk ? "Indisponível" : heatmap ? "Ligado" : "Desligado"}
+        </button>
+      </div>
       {err && (
         <span style={{ fontSize: 11, color: "var(--red)" }}>{err}</span>
       )}

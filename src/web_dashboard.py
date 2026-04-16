@@ -45,7 +45,7 @@ from ultralytics import YOLO
 from device_utils import resolve_device
 from stream_source_resolve import resolve_stream_source
 from age_classifier_agg import AgeAggregateStats, OptionalAgeClassifier
-from sex_classifier_agg import OptionalSexClassifier, SexAggregateStats
+from sex_classifier_agg import OptionalSexClassifier, PerTrackSexSmoother, SexAggregateStats
 from env_settings import (
     EDITABLE_ENV_KEYS,
     filter_updates,
@@ -331,6 +331,12 @@ class SharedState:
         # overlays no MJPEG (caixas/labels mantêm-se; só rastro e seta PCA)
         self.show_trail_overlay: bool = True
         self.show_heading_overlay: bool = True
+        # Mapa de calor: só tem efeito se o processo foi iniciado sem --no-heatmap (WEB_HEATMAP=1)
+        self.heatmap_available: bool = False
+        self.show_heatmap_overlay: bool = True
+        # Sexo (classify): disponivel se --sex-model carregou; overlay ligavel na UI como o mapa de calor
+        self.sex_overlay_available: bool = False
+        self.show_sex_overlay: bool = True
 
 
 class HeatmapAccumulator:
@@ -684,6 +690,12 @@ _C_RED         = ( 68,  68, 239)   # #EF4444 — loitering
 _C_RED_DIM     = ( 45,  45, 160)   # stale loitering
 _C_WHITE       = (255, 255, 255)
 _C_BLACK       = (  0,   0,   0)
+_C_SEX_FEMALE  = (140,  29, 225)
+_C_SEX_FEMALE_DIM = (95, 20, 150)
+_C_SEX_MALE    = (235,  99,  37)
+_C_SEX_MALE_DIM = (155, 65, 25)
+_C_SEX_UNKNOWN = (148, 163, 184)
+_C_SEX_UNKNOWN_DIM = (100, 110, 125)
 
 
 def _draw_corner_box(
@@ -1083,7 +1095,11 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 print(f"[web] ERRO ao carregar --sex-model: {exc}")
                 sex_clf = None
             with shared.lock:
-                shared.sex_classifier_enabled = bool(sex_clf and sex_clf.enabled)
+                _sen = bool(sex_clf and sex_clf.enabled)
+                shared.sex_classifier_enabled = _sen
+                shared.sex_overlay_available = _sen
+                if _sen:
+                    shared.show_sex_overlay = True
             if sex_clf and sex_clf.enabled:
                 print(
                     f"[web] Estatistica agregada por sexo na entrada (abstain>={args.sex_abstain}). "
@@ -1196,6 +1212,9 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 track_kw["agnostic_nms"] = True
 
             stream = model.track(**track_kw)
+            sex_smoother: PerTrackSexSmoother | None = (
+                PerTrackSexSmoother.from_env() if sex_clf is not None and sex_clf.enabled else None
+            )
             foot_trail_by_id: dict[int, deque[tuple[int, int]]] = {}
             trail_max = max(0, int(args.trail_len))
             show_heading_arrow = (not args.no_heading_arrow) and trail_max >= 2
@@ -1220,6 +1239,7 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                     raw_line = shared.line_live
                     count_mode = shared.count_mode
                     poly_raw = list(shared.polygon_live)
+                    show_sex_ui = bool(shared.show_sex_overlay and shared.sex_overlay_available)
                 cfg_sig = f"{count_mode}|{raw_line}|{poly_raw}"
                 if prev_config_sig is not None and cfg_sig != prev_config_sig:
                     last_side_by_id.clear()
@@ -1241,7 +1261,7 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                         )
                 prev_frame_mono = frame_ts
 
-                entry_boxes: list[tuple[float, float, float, float]] = []
+                entry_boxes: list[tuple[int, tuple[float, float, float, float]]] = []
 
                 foot_points: list[tuple[float, float]] = []
                 current_present_ids: set[int] = set()
@@ -1272,7 +1292,10 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
 
                 if heat is not None:
                     heat.step(fh, fw, foot_points)
-                    frame = heat.blend_over(frame)
+                    with shared.lock:
+                        show_hm = shared.show_heatmap_overlay
+                    if show_hm:
+                        frame = heat.blend_over(frame)
 
                 ids_list: list[int] | None = None
                 xys_raw: list[tuple[float, float, float, float]] | None = None
@@ -1306,7 +1329,9 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                                 if prev_b is not None and not prev_b and inside:
                                     shared.counter.entries += 1
                                     _bump_hourly(shared, "entry")
-                                    entry_boxes.append((x_min, y_min, x_max, y_max))
+                                    entry_boxes.append(
+                                        (track_id, (x_min, y_min, x_max, y_max))
+                                    )
                                 elif prev_b is not None and prev_b and not inside:
                                     shared.counter.exits += 1
                                     _bump_hourly(shared, "exit")
@@ -1318,38 +1343,13 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                                 if prev is not None and prev < 0 <= side:
                                     shared.counter.entries += 1
                                     _bump_hourly(shared, "entry")
-                                    entry_boxes.append((x_min, y_min, x_max, y_max))
+                                    entry_boxes.append(
+                                        (track_id, (x_min, y_min, x_max, y_max))
+                                    )
                                 elif prev is not None and prev > 0 >= side:
                                     shared.counter.exits += 1
                                     _bump_hourly(shared, "exit")
                             last_side_by_id[track_id] = side
-
-                    if entry_boxes and result.orig_img is not None:
-                        for box in entry_boxes:
-                            if sex_clf and sex_clf.enabled:
-                                bucket = sex_clf.classify_crop(result.orig_img, box)
-                                with shared.lock:
-                                    if bucket == "female":
-                                        shared.sex_agg.female += 1
-                                    elif bucket == "male":
-                                        shared.sex_agg.male += 1
-                                    else:
-                                        shared.sex_agg.unknown += 1
-                            if age_clf and age_clf.enabled:
-                                ab = age_clf.classify_crop(result.orig_img, box)
-                                with shared.lock:
-                                    if ab == "child":
-                                        shared.age_agg.child += 1
-                                    elif ab == "adolescent":
-                                        shared.age_agg.adolescent += 1
-                                    elif ab == "young":
-                                        shared.age_agg.young += 1
-                                    elif ab == "adult":
-                                        shared.age_agg.adult += 1
-                                    elif ab == "elderly":
-                                        shared.age_agg.elderly += 1
-                                    else:
-                                        shared.age_agg.unknown += 1
 
                 draw_items = box_overlay.step(ids_list, xys_raw)
                 active_ids = {t for t, _, _ in draw_items}
@@ -1391,6 +1391,17 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                     is_loiter = track_id in _loitering_ids
                     is_static = track_id in _stationary_ids
 
+                    sex_bucket: str | None = None
+                    if show_sex_ui and sex_clf is not None and sex_clf.enabled:
+                        raw_sx = sex_clf.classify_crop(
+                            frame, (float(xa), float(ya), float(xb), float(yb))
+                        )
+                        sex_bucket = (
+                            sex_smoother.update(track_id, raw_sx)
+                            if sex_smoother is not None
+                            else raw_sx
+                        )
+
                     # ── Cor base pelo lado da linha ───────────────────────
                     side_v = last_side_by_id.get(track_id) if count_mode == "line" else None
                     if count_mode == "line" and side_v is not None:
@@ -1413,13 +1424,27 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                         side_tag = ""
                         label = f"{track_id}" + ("~" if stale else "")
 
-                    # ── Cor final: loitering > parado > movendo ───────────
+                    # ── Cor final: loitering > parado > sexo (classify) > lado linha ───────────
                     if is_loiter:
                         color = _C_RED_DIM if stale else _C_RED
                         label = f"{track_id}!" + ("~" if stale else "")
                     elif is_static:
                         color = _C_AMBER_DIM if stale else _C_AMBER
                         label = f"{track_id}■" + ("~" if stale else "")
+                    elif sex_bucket is not None:
+                        if sex_bucket == "female":
+                            color = _C_SEX_FEMALE_DIM if stale else _C_SEX_FEMALE
+                            sx = "F"
+                        elif sex_bucket == "male":
+                            color = _C_SEX_MALE_DIM if stale else _C_SEX_MALE
+                            sx = "M"
+                        else:
+                            color = _C_SEX_UNKNOWN_DIM if stale else _C_SEX_UNKNOWN
+                            sx = "?"
+                        if count_mode == "line" and side_v is not None:
+                            label = f"{track_id}{side_tag}{sx}" + ("~" if stale else "")
+                        else:
+                            label = f"{track_id}{sx}" + ("~" if stale else "")
                     else:
                         color = base_mv_dim if stale else base_mv
                     if trail_max >= 2:
@@ -1467,6 +1492,39 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                                 p1 = (tx, ty)
                                 if (tx - acx) ** 2 + (ty - acy) ** 2 >= 16:
                                     _draw_heading_arrow(frame, p0, p1, color)
+
+                if entry_boxes and result.orig_img is not None:
+                    for tid_ent, box in entry_boxes:
+                        if sex_clf and sex_clf.enabled and show_sex_ui:
+                            if sex_smoother is not None:
+                                bucket = sex_smoother.last(tid_ent)
+                            else:
+                                bucket = sex_clf.classify_crop(result.orig_img, box)
+                            with shared.lock:
+                                if bucket == "female":
+                                    shared.sex_agg.female += 1
+                                elif bucket == "male":
+                                    shared.sex_agg.male += 1
+                                else:
+                                    shared.sex_agg.unknown += 1
+                        if age_clf and age_clf.enabled:
+                            ab = age_clf.classify_crop(result.orig_img, box)
+                            with shared.lock:
+                                if ab == "child":
+                                    shared.age_agg.child += 1
+                                elif ab == "adolescent":
+                                    shared.age_agg.adolescent += 1
+                                elif ab == "young":
+                                    shared.age_agg.young += 1
+                                elif ab == "adult":
+                                    shared.age_agg.adult += 1
+                                elif ab == "elderly":
+                                    shared.age_agg.elderly += 1
+                                else:
+                                    shared.age_agg.unknown += 1
+
+                if sex_smoother is not None:
+                    sex_smoother.forget_stale(active_ids)
 
                 moving_now = 0
                 stationary_now = 0
@@ -1751,6 +1809,10 @@ def build_stats_payload(shared: SharedState) -> dict:
             "infer_fps_ema": shared.infer_fps_ema,
             "error": shared.last_error,
             "sex_classifier_enabled": shared.sex_classifier_enabled,
+            "sex_overlay_available": shared.sex_overlay_available,
+            "show_sex_overlay": shared.show_sex_overlay
+            if shared.sex_overlay_available
+            else False,
             "sex_female_agg": shared.sex_agg.female,
             "sex_male_agg": shared.sex_agg.male,
             "sex_unknown_agg": shared.sex_agg.unknown,
@@ -2028,7 +2090,7 @@ def create_app(shared: SharedState) -> Flask:
           ? (ph + 'h–' + (ph + 1) + 'h (' + pf + ' passagens no total nessa hora)')
           : '— (ainda sem passagens nesta sessao)';
         const sp = document.getElementById('sexPanel');
-        if (j.sex_classifier_enabled) {
+        if (j.sex_classifier_enabled && j.sex_overlay_available && j.show_sex_overlay) {
           sp.style.display = 'block';
           document.getElementById('sexF').textContent = j.sex_female_agg;
           document.getElementById('sexM').textContent = j.sex_male_agg;
@@ -2072,6 +2134,10 @@ def create_app(shared: SharedState) -> Flask:
             pdef = [{"x": a, "y": b} for a, b in shared.polygon_default]
             show_trail = shared.show_trail_overlay
             show_heading = shared.show_heading_overlay
+            hm_ok = shared.heatmap_available
+            show_hm = shared.show_heatmap_overlay
+            sex_ok = shared.sex_overlay_available
+            show_sex = shared.show_sex_overlay
             apid = str(shared.active_preset_id or "").strip()
         return jsonify(
             {
@@ -2082,6 +2148,10 @@ def create_app(shared: SharedState) -> Flask:
                 "default_polygon": pdef,
                 "show_trail": show_trail,
                 "show_heading": show_heading,
+                "heatmap_available": hm_ok,
+                "show_heatmap": show_hm if hm_ok else False,
+                "sex_overlay_available": sex_ok,
+                "show_sex_overlay": show_sex if sex_ok else False,
                 "active_preset_id": apid,
             }
         )
@@ -2094,10 +2164,33 @@ def create_app(shared: SharedState) -> Flask:
                 shared.show_trail_overlay = bool(data["show_trail"])
             if "show_heading" in data:
                 shared.show_heading_overlay = bool(data["show_heading"])
+            if "show_heatmap" in data and shared.heatmap_available:
+                shared.show_heatmap_overlay = bool(data["show_heatmap"])
+            if "show_sex_overlay" in data and shared.sex_overlay_available:
+                shared.show_sex_overlay = bool(data["show_sex_overlay"])
             st = shared.show_trail_overlay
             sh = shared.show_heading_overlay
-        _persist_config_event(shared, "overlay", {"show_trail": st, "show_heading": sh})
-        return jsonify({"ok": True, "show_trail": st, "show_heading": sh})
+            shm = shared.show_heatmap_overlay
+            hm_ok = shared.heatmap_available
+            ssx = shared.show_sex_overlay
+            sex_ok = shared.sex_overlay_available
+        ev_overlay: dict = {"show_trail": st, "show_heading": sh}
+        if hm_ok:
+            ev_overlay["show_heatmap"] = shm
+        if sex_ok:
+            ev_overlay["show_sex_overlay"] = ssx
+        _persist_config_event(shared, "overlay", ev_overlay)
+        return jsonify(
+            {
+                "ok": True,
+                "show_trail": st,
+                "show_heading": sh,
+                "heatmap_available": hm_ok,
+                "show_heatmap": shm if hm_ok else False,
+                "sex_overlay_available": sex_ok,
+                "show_sex_overlay": ssx if sex_ok else False,
+            }
+        )
 
     @app.get("/api/line")
     def get_line() -> Response:
@@ -2357,7 +2450,11 @@ def create_app(shared: SharedState) -> Flask:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         csv_path = Path("outputs") / f"count_summary_web_{ts}.csv"
         with shared.lock:
-            sex = shared.sex_agg if shared.sex_classifier_enabled else None
+            sex = (
+                shared.sex_agg
+                if shared.sex_classifier_enabled and shared.show_sex_overlay
+                else None
+            )
             age = shared.age_agg if shared.age_classifier_enabled else None
             write_summary_csv(csv_path, shared.counter, shared.started_at, sex=sex, age=age)
         return jsonify({"csv_path": str(csv_path)})
@@ -2390,6 +2487,11 @@ def main() -> None:
         line_default=line_init,
         loitering_threshold_sec=args.loitering_seconds,
     )
+    with shared.lock:
+        shared.heatmap_available = not args.no_heatmap
+        shared.show_heatmap_overlay = True if not args.no_heatmap else False
+        shared.sex_overlay_available = False
+        shared.show_sex_overlay = True
     presets = _load_source_presets_from_file()
     if not presets:
         presets = _load_source_presets_from_env()

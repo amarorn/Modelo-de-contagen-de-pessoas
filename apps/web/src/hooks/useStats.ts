@@ -20,6 +20,8 @@ const EMPTY_STATS: Stats = {
   infer_fps_ema: 0,
   error: null,
   sex_classifier_enabled: false,
+  sex_overlay_available: false,
+  show_sex_overlay: true,
   sex_female_agg: 0,
   sex_male_agg: 0,
   sex_unknown_agg: 0,

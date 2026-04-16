@@ -78,7 +78,9 @@ fi
 
 # Linha em 720p (ex. stream YouTube): ajuste COUNT_LINE no .env se o video for 1280x720.
 LINE_DEF="${COUNT_LINE:-960,300,960,900}"
-CONF_THRES="${YOLO_INFER_CONF:-0.22}"
+# Limiar de confianca: por omissao YOLO_INFER_CONF (ex. 0.25 em RTSP). Para camera local (webcam) com poucas caixas,
+# defina YOLO_WEB_INFER_CONF=0.02 (mesmo racional que YOLO_MOBILE_INFER_CONF em scripts/run_web_mobile.sh).
+CONF_THRES="${YOLO_WEB_INFER_CONF:-${YOLO_INFER_CONF:-0.22}}"
 IMGSZ="${YOLO_INFER_IMGSZ:-1280}"
 IOU_NMS="${YOLO_INFER_IOU:-0.5}"
 MAX_DET="${YOLO_MAX_DET:-200}"
@@ -196,7 +198,7 @@ if [ "${YOLO_WEB_HEADING}" = "0" ]; then
 fi
 WEB_ARGS+=(--host "${WEB_HOST}" --port "${WEB_PORT}")
 
-echo "[run_web] model=${MODEL_PATH} YOLO_DEVICE=${YOLO_DEVICE} YOLO_STREAM_BUFFER=${YOLO_STREAM_BUFFER} YOLO_VID_STRIDE=${YOLO_VID_STRIDE} OPENCV_FFMPEG_CAPTURE_OPTIONS=${OPENCV_FFMPEG_CAPTURE_OPTIONS:0:60}..."
+echo "[run_web] model=${MODEL_PATH} conf=${CONF_THRES} YOLO_DEVICE=${YOLO_DEVICE} YOLO_STREAM_BUFFER=${YOLO_STREAM_BUFFER} YOLO_VID_STRIDE=${YOLO_VID_STRIDE} OPENCV_FFMPEG_CAPTURE_OPTIONS=${OPENCV_FFMPEG_CAPTURE_OPTIONS:0:60}..."
 echo "[run_web] Se vir 'Waiting for stream' em loop: YOLO_STREAM_BUFFER=1, ou aumente YOLO_VID_STRIDE, GPU (newgrp video), ou URL HLS valida (yt-dlp -g)."
 echo "[run_web] Logs OpenCV/Ultralytics reduzidos por defeito; export YOLO_WEB_VERBOSE=1 para avisos completos."
 "${WEB_ARGS[@]}"
