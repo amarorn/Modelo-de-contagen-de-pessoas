@@ -2,6 +2,9 @@ export interface Stats {
   entries: number;
   exits: number;
   total_passages: number;
+  vehicle_entries: number;
+  vehicle_exits: number;
+  vehicle_total: number;
   occupancy_now: number;
   moving_now: number;
   stationary_now: number;

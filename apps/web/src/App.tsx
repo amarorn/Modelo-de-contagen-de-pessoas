@@ -3,7 +3,7 @@ import { useStats } from "./hooks/useStats";
 import { useConfig } from "./hooks/useConfig";
 import {
   IconArrowUp, IconArrowDown, IconUsers, IconArrowsUpDown,
-  IconTarget, IconVideo,
+  IconTarget, IconVideo, IconCar,
 } from "./components/Icons";
 import { Header } from "./components/Header";
 import { StatCard } from "./components/StatCard";
@@ -160,6 +160,15 @@ export default function App() {
                 colorDim="var(--amber-dim)"
                 subtitle={`pico: ${stats.peak_flow} às ${String(stats.peak_hour).padStart(2, "0")}h`}
               />
+              <StatCard
+                variant="counter"
+                label="Veículos"
+                value={stats.vehicle_total ?? 0}
+                icon={<IconCar size={14} />}
+                color="#F97316"
+                colorDim="rgba(249,115,22,0.12)"
+                subtitle={`↑${stats.vehicle_entries ?? 0} ↓${stats.vehicle_exits ?? 0}`}
+              />
 
               {/* Spacer + fps readout */}
               <div
@@ -221,6 +230,9 @@ export default function App() {
                 total={stats.total_passages}
                 peakFlow={stats.peak_flow}
                 peakHour={stats.peak_hour}
+                vehicleEntries={stats.vehicle_entries ?? 0}
+                vehicleExits={stats.vehicle_exits ?? 0}
+                vehicleTotal={stats.vehicle_total ?? 0}
               />
             </div>
           </div>

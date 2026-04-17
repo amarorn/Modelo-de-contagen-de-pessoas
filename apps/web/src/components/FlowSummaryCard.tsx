@@ -5,6 +5,7 @@ import {
   IconArrowsUpDown,
   IconBalance,
   IconZap,
+  IconCar,
 } from "./Icons";
 
 interface Props {
@@ -13,11 +14,14 @@ interface Props {
   total: number;
   peakFlow: number;
   peakHour: number;
+  vehicleEntries?: number;
+  vehicleExits?: number;
+  vehicleTotal?: number;
 }
 
 const HOURS = Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2, "0")}h`);
 
-export function FlowSummaryCard({ entries, exits, total, peakFlow, peakHour }: Props) {
+export function FlowSummaryCard({ entries, exits, total, peakFlow, peakHour, vehicleEntries = 0, vehicleExits = 0, vehicleTotal = 0 }: Props) {
   const balance = entries - exits;
   const balanceColor = balance >= 0 ? "var(--green)" : "var(--red)";
 
@@ -67,6 +71,39 @@ export function FlowSummaryCard({ entries, exits, total, peakFlow, peakHour }: P
           label="Saldo"
           value={Math.abs(balance).toLocaleString("pt-BR")}
           color={balanceColor}
+        />
+
+        {/* Divisor veículos */}
+        <div style={{
+          padding: "6px 16px 2px",
+          borderBottom: "1px solid var(--border)",
+          display: "flex", alignItems: "center", gap: 6,
+        }}>
+          <IconCar size={10} color="#F97316" />
+          <span style={{
+            fontFamily: "var(--font-display)", fontSize: 9, fontWeight: 700,
+            letterSpacing: "0.16em", textTransform: "uppercase", color: "#F97316",
+          }}>
+            Veículos
+          </span>
+        </div>
+        <FlowRow
+          icon={<IconArrowUp size={14} />}
+          label="Entradas"
+          value={vehicleEntries.toLocaleString("pt-BR")}
+          color="#F97316"
+        />
+        <FlowRow
+          icon={<IconArrowDown size={14} />}
+          label="Saídas"
+          value={vehicleExits.toLocaleString("pt-BR")}
+          color="#F97316"
+        />
+        <FlowRow
+          icon={<IconCar size={14} />}
+          label="Total"
+          value={vehicleTotal.toLocaleString("pt-BR")}
+          color="#F97316"
         />
 
         {/* Peak — accent block at bottom */}

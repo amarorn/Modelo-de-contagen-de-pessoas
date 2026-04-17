@@ -123,10 +123,16 @@ def _configure_runtime_logging() -> None:
 class CounterState:
     entries: int = 0
     exits: int = 0
+    vehicle_entries: int = 0
+    vehicle_exits: int = 0
 
     @property
     def total(self) -> int:
         return self.entries + self.exits
+
+    @property
+    def vehicle_total(self) -> int:
+        return self.vehicle_entries + self.vehicle_exits
 
 
 def reset_entry_exit_counters(shared: SharedState) -> None:
@@ -588,7 +594,13 @@ def parse_args() -> argparse.Namespace:
         "--max-box-area-frac",
         type=float,
         default=0.14,
-        help="Rejeita bbox com area > esta fraccao do frame (estruturas gigantes)",
+        help="Pessoa: rejeita bbox com area > esta fraccao do frame (estruturas gigantes)",
+    )
+    p.add_argument(
+        "--max-nonperson-area-frac",
+        type=float,
+        default=0.55,
+        help="Carro/outras classes: limite de area do bbox (carros perto da camara sao grandes; 0.14 corta muitos)",
     )
     p.add_argument(
         "--min-person-height-px",
@@ -871,7 +883,11 @@ def bbox_non_person_sane(
     max_area_frac: float,
     min_h_px: int,
 ) -> bool:
-    """Heuristica leve para carro/outros: rejeita caixas minusculas ou que cobrem o ecra inteiro."""
+    """Heuristica leve para carro/outros: rejeita caixas minusculas ou que cobrem o ecra inteiro.
+
+    `max_area_frac` deve ser alto para veiculos (ex. 0.5): carros em primeiro plano ocupam
+    uma fraccao grande do frame; o mesmo limite usado para pessoas (ex. 0.14) descarta-nos.
+    """
     x1, y1, x2, y2 = xyxy
     w = max(0.0, float(x2 - x1))
     h = max(0.0, float(y2 - y1))
@@ -891,7 +907,8 @@ def filter_boxes_by_shape_multi(
     fh: int,
     min_ar: float,
     max_ar: float,
-    max_area_frac: float,
+    max_person_area_frac: float,
+    max_nonperson_area_frac: float,
     min_h_px: int,
 ) -> tuple[list[int], list[tuple[float, float, float, float]], list[int]]:
     out_ids: list[int] = []
@@ -900,9 +917,11 @@ def filter_boxes_by_shape_multi(
     for tid, box, c in zip(ids, xyxys, clss):
         c = int(c)
         if c == person_class_id:
-            ok = bbox_looks_like_person(box, fw, fh, min_ar, max_ar, max_area_frac, min_h_px)
+            ok = bbox_looks_like_person(
+                box, fw, fh, min_ar, max_ar, max_person_area_frac, min_h_px
+            )
         else:
-            ok = bbox_non_person_sane(box, fw, fh, max_area_frac, min_h_px)
+            ok = bbox_non_person_sane(box, fw, fh, max_nonperson_area_frac, min_h_px)
         if ok:
             out_ids.append(tid)
             out_xy.append(box)
@@ -1194,7 +1213,9 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
         else:
             print(
                 f"[web] Filtro de forma ativo: ar=[{args.min_person_ar},{args.max_person_ar}] "
-                f"max_area_frac={args.max_box_area_frac} min_h_px={args.min_person_height_px}"
+                f"max_person_area_frac={args.max_box_area_frac} "
+                f"max_nonperson_area_frac={args.max_nonperson_area_frac} "
+                f"min_h_px={args.min_person_height_px}"
             )
 
         _ffmpeg_capture_base = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS", "").strip()
@@ -1337,7 +1358,7 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                                 box,
                                 fw,
                                 fh,
-                                args.max_box_area_frac,
+                                args.max_nonperson_area_frac,
                                 args.min_person_height_px,
                             ):
                                 continue
@@ -1373,6 +1394,7 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                             args.min_person_ar,
                             args.max_person_ar,
                             args.max_box_area_frac,
+                            args.max_nonperson_area_frac,
                             args.min_person_height_px,
                         )
                     cls_by_tid = {int(tid): int(c) for tid, c in zip(ids_list, clss_raw)}
@@ -1385,18 +1407,23 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                         if inside_for_presence:
                             current_present_ids.add(track_id)
                             zone_entered_at_by_id.setdefault(track_id, frame_ts)
+                        _is_veh = cls_by_tid.get(track_id, person_class_id) != person_class_id
                         if count_mode == "polygon" and len(poly_pts) >= 3:
                             inside = inside_for_presence
                             with shared.lock:
                                 prev_b = prev_inside_by_id.get(track_id)
                                 if prev_b is not None and not prev_b and inside:
                                     shared.counter.entries += 1
+                                    if _is_veh:
+                                        shared.counter.vehicle_entries += 1
                                     _bump_hourly(shared, "entry")
                                     entry_boxes.append(
                                         (track_id, (x_min, y_min, x_max, y_max))
                                     )
                                 elif prev_b is not None and prev_b and not inside:
                                     shared.counter.exits += 1
+                                    if _is_veh:
+                                        shared.counter.vehicle_exits += 1
                                     _bump_hourly(shared, "exit")
                             prev_inside_by_id[track_id] = inside
                         elif count_mode == "line":
@@ -1405,12 +1432,16 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                                 prev = last_side_by_id.get(track_id)
                                 if prev is not None and prev < 0 <= side:
                                     shared.counter.entries += 1
+                                    if _is_veh:
+                                        shared.counter.vehicle_entries += 1
                                     _bump_hourly(shared, "entry")
                                     entry_boxes.append(
                                         (track_id, (x_min, y_min, x_max, y_max))
                                     )
                                 elif prev is not None and prev > 0 >= side:
                                     shared.counter.exits += 1
+                                    if _is_veh:
+                                        shared.counter.vehicle_exits += 1
                                     _bump_hourly(shared, "exit")
                             last_side_by_id[track_id] = side
 
@@ -1878,6 +1909,9 @@ def build_stats_payload(shared: SharedState) -> dict:
             "entries": shared.counter.entries,
             "exits": shared.counter.exits,
             "total_passages": shared.counter.total,
+            "vehicle_entries": shared.counter.vehicle_entries,
+            "vehicle_exits": shared.counter.vehicle_exits,
+            "vehicle_total": shared.counter.vehicle_total,
             "occupancy_now": shared.occupancy_now,
             "moving_now": shared.moving_now,
             "stationary_now": shared.stationary_now,
