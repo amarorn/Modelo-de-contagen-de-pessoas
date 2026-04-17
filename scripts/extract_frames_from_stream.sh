@@ -4,7 +4,7 @@
 #
 # Uso:
 #   ./scripts/extract_frames_from_stream.sh
-#     (sem URL: usa URL_HLS_OU_RTSP_OU_FICHEIRO do .env)
+#     (sem URL: URL_HLS_OU_RTSP_OU_FICHEIRO do .env, ou YOLO_WEB_SOURCE se for http/https/rtsp)
 #   ./scripts/extract_frames_from_stream.sh 'https://.../live.m3u8?...'
 #   FPS=0.5 DURATION_SEC=120 ./scripts/extract_frames_from_stream.sh 'URL'
 #
@@ -36,10 +36,18 @@ if [ -f .env ]; then
   done < .env
 fi
 
-URL="${1:-${URL_HLS_OU_RTSP_OU_FICHEIRO:-}}"
+URL="${1:-}"
+if [ -z "${URL}" ]; then
+  URL="${URL_HLS_OU_RTSP_OU_FICHEIRO:-}"
+fi
+if [ -z "${URL}" ] && [ -n "${YOLO_WEB_SOURCE:-}" ]; then
+  case "${YOLO_WEB_SOURCE}" in
+    http://*|https://*|rtsp://*) URL="${YOLO_WEB_SOURCE}" ;;
+  esac
+fi
 if [ -z "${URL}" ]; then
   echo "Uso: $0 ['URL_HLS_OU_RTSP_OU_FICHEIRO'] [OUT_DIR]" >&2
-  echo "  Sem argumentos: usa URL_HLS_OU_RTSP_OU_FICHEIRO do ficheiro .env na raiz do projeto." >&2
+  echo "  Sem argumentos: defina URL_HLS_OU_RTSP_OU_FICHEIRO no .env, ou YOLO_WEB_SOURCE com URL http/https/rtsp." >&2
   echo "Exemplo: $0 'https://hd-auth.skylinewebcams.com/live.m3u8?a=...'" >&2
   exit 1
 fi

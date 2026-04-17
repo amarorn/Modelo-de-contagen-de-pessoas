@@ -23,6 +23,7 @@ CONF_THRES="${YOLO_INFER_CONF:-0.22}"
 IMGSZ="${YOLO_INFER_IMGSZ:-1280}"
 IOU_NMS="${YOLO_INFER_IOU:-0.5}"
 PERSON_CLASS_ID="${PERSON_CLASS_ID:-}"
+COUNT_CLASS_IDS="${COUNT_CLASS_IDS:-}"
 COUNT_CSV_OUT="${COUNT_CSV_OUT:-}"
 
 python3 src/infer_ultralytics_count.py \
@@ -33,5 +34,6 @@ python3 src/infer_ultralytics_count.py \
   --imgsz "${IMGSZ}" \
   --iou "${IOU_NMS}" \
   ${PERSON_CLASS_ID:+--person-class-id "${PERSON_CLASS_ID}"} \
+  ${COUNT_CLASS_IDS:+--count-class-ids "${COUNT_CLASS_IDS}"} \
   ${COUNT_CSV_OUT:+--csv-out "${COUNT_CSV_OUT}"} \
   --show

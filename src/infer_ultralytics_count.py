@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
 from datetime import datetime
 from dataclasses import dataclass
@@ -23,6 +24,8 @@ import torch
 from ultralytics import YOLO
 
 from device_utils import resolve_device
+from stream_source_resolve import apply_opencv_ffmpeg_capture_env
+from yolo_class_utils import resolve_yolo_classes_and_person_id
 
 
 @dataclass
@@ -65,26 +68,17 @@ def parse_args() -> argparse.Namespace:
         help="ID da classe pessoa. Se omitido, tenta detectar classe 'person' no modelo.",
     )
     p.add_argument(
+        "--count-class-ids",
+        default=None,
+        help="Varias classes (ex.: 0,1 para pessoa e carro). Em .env: COUNT_CLASS_IDS=0,1",
+    )
+    p.add_argument(
         "--csv-out",
         default="",
         help="Caminho do CSV de resumo. Se vazio, gera em outputs/count_summary_YYYYmmdd_HHMMSS.csv",
     )
     p.add_argument("--show", action="store_true")
     return p.parse_args()
-
-
-def resolve_person_class_id(model: YOLO, forced_id: int | None) -> int:
-    if forced_id is not None:
-        return forced_id
-
-    names = getattr(model, "names", {})
-    if isinstance(names, dict):
-        for class_id, class_name in names.items():
-            if str(class_name).strip().lower() == "person":
-                return int(class_id)
-
-    # Fallback conservador para modelos COCO-like.
-    return 0
 
 
 def _camera_unavailable_message() -> str:
@@ -164,8 +158,17 @@ def main() -> None:
     x1, y1, x2, y2 = [int(v) for v in args.line.split(",")]
     resolved_device = resolve_device(args.device)
     model = YOLO(args.model)
-    person_class_id = resolve_person_class_id(model, args.person_class_id)
-    print(f"[infer] Filtrando apenas classe pessoa: id={person_class_id} | device={resolved_device}")
+    count_class_ids, person_class_id = resolve_yolo_classes_and_person_id(
+        model, args.person_class_id, args.count_class_ids
+    )
+    names = getattr(model, "names", {})
+    lbl = ", ".join(
+        str(names.get(i, names.get(str(i), "?"))) for i in count_class_ids
+    ) if isinstance(names, dict) else str(count_class_ids)
+    print(
+        f"[infer] classes inferencia ids={count_class_ids} ({lbl}) | "
+        f"classe pessoa (referencia) id={person_class_id} | device={resolved_device}"
+    )
 
     state = CounterState()
     last_side_by_id: dict[int, float] = {}
@@ -175,13 +178,15 @@ def main() -> None:
     csv_path = resolve_csv_path(args.csv_out)
 
     try:
+        _ff_base = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS", "").strip()
+        apply_opencv_ffmpeg_capture_env(source, base_opts=_ff_base)
         stream = model.track(
             source=source,
             stream=True,
             conf=args.conf,
             iou=args.iou,
             imgsz=args.imgsz,
-            classes=[person_class_id],
+            classes=count_class_ids,
             tracker="bytetrack.yaml",
             persist=True,
             verbose=False,

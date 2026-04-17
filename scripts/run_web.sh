@@ -87,6 +87,7 @@ MAX_DET="${YOLO_MAX_DET:-200}"
 YOLO_AUGMENT="${YOLO_AUGMENT:-0}"
 YOLO_AGNOSTIC_NMS="${YOLO_AGNOSTIC_NMS:-0}"
 PERSON_CLASS_ID="${PERSON_CLASS_ID:-}"
+COUNT_CLASS_IDS="${COUNT_CLASS_IDS:-}"
 
 YOLO_DEVICE="${YOLO_DEVICE:-auto}"
 YOLO_NO_HALF="${YOLO_NO_HALF:-0}"
@@ -160,6 +161,9 @@ else
 fi
 if [ -n "${PERSON_CLASS_ID}" ]; then
   WEB_ARGS+=(--person-class-id "${PERSON_CLASS_ID}")
+fi
+if [ -n "${COUNT_CLASS_IDS}" ]; then
+  WEB_ARGS+=(--count-class-ids "${COUNT_CLASS_IDS}")
 fi
 WEB_ARGS+=(--device "${YOLO_DEVICE}")
 if [ "${YOLO_NO_HALF}" = "1" ]; then

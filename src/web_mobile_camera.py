@@ -28,6 +28,7 @@ from ultralytics import YOLO
 
 from device_utils import resolve_device
 from sex_classifier_agg import OptionalSexClassifier, PerTrackSexSmoother, SexAggregateStats
+from yolo_class_utils import resolve_yolo_classes_and_person_id, short_class_tag
 
 # BGR para OpenCV (alinhado as cores hex do browser: F rosa, M azul, ? cinza)
 _SEX_BOX_COLOR_BGR: dict[str, tuple[int, int, int]] = {
@@ -85,6 +86,11 @@ def parse_args() -> argparse.Namespace:
         help="lado maximo na inferencia (maior = melhor para alvos pequenos, mais CPU)",
     )
     p.add_argument("--person-class-id", type=int, default=None)
+    p.add_argument(
+        "--count-class-ids",
+        default=None,
+        help="IDs separados por virgula (ex. 0,1). Em .env: COUNT_CLASS_IDS=0,1",
+    )
     p.add_argument("--line", default="0.5,0.3,0.5,0.9", help="linha normalizada x1,y1,x2,y2")
     p.add_argument(
         "--sex-model",
@@ -94,20 +100,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sex-abstain", type=float, default=0.65, help="Confianca minima top-1; abaixo conta como incerto.")
     p.add_argument("--device", default="auto", help="Device para o classificador de sexo (auto, cpu, 0, ...)")
     return p.parse_args()
-
-
-_PERSON_NAME_HINTS = frozenset({"person", "pessoa"})
-
-
-def resolve_person_class_id(model: YOLO, forced_id: int | None) -> int:
-    if forced_id is not None:
-        return forced_id
-    names = getattr(model, "names", {})
-    if isinstance(names, dict):
-        for class_id, class_name in names.items():
-            if str(class_name).strip().lower() in _PERSON_NAME_HINTS:
-                return int(class_id)
-    return 0
 
 
 def side_of_line(x: float, y: float, x1: float, y1: float, x2: float, y2: float) -> float:
@@ -170,6 +162,7 @@ def process_bgr_frame(
     frame: np.ndarray,
     sess: SessionState,
     model: YOLO,
+    count_class_ids: list[int],
     person_class_id: int,
     conf: float,
     imgsz: int,
@@ -183,11 +176,12 @@ def process_bgr_frame(
 ) -> tuple[list[dict], np.ndarray]:
     h, w = frame.shape[:2]
     px1, py1, px2, py2 = lx1 * w, ly1 * h, lx2 * w, ly2 * h
+    names = getattr(model, "names", {})
     result = model.predict(
         frame,
         conf=conf,
         imgsz=imgsz,
-        classes=[person_class_id],
+        classes=count_class_ids,
         verbose=False,
     )[0]
 
@@ -195,10 +189,13 @@ def process_bgr_frame(
 
     detections = []
     if result.boxes is not None:
-        for b in result.boxes.xyxy.tolist():
+        for i, b in enumerate(result.boxes.xyxy.tolist()):
             x1, y1, x2, y2 = b
             cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
-            detections.append((x1, y1, x2, y2, cx, cy))
+            cid = person_class_id
+            if result.boxes.cls is not None and len(result.boxes.cls) > i:
+                cid = int(result.boxes.cls[i].item())
+            detections.append((x1, y1, x2, y2, cx, cy, cid))
 
     max_dist = max(45.0, min(w, h) * 0.12)
     assigned_tracks: set[int] = set()
@@ -209,7 +206,7 @@ def process_bgr_frame(
         sex_clf is not None and sex_clf.enabled and show_sex_overlay
     )
 
-    for x1, y1, x2, y2, cx, cy in detections:
+    for x1, y1, x2, y2, cx, cy, det_cls in detections:
         best_id = None
         best_dist = float("inf")
         for tid, tr in sess.tracks.items():
@@ -225,7 +222,7 @@ def process_bgr_frame(
 
         tid_smooth = best_id if best_id is not None else sess.next_track_id
         bucket_live: str | None = None
-        if sex_run:
+        if sex_run and det_cls == person_class_id:
             raw_sx = sex_clf.classify_crop(
                 frame, (float(x1), float(y1), float(x2), float(y2))
             )
@@ -241,7 +238,7 @@ def process_bgr_frame(
             tr = sess.tracks[best_id]
             if tr.side < 0 <= side:
                 sess.entries += 1
-                if sex_run and bucket_live is not None:
+                if sex_run and det_cls == person_class_id and bucket_live is not None:
                     if bucket_live == "female":
                         sess.sex_agg.female += 1
                     elif bucket_live == "male":
@@ -253,24 +250,32 @@ def process_bgr_frame(
             tr.cx, tr.cy, tr.side, tr.last_seen_ts = cx, cy, side, now_ts
 
         assigned_tracks.add(best_id)
-        box_item: dict = {"id": best_id, "x1": int(x1), "y1": int(y1), "w": int(x2 - x1), "h": int(y2 - y1)}
-        if sex_run and bucket_live is not None:
+        box_item: dict = {
+            "id": best_id,
+            "x1": int(x1),
+            "y1": int(y1),
+            "w": int(x2 - x1),
+            "h": int(y2 - y1),
+            "cls": short_class_tag(names, det_cls) if isinstance(names, dict) else str(det_cls),
+        }
+        if sex_run and det_cls == person_class_id and bucket_live is not None:
             box_item["sex"] = bucket_live
         boxes_out.append(box_item)
 
         if draw:
+            ct = short_class_tag(names, det_cls) if isinstance(names, dict) else str(det_cls)
             color = (
                 _SEX_BOX_COLOR_BGR.get(bucket_live, (0, 255, 0))
-                if (sex_run and bucket_live)
-                else (0, 255, 0)
+                if (sex_run and det_cls == person_class_id and bucket_live)
+                else ((0, 165, 255) if det_cls != person_class_id else (0, 255, 0))
             )
             cv2.rectangle(out_frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-            tag = f"id={best_id}"
-            if sex_run and bucket_live == "female":
+            tag = f"{ct} id={best_id}"
+            if sex_run and det_cls == person_class_id and bucket_live == "female":
                 tag += " F"
-            elif sex_run and bucket_live == "male":
+            elif sex_run and det_cls == person_class_id and bucket_live == "male":
                 tag += " M"
-            elif sex_run and bucket_live == "unknown":
+            elif sex_run and det_cls == person_class_id and bucket_live == "unknown":
                 tag += " ?"
             cv2.putText(
                 out_frame,
@@ -315,6 +320,7 @@ def process_bgr_frame(
 def stream_inference_loop(
     args: argparse.Namespace,
     model: YOLO,
+    count_class_ids: list[int],
     person_class_id: int,
     lx1: float,
     ly1: float,
@@ -347,6 +353,7 @@ def stream_inference_loop(
                 frame,
                 sess,
                 model,
+                count_class_ids,
                 person_class_id,
                 args.conf,
                 args.imgsz,
@@ -509,7 +516,9 @@ def create_app(args: argparse.Namespace) -> Flask:
     app = Flask(__name__)
     sex_ui = {"show": True}
     model = YOLO(args.model)
-    person_class_id = resolve_person_class_id(model, args.person_class_id)
+    count_class_ids, person_class_id = resolve_yolo_classes_and_person_id(
+        model, args.person_class_id, args.count_class_ids
+    )
     line_vals = [float(v) for v in args.line.split(",")]
     if len(line_vals) != 4:
         raise ValueError("Linha deve ter 4 valores: x1,y1,x2,y2")
@@ -524,7 +533,8 @@ def create_app(args: argparse.Namespace) -> Flask:
     sex_avail = sex_clf.enabled
 
     print(
-        f"[mobile] model={args.model} person_class_id={person_class_id} line={args.line} conf={args.conf}"
+        f"[mobile] model={args.model} classes={count_class_ids} person_class_id={person_class_id} "
+        f"line={args.line} conf={args.conf}"
     )
 
     @app.get("/")
@@ -650,7 +660,7 @@ def create_app(args: argparse.Namespace) -> Flask:
         if (j.boxes) {{
           for (const b of j.boxes) {{
             let col = '#22c55e';
-            let tag = 'id=' + b.id;
+            let tag = (b.cls ? (b.cls + ' ') : '') + 'id=' + b.id;
             if (j.sex_overlay_available && j.show_sex_overlay && b.sex) {{
               if (b.sex === 'female') {{ col = '#e11d8c'; tag += ' F'; }}
               else if (b.sex === 'male') {{ col = '#2563eb'; tag += ' M'; }}
@@ -758,6 +768,7 @@ def create_app(args: argparse.Namespace) -> Flask:
                 frame,
                 sess,
                 model,
+                count_class_ids,
                 person_class_id,
                 args.conf,
                 args.imgsz,
@@ -835,7 +846,9 @@ def main() -> None:
     args = parse_args()
     if args.source.strip():
         model = YOLO(args.model)
-        person_class_id = resolve_person_class_id(model, args.person_class_id)
+        count_class_ids, person_class_id = resolve_yolo_classes_and_person_id(
+            model, args.person_class_id, args.count_class_ids
+        )
         line_vals = [float(v) for v in args.line.split(",")]
         if len(line_vals) != 4:
             raise ValueError("Linha deve ter 4 valores: x1,y1,x2,y2")
@@ -851,13 +864,25 @@ def main() -> None:
             print(f"[mobile] sex_model={args.sex_model} sex_abstain={args.sex_abstain} device={device}")
         t = threading.Thread(
             target=stream_inference_loop,
-            args=(args, model, person_class_id, lx1, ly1, lx2, ly2, shared, stop_event, sex_clf),
+            args=(
+                args,
+                model,
+                count_class_ids,
+                person_class_id,
+                lx1,
+                ly1,
+                lx2,
+                ly2,
+                shared,
+                stop_event,
+                sex_clf,
+            ),
             daemon=True,
         )
         t.start()
         print(
             f"[mobile] Modo stream: source={args.source!r} model={args.model} "
-            f"person_class_id={person_class_id} line={args.line} conf={args.conf}"
+            f"classes={count_class_ids} person_class_id={person_class_id} line={args.line} conf={args.conf}"
         )
         app = create_stream_app(args, shared, sex_clf)
         try:

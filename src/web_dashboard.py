@@ -43,7 +43,8 @@ from flask_cors import CORS
 from ultralytics import YOLO
 
 from device_utils import resolve_device
-from stream_source_resolve import resolve_stream_source
+from stream_source_resolve import apply_opencv_ffmpeg_capture_env, resolve_stream_source
+from yolo_class_utils import resolve_yolo_classes_and_person_id, short_class_tag
 from age_classifier_agg import AgeAggregateStats, OptionalAgeClassifier
 from sex_classifier_agg import OptionalSexClassifier, PerTrackSexSmoother, SexAggregateStats
 from env_settings import (
@@ -481,6 +482,14 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--person-class-id", type=int, default=None)
     p.add_argument(
+        "--count-class-ids",
+        default=None,
+        help=(
+            "IDs de classes YOLO a inferir, separados por virgula (ex.: 0,1 para pessoa e carro). "
+            "Se omitido, so a classe pessoa. Em .env: COUNT_CLASS_IDS=0,1"
+        ),
+    )
+    p.add_argument(
         "--device",
         default="auto",
         help="auto, cpu, mps ou id CUDA (ex: 0). Omissao anterior: inferencia podia ficar em CPU.",
@@ -852,23 +861,50 @@ def bbox_looks_like_person(
     return True
 
 
-def filter_boxes_by_shape(
+def bbox_non_person_sane(
+    xyxy: tuple[float, float, float, float],
+    fw: int,
+    fh: int,
+    max_area_frac: float,
+    min_h_px: int,
+) -> bool:
+    """Heuristica leve para carro/outros: rejeita caixas minusculas ou que cobrem o ecra inteiro."""
+    x1, y1, x2, y2 = xyxy
+    w = max(0.0, float(x2 - x1))
+    h = max(0.0, float(y2 - y1))
+    if h < max(12.0, float(min_h_px) * 0.35):
+        return False
+    if w * h > max_area_frac * float(fw * fh):
+        return False
+    return True
+
+
+def filter_boxes_by_shape_multi(
     ids: list[int],
     xyxys: list[tuple[float, float, float, float]],
+    clss: list[int],
+    person_class_id: int,
     fw: int,
     fh: int,
     min_ar: float,
     max_ar: float,
     max_area_frac: float,
     min_h_px: int,
-) -> tuple[list[int], list[tuple[float, float, float, float]]]:
+) -> tuple[list[int], list[tuple[float, float, float, float]], list[int]]:
     out_ids: list[int] = []
     out_xy: list[tuple[float, float, float, float]] = []
-    for tid, box in zip(ids, xyxys):
-        if bbox_looks_like_person(box, fw, fh, min_ar, max_ar, max_area_frac, min_h_px):
+    out_cls: list[int] = []
+    for tid, box, c in zip(ids, xyxys, clss):
+        c = int(c)
+        if c == person_class_id:
+            ok = bbox_looks_like_person(box, fw, fh, min_ar, max_ar, max_area_frac, min_h_px)
+        else:
+            ok = bbox_non_person_sane(box, fw, fh, max_area_frac, min_h_px)
+        if ok:
             out_ids.append(tid)
             out_xy.append(box)
-    return out_ids, out_xy
+            out_cls.append(c)
+    return out_ids, out_xy, out_cls
 
 
 def predict_trail_heading_pca(
@@ -966,17 +1002,6 @@ def estimate_trail_speed(
     return float(np.mean(seg_len))
 
 
-def resolve_person_class_id(model: YOLO, forced_id: int | None) -> int:
-    if forced_id is not None:
-        return forced_id
-    names = getattr(model, "names", {})
-    if isinstance(names, dict):
-        for class_id, class_name in names.items():
-            if str(class_name).strip().lower() == "person":
-                return int(class_id)
-    return 0
-
-
 def _camera_unavailable_message() -> str:
     if sys.platform == "darwin":
         return (
@@ -1045,11 +1070,15 @@ def write_summary_csv(
 def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: threading.Event) -> None:
     try:
         model = YOLO(args.model)
-        person_class_id = resolve_person_class_id(model, args.person_class_id)
+        count_class_ids, person_class_id = resolve_yolo_classes_and_person_id(
+            model, args.person_class_id, args.count_class_ids
+        )
         names = getattr(model, "names", {})
         cls_label = "?"
         if isinstance(names, dict):
-            cls_label = str(names.get(person_class_id, names.get(str(person_class_id), "?")))
+            cls_label = ", ".join(
+                str(names.get(i, names.get(str(i), "?"))) for i in count_class_ids
+            )
         print(
             f"[web] torch.cuda.is_available()={torch.cuda.is_available()} "
             f"device_count={torch.cuda.device_count()}"
@@ -1068,7 +1097,8 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
             and torch.cuda.is_available()
         )
         print(
-            f"[web] classe filtrada id={person_class_id} ({cls_label}) | "
+            f"[web] classes inferencia ids={count_class_ids} ({cls_label}) | "
+            f"classe pessoa (sexo/idade) id={person_class_id} | "
             f"conf={args.conf} imgsz={args.imgsz} max_det={args.max_det} "
             f"augment={args.augment} agnostic_nms={args.agnostic_nms} | "
             f"device={resolved_device} half={use_half} vid_stride={args.vid_stride} stream_buffer={args.stream_buffer}"
@@ -1082,6 +1112,11 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
             f"[web] Modo contagem={_mode} | linha (pixels): {_ld} | poligono: {_np} vertices. "
             "Linha: pes cruzam segmento. Poligono: entrada/saida pela area (UI /roi)."
         )
+        if len(count_class_ids) > 1 and not args.agnostic_nms:
+            print(
+                "[web] Dica: varias classes no mesmo modelo; se caixas se sobreporem entre classes, "
+                "experimente YOLO_AGNOSTIC_NMS=1 no .env."
+            )
         # Inicializa fonte no SharedState
         with shared.lock:
             if not shared.source_live:
@@ -1159,6 +1194,8 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 f"max_area_frac={args.max_box_area_frac} min_h_px={args.min_person_height_px}"
             )
 
+        _ffmpeg_capture_base = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS", "").strip()
+
         # ── Loop externo: reinicia o stream ao trocar fonte ─────────────────
         while not stop_event.is_set():
             with shared.lock:
@@ -1189,6 +1226,8 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
 
             print(f"[web] Abrindo fonte: {source!r}")
 
+            apply_opencv_ffmpeg_capture_env(source, base_opts=_ffmpeg_capture_base)
+
             track_kw: dict = {
                 "source": source,
                 "stream": True,
@@ -1196,7 +1235,7 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 "iou": args.iou,
                 "imgsz": args.imgsz,
                 "max_det": args.max_det,
-                "classes": [person_class_id],
+                "classes": count_class_ids,
                 "tracker": tracker_yaml,
                 "persist": True,
                 "verbose": False,
@@ -1271,18 +1310,34 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
 
                 if result.boxes is not None and len(result.boxes) > 0:
                     xys = result.boxes.xyxy.tolist()
-                    for x_min, y_min, x_max, y_max in xys:
+                    clss_hm = (
+                        result.boxes.cls.int().tolist()
+                        if result.boxes.cls is not None
+                        else [person_class_id] * len(xys)
+                    )
+                    for (x_min, y_min, x_max, y_max), c_raw in zip(xys, clss_hm):
+                        c = int(c_raw)
                         box = (float(x_min), float(y_min), float(x_max), float(y_max))
-                        if not args.no_shape_filter and not bbox_looks_like_person(
-                            box,
-                            fw,
-                            fh,
-                            args.min_person_ar,
-                            args.max_person_ar,
-                            args.max_box_area_frac,
-                            args.min_person_height_px,
-                        ):
-                            continue
+                        if not args.no_shape_filter:
+                            if c == person_class_id:
+                                if not bbox_looks_like_person(
+                                    box,
+                                    fw,
+                                    fh,
+                                    args.min_person_ar,
+                                    args.max_person_ar,
+                                    args.max_box_area_frac,
+                                    args.min_person_height_px,
+                                ):
+                                    continue
+                            elif not bbox_non_person_sane(
+                                box,
+                                fw,
+                                fh,
+                                args.max_box_area_frac,
+                                args.min_person_height_px,
+                            ):
+                                continue
                         foot_x = (x_min + x_max) / 2.0
                         foot_y = float(y_max)
                         if count_mode == "polygon" and len(poly_pts) >= 3:
@@ -1299,13 +1354,17 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
 
                 ids_list: list[int] | None = None
                 xys_raw: list[tuple[float, float, float, float]] | None = None
+                cls_by_tid: dict[int, int] = {}
                 if result.boxes is not None and len(result.boxes) > 0 and result.boxes.id is not None:
                     ids_list = [int(t) for t in result.boxes.id.int().tolist()]
                     xys_raw = [tuple(map(float, t)) for t in result.boxes.xyxy.tolist()]
+                    clss_raw = [int(t) for t in result.boxes.cls.int().tolist()]
                     if not args.no_shape_filter:
-                        ids_list, xys_raw = filter_boxes_by_shape(
+                        ids_list, xys_raw, clss_raw = filter_boxes_by_shape_multi(
                             ids_list,
                             xys_raw,
+                            clss_raw,
+                            person_class_id,
                             fw,
                             fh,
                             args.min_person_ar,
@@ -1313,6 +1372,7 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                             args.max_box_area_frac,
                             args.min_person_height_px,
                         )
+                    cls_by_tid = {int(tid): int(c) for tid, c in zip(ids_list, clss_raw)}
                     for track_id, (x_min, y_min, x_max, y_max) in zip(ids_list, xys_raw):
                         foot_x = (x_min + x_max) / 2.0
                         foot_y = float(y_max)
@@ -1387,12 +1447,20 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                         fcx = int(round((xa + xb) / 2.0))
                         fcy = int(yb)
 
+                    det_cls = cls_by_tid.get(track_id, person_class_id)
+                    cls_tag = short_class_tag(names, det_cls) if isinstance(names, dict) else "?"
+
                     # ── Estado de movimento (usa frame anterior) ──────────
                     is_loiter = track_id in _loitering_ids
                     is_static = track_id in _stationary_ids
 
                     sex_bucket: str | None = None
-                    if show_sex_ui and sex_clf is not None and sex_clf.enabled:
+                    if (
+                        show_sex_ui
+                        and sex_clf is not None
+                        and sex_clf.enabled
+                        and det_cls == person_class_id
+                    ):
                         raw_sx = sex_clf.classify_crop(
                             frame, (float(xa), float(ya), float(xb), float(yb))
                         )
@@ -1417,20 +1485,20 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                             base_mv = _C_GRAY
                             base_mv_dim = _C_GRAY_DIM
                             side_tag = "|"
-                        label = f"{track_id}{side_tag}" + ("~" if stale else "")
+                        label = f"{cls_tag}{track_id}{side_tag}" + ("~" if stale else "")
                     else:
                         base_mv = _C_CYAN
                         base_mv_dim = _C_CYAN_DIM
                         side_tag = ""
-                        label = f"{track_id}" + ("~" if stale else "")
+                        label = f"{cls_tag}{track_id}" + ("~" if stale else "")
 
                     # ── Cor final: loitering > parado > sexo (classify) > lado linha ───────────
                     if is_loiter:
                         color = _C_RED_DIM if stale else _C_RED
-                        label = f"{track_id}!" + ("~" if stale else "")
+                        label = f"{cls_tag}{track_id}!" + ("~" if stale else "")
                     elif is_static:
                         color = _C_AMBER_DIM if stale else _C_AMBER
-                        label = f"{track_id}■" + ("~" if stale else "")
+                        label = f"{cls_tag}{track_id}■" + ("~" if stale else "")
                     elif sex_bucket is not None:
                         if sex_bucket == "female":
                             color = _C_SEX_FEMALE_DIM if stale else _C_SEX_FEMALE
@@ -1442,9 +1510,9 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                             color = _C_SEX_UNKNOWN_DIM if stale else _C_SEX_UNKNOWN
                             sx = "?"
                         if count_mode == "line" and side_v is not None:
-                            label = f"{track_id}{side_tag}{sx}" + ("~" if stale else "")
+                            label = f"{cls_tag}{track_id}{side_tag}{sx}" + ("~" if stale else "")
                         else:
-                            label = f"{track_id}{sx}" + ("~" if stale else "")
+                            label = f"{cls_tag}{track_id}{sx}" + ("~" if stale else "")
                     else:
                         color = base_mv_dim if stale else base_mv
                     if trail_max >= 2:
@@ -1495,6 +1563,8 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
 
                 if entry_boxes and result.orig_img is not None:
                     for tid_ent, box in entry_boxes:
+                        if cls_by_tid.get(tid_ent, person_class_id) != person_class_id:
+                            continue
                         if sex_clf and sex_clf.enabled and show_sex_ui:
                             if sex_smoother is not None:
                                 bucket = sex_smoother.last(tid_ent)

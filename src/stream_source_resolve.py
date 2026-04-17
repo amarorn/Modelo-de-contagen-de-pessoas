@@ -6,6 +6,7 @@ aceitar a URL da pagina (.html) evita copiar manualmente o m3u8.
 
 from __future__ import annotations
 
+import os
 import re
 import ssl
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse
@@ -15,6 +16,34 @@ _UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+
+_SKYLINE_REFERER = "https://www.skylinewebcams.com/"
+
+
+def apply_opencv_ffmpeg_capture_env(
+    stream_src: str | int, *, base_opts: str | None = None
+) -> None:
+    """Ajusta OPENCV_FFMPEG_CAPTURE_OPTIONS para o backend FFmpeg do OpenCV.
+
+    O manifesto HLS da Skyline em hd-auth.skylinewebcams.com costuma recusar o
+    User-Agent default do libav; sem user_agent/referer o VideoCapture falha
+    com 'Failed to open'. Preserva opcoes ja definidas (ex. fflags;nobuffer).
+    """
+    key = "OPENCV_FFMPEG_CAPTURE_OPTIONS"
+    base = (base_opts if base_opts is not None else os.environ.get(key, "")).strip()
+    u = str(stream_src).strip().lower() if isinstance(stream_src, str) else ""
+    if "skylinewebcams.com" not in u:
+        if base:
+            os.environ[key] = base
+        else:
+            os.environ.pop(key, None)
+        return
+    sky = (
+        "protocol_whitelist;file,http,https,tcp,tls,crypto|"
+        f"user_agent;{_UA}|"
+        f"referer;{_SKYLINE_REFERER}"
+    )
+    os.environ[key] = f"{base}|{sky}" if base else sky
 
 
 def is_skylinewebcams_webcam_page(url: str) -> bool:

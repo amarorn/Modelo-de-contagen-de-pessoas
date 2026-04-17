@@ -42,6 +42,19 @@ def _sex_crop_pad_frac() -> float:
         return 0.06
 
 
+def _sex_min_box_height_px() -> int:
+    """Altura minima da bbox de detecao (pixels) para classificar sexo; 0 = sem limite.
+
+    Em camaras longe / vista de cima as pessoas sao poucos pixels: o classificador
+    tende a errar; subir este valor (ex.: 120-200) forca 'unknown' em figuras pequenas.
+    """
+    raw = os.environ.get("YOLO_SEX_MIN_BOX_HEIGHT_PX", "0").strip()
+    try:
+        return int(np.clip(int(raw), 0, 4096))
+    except ValueError:
+        return 0
+
+
 def _expand_xyxy(
     xyxy: tuple[float, float, float, float],
     frame_hw: tuple[int, int],
@@ -146,6 +159,10 @@ class OptionalSexClassifier:
 
     def classify_crop(self, frame_bgr: np.ndarray, xyxy: tuple[float, float, float, float]) -> Bucket:
         if not self.enabled or self._model is None:
+            return "unknown"
+        x1, y1, x2, y2 = xyxy
+        min_h = _sex_min_box_height_px()
+        if min_h > 0 and (y2 - y1) < float(min_h):
             return "unknown"
         fh, fw = frame_bgr.shape[:2]
         pad = _sex_crop_pad_frac()

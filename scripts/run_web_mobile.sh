@@ -22,6 +22,7 @@ MODEL_PATH="${YOLO_INFER_MODEL:-runs/people_count/yolov8m-door-counter/weights/b
 CONF_THRES="${YOLO_MOBILE_INFER_CONF:-0.02}"
 IMGSZ="${YOLO_INFER_IMGSZ:-1280}"
 PERSON_CLASS_ID="${PERSON_CLASS_ID:-}"
+COUNT_CLASS_IDS="${COUNT_CLASS_IDS:-}"
 WEB_HOST="${WEB_HOST:-0.0.0.0}"
 WEB_PORT="${WEB_MOBILE_PORT:-8081}"
 MOBILE_COUNT_LINE="${MOBILE_COUNT_LINE:-0.5,0.3,0.5,0.9}"
@@ -48,6 +49,9 @@ MOBILE_ARGS=(
 )
 if [ -n "${PERSON_CLASS_ID}" ]; then
   MOBILE_ARGS+=(--person-class-id "${PERSON_CLASS_ID}")
+fi
+if [ -n "${COUNT_CLASS_IDS}" ]; then
+  MOBILE_ARGS+=(--count-class-ids "${COUNT_CLASS_IDS}")
 fi
 if [ -n "${YOLO_SEX_MODEL}" ]; then
   MOBILE_ARGS+=(--sex-model "${YOLO_SEX_MODEL}" --sex-abstain "${YOLO_SEX_ABSTAIN}")

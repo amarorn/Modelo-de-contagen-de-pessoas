@@ -19,7 +19,7 @@ function flaskProxyTarget(mode: string): string {
     process.env.VITE_DEV_API_TARGET;
   const trimmed = override?.trim().replace(/\/$/, "");
   if (trimmed) return trimmed;
-  const port = (rootEnv.WEB_PORT || "8080").replace(/\D/g, "") || "8080";
+  const port = (rootEnv.WEB_PORT || "8081").replace(/\D/g, "") || "8080";
   return `http://127.0.0.1:${port}`;
 }
 
