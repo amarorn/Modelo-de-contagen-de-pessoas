@@ -651,7 +651,7 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
           border: "1px solid var(--border)",
           borderRadius: "var(--radius-xl)",
           width: "min(1320px, 96vw)",
-          maxHeight: "94vh",
+          height: "92vh",
           display: "flex",
           flexDirection: "column",
           overflow: "hidden",
