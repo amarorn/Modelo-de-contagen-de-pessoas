@@ -52,6 +52,8 @@ export interface ApiConfig {
   show_heatmap?: boolean;
   sex_overlay_available?: boolean;
   show_sex_overlay?: boolean;
+  /** Mostrar/ocultar marcações ROI (linha/polígono) no vídeo */
+  show_roi?: boolean;
 }
 
 export type ConnectionStatus = "connected" | "connecting" | "error";

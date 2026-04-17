@@ -1,16 +1,5 @@
 /**
- * RoiEditor — desenha linha de contagem ou polígono ROI sobre o frame do vídeo.
- *
- * Melhorias v2:
- *  - Layout duas colunas: canvas (esquerda) + painel de controlo (direita)
- *  - Linha/segmento fantasma que segue o cursor em tempo real
- *  - Crosshair customizado desenhado no canvas
- *  - Coordenadas X/Y ao vivo sob o cursor
- *  - Lista de pontos interativa na sidebar (com remoção individual)
- *  - Atalhos de teclado: Z=desfazer, C=limpar, Enter=aplicar, Esc=fechar
- *  - Instrução dinâmica que guia o utilizador passo a passo
- *  - Animação de entrada do modal
- *  - Botões desabilitados contextualmente
+ * RoiEditor v3 — linha/polígono com pontos arrastáveis, modal maior, linha mais transparente.
  */
 
 import {
@@ -38,12 +27,25 @@ type Point = { x: number; y: number };
 const CYAN  = "#00D4FF";
 const AMBER = "#F59E0B";
 const GREEN = "#10B981";
+const HIT_RADIUS = 14; // px — raio de detecção de ponto para arrastar
 
 export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
   const canvasRef    = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const imgRef       = useRef<HTMLImageElement>(null);
   const cursorRef    = useRef<{ cx: number; cy: number } | null>(null);
+
+  // Drag state — ref para não causar re-renders durante drag
+  const dragRef = useRef<{
+    active: boolean;
+    mode: DrawMode;
+    index: number;
+    point: Point;
+    didMove: boolean;
+  } | null>(null);
+
+  // Ponto hovado (índice) — ref para feedback visual imediato
+  const hoveredPtRef = useRef<number | null>(null);
 
   const [mode, setMode]             = useState<DrawMode>(config?.mode ?? "line");
   const [linePoints, setLinePoints] = useState<Point[]>([]);
@@ -95,16 +97,26 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    const cursor = cursorRef.current;
+    const cursor  = cursorRef.current;
+    const drag    = dragRef.current;
+    const hovered = hoveredPtRef.current;
+
+    // Pontos efectivos (incluindo override de drag)
+    const effLine = drag?.active && drag.mode === "line"
+      ? linePoints.map((p, i) => i === drag.index ? drag.point : p)
+      : linePoints;
+    const effPoly = drag?.active && drag.mode === "polygon"
+      ? polyPoints.map((p, i) => i === drag.index ? drag.point : p)
+      : polyPoints;
 
     /* -- LINE MODE -- */
     if (mode === "line") {
-      const pts = linePoints.map((p) => toCanvasCoords(p.x, p.y));
+      const pts = effLine.map((p) => toCanvasCoords(p.x, p.y));
 
       // Ghost preview from last point to cursor
-      if (pts.length === 1 && cursor) {
+      if (pts.length === 1 && cursor && !drag?.active) {
         ctx.save();
-        ctx.strokeStyle = "rgba(0,212,255,0.28)";
+        ctx.strokeStyle = "rgba(0,212,255,0.14)";
         ctx.lineWidth = 1.5;
         ctx.setLineDash([5, 5]);
         ctx.lineCap = "round";
@@ -119,8 +131,8 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
       if (pts.length >= 1) {
         ctx.save();
         if (pts[0] && pts[1]) {
-          // Outer glow
-          ctx.strokeStyle = "rgba(0,212,255,0.18)";
+          // Outer glow — mais transparente
+          ctx.strokeStyle = "rgba(0,212,255,0.08)";
           ctx.lineWidth = 10;
           ctx.lineCap = "round";
           ctx.beginPath();
@@ -128,55 +140,97 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
           ctx.lineTo(pts[1].x, pts[1].y);
           ctx.stroke();
           // Inner glow
-          ctx.strokeStyle = "rgba(0,212,255,0.45)";
+          ctx.strokeStyle = "rgba(0,212,255,0.20)";
           ctx.lineWidth = 4;
           ctx.beginPath();
           ctx.moveTo(pts[0].x, pts[0].y);
           ctx.lineTo(pts[1].x, pts[1].y);
           ctx.stroke();
-          // Bright line
-          ctx.strokeStyle = CYAN;
-          ctx.lineWidth = 2;
+          // Bright line semi-transparent
+          ctx.strokeStyle = "rgba(0,212,255,0.60)";
+          ctx.lineWidth = 1.5;
           ctx.setLineDash([]);
           ctx.beginPath();
           ctx.moveTo(pts[0].x, pts[0].y);
           ctx.lineTo(pts[1].x, pts[1].y);
           ctx.stroke();
+
+          // Comprimento e ângulo
+          const dx = pts[1].x - pts[0].x;
+          const dy = pts[1].y - pts[0].y;
+          const angleRad = Math.atan2(dy, dx);
+          const angleDeg = ((angleRad * 180) / Math.PI + 360) % 360;
+          const mx = (pts[0].x + pts[1].x) / 2;
+          const my = (pts[0].y + pts[1].y) / 2;
+          ctx.save();
+          ctx.fillStyle = "rgba(0,212,255,0.70)";
+          ctx.font = "bold 9px monospace";
+          ctx.fillText(`${Math.round(angleDeg)}°`, mx + 6, my - 6);
+          ctx.restore();
         }
         // Endpoint markers
         const labels = ["A", "B"];
         for (let i = 0; i < pts.length; i++) {
           const p = pts[i];
+          const isHovered = hovered === i;
+          const isDragging = drag?.active && drag.mode === "line" && drag.index === i;
+
+          // Outer ring — maior e mais brilhante se hovado/arrastando
           ctx.beginPath();
-          ctx.arc(p.x, p.y, 11, 0, Math.PI * 2);
-          ctx.strokeStyle = "rgba(0,212,255,0.18)";
-          ctx.lineWidth = 2;
+          ctx.arc(p.x, p.y, isHovered || isDragging ? 16 : 11, 0, Math.PI * 2);
+          ctx.strokeStyle = isDragging
+            ? "rgba(0,212,255,0.55)"
+            : isHovered
+            ? "rgba(0,212,255,0.40)"
+            : "rgba(0,212,255,0.14)";
+          ctx.lineWidth = isDragging ? 1.5 : 1;
           ctx.stroke();
+
+          // Ponto central
           ctx.beginPath();
           ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
           ctx.fillStyle = "rgba(0,0,0,0.85)";
           ctx.fill();
           ctx.beginPath();
           ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
-          ctx.fillStyle = CYAN;
+          ctx.fillStyle = isHovered || isDragging ? CYAN : "rgba(0,212,255,0.70)";
           ctx.fill();
-          ctx.fillStyle = CYAN;
+          ctx.fillStyle = isHovered || isDragging ? CYAN : "rgba(0,212,255,0.70)";
           ctx.font = "bold 9px monospace";
           ctx.fillText(labels[i] ?? "", p.x + 10, p.y - 8);
+
+          // Ícone de arrastar quando hovado
+          if (isHovered && !drag?.active) {
+            ctx.save();
+            ctx.strokeStyle = "rgba(0,212,255,0.55)";
+            ctx.lineWidth = 1;
+            const r = 5;
+            // Cruz de movimento
+            for (const [ax, ay, bx, by] of [
+              [p.x, p.y - r - 3, p.x, p.y + r + 3],
+              [p.x - r - 3, p.y, p.x + r + 3, p.y],
+            ] as [number, number, number, number][]) {
+              ctx.beginPath();
+              ctx.moveTo(ax, ay);
+              ctx.lineTo(bx, by);
+              ctx.stroke();
+            }
+            ctx.restore();
+          }
         }
         ctx.restore();
       }
     }
 
     /* -- POLYGON MODE -- */
-    if (mode === "polygon" && polyPoints.length > 0) {
-      const pts = polyPoints.map((p) => toCanvasCoords(p.x, p.y));
+    if (mode === "polygon" && effPoly.length > 0) {
+      const pts = effPoly.map((p) => toCanvasCoords(p.x, p.y));
 
       // Ghost segment to cursor
-      if (cursor) {
+      if (cursor && !drag?.active) {
         const last = pts[pts.length - 1];
         ctx.save();
-        ctx.strokeStyle = "rgba(245,158,11,0.32)";
+        ctx.strokeStyle = "rgba(245,158,11,0.28)";
         ctx.lineWidth = 1.5;
         ctx.setLineDash([5, 5]);
         ctx.lineCap = "round";
@@ -184,9 +238,8 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
         ctx.moveTo(last.x, last.y);
         ctx.lineTo(cursor.cx, cursor.cy);
         ctx.stroke();
-        // Closing ghost (≥3 pts)
         if (pts.length >= 3) {
-          ctx.strokeStyle = "rgba(245,158,11,0.14)";
+          ctx.strokeStyle = "rgba(245,158,11,0.12)";
           ctx.beginPath();
           ctx.moveTo(pts[0].x, pts[0].y);
           ctx.lineTo(cursor.cx, cursor.cy);
@@ -200,34 +253,43 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
       ctx.beginPath();
       ctx.moveTo(pts[0].x, pts[0].y);
       for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-      if (polyPoints.length >= 3) ctx.closePath();
+      if (effPoly.length >= 3) ctx.closePath();
 
-      // Outer glow stroke
-      ctx.strokeStyle = "rgba(245,158,11,0.22)";
+      ctx.strokeStyle = "rgba(245,158,11,0.18)";
       ctx.lineWidth = 7;
       ctx.lineJoin = "round";
-      ctx.setLineDash(polyPoints.length < 3 ? [6, 4] : []);
+      ctx.setLineDash(effPoly.length < 3 ? [6, 4] : []);
       ctx.stroke();
-      // Bright stroke
       ctx.strokeStyle = AMBER;
       ctx.lineWidth = 2;
       ctx.stroke();
       ctx.setLineDash([]);
-      // Fill
-      if (polyPoints.length >= 3) {
+      if (effPoly.length >= 3) {
         ctx.fillStyle = "rgba(245,158,11,0.07)";
         ctx.fill();
       }
+
       // Vertex markers
       for (let i = 0; i < pts.length; i++) {
         const p = pts[i];
         const isFirst = i === 0;
+        const isHovered = hovered === i;
+        const isDragging = drag?.active && drag.mode === "polygon" && drag.index === i;
         const color = isFirst ? GREEN : AMBER;
+
+        // Outer ring
         ctx.beginPath();
-        ctx.arc(p.x, p.y, 10, 0, Math.PI * 2);
-        ctx.strokeStyle = isFirst ? "rgba(16,185,129,0.2)" : "rgba(245,158,11,0.2)";
-        ctx.lineWidth = 2;
+        ctx.arc(p.x, p.y, isHovered || isDragging ? 14 : 10, 0, Math.PI * 2);
+        ctx.strokeStyle = isDragging
+          ? (isFirst ? "rgba(16,185,129,0.55)" : "rgba(245,158,11,0.55)")
+          : isHovered
+          ? (isFirst ? "rgba(16,185,129,0.40)" : "rgba(245,158,11,0.40)")
+          : isFirst
+          ? "rgba(16,185,129,0.2)"
+          : "rgba(245,158,11,0.2)";
+        ctx.lineWidth = isDragging ? 1.5 : 1;
         ctx.stroke();
+
         ctx.beginPath();
         ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
         ctx.fillStyle = "rgba(0,0,0,0.85)";
@@ -239,29 +301,57 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
         ctx.fillStyle = "#fff";
         ctx.font = "bold 9px monospace";
         ctx.fillText(String(i + 1), p.x + 10, p.y - 8);
+
+        // Ícone de arrastar quando hovado
+        if (isHovered && !drag?.active) {
+          ctx.save();
+          ctx.strokeStyle = isFirst ? "rgba(16,185,129,0.55)" : "rgba(245,158,11,0.55)";
+          ctx.lineWidth = 1;
+          const r = 5;
+          for (const [ax, ay, bx, by] of [
+            [p.x, p.y - r - 3, p.x, p.y + r + 3],
+            [p.x - r - 3, p.y, p.x + r + 3, p.y],
+          ] as [number, number, number, number][]) {
+            ctx.beginPath();
+            ctx.moveTo(ax, ay);
+            ctx.lineTo(bx, by);
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
       }
       ctx.restore();
     }
 
     /* -- CURSOR CROSSHAIR -- */
     if (cursor) {
+      const isOverPt = hovered !== null;
       ctx.save();
-      ctx.strokeStyle = "rgba(255,255,255,0.22)";
-      ctx.lineWidth = 1;
-      ctx.setLineDash([3, 5]);
-      ctx.beginPath();
-      ctx.moveTo(0, cursor.cy);
-      ctx.lineTo(canvas.width, cursor.cy);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(cursor.cx, 0);
-      ctx.lineTo(cursor.cx, canvas.height);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.beginPath();
-      ctx.arc(cursor.cx, cursor.cy, 3, 0, Math.PI * 2);
-      ctx.fillStyle = "rgba(255,255,255,0.55)";
-      ctx.fill();
+      if (!isOverPt) {
+        ctx.strokeStyle = "rgba(255,255,255,0.22)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 5]);
+        ctx.beginPath();
+        ctx.moveTo(0, cursor.cy);
+        ctx.lineTo(canvas.width, cursor.cy);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(cursor.cx, 0);
+        ctx.lineTo(cursor.cx, canvas.height);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.arc(cursor.cx, cursor.cy, 3, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(255,255,255,0.55)";
+        ctx.fill();
+      } else {
+        // Cursor especial sobre ponto arrastável
+        ctx.strokeStyle = "rgba(255,255,255,0.45)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(cursor.cx, cursor.cy, 6, 0, Math.PI * 2);
+        ctx.stroke();
+      }
       ctx.restore();
     }
   }, [mode, linePoints, polyPoints, toCanvasCoords]);
@@ -284,7 +374,71 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
     return () => obs.disconnect();
   }, [draw]);
 
+  /* ── Helpers ────────────────────────────────────────── */
+  const findNearestPoint = useCallback(
+    (cx: number, cy: number): number | null => {
+      const pts = mode === "line" ? linePoints : polyPoints;
+      for (let i = pts.length - 1; i >= 0; i--) {
+        const cp = toCanvasCoords(pts[i].x, pts[i].y);
+        if (Math.hypot(cx - cp.x, cy - cp.y) <= HIT_RADIUS) return i;
+      }
+      return null;
+    },
+    [mode, linePoints, polyPoints, toCanvasCoords],
+  );
+
   /* ── Mouse handlers ─────────────────────────────────── */
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const cx = e.clientX - rect.left;
+      const cy = e.clientY - rect.top;
+      const idx = findNearestPoint(cx, cy);
+      if (idx !== null) {
+        const pts = mode === "line" ? linePoints : polyPoints;
+        dragRef.current = {
+          active: true,
+          mode,
+          index: idx,
+          point: { ...pts[idx] },
+          didMove: false,
+        };
+      } else {
+        dragRef.current = null;
+      }
+    },
+    [findNearestPoint, mode, linePoints, polyPoints],
+  );
+
+  const handleMouseUp = useCallback(
+    (_e: React.MouseEvent<HTMLCanvasElement>) => {
+      const drag = dragRef.current;
+      if (drag?.active && drag.didMove) {
+        // Commit drag para state
+        if (drag.mode === "line") {
+          setLinePoints((prev) => {
+            const copy = [...prev];
+            copy[drag.index] = drag.point;
+            return copy;
+          });
+        } else {
+          setPolyPoints((prev) => {
+            const copy = [...prev];
+            copy[drag.index] = drag.point;
+            return copy;
+          });
+        }
+        setMsg(null);
+      }
+      if (drag?.active) {
+        dragRef.current = { ...drag, active: false };
+      }
+    },
+    [],
+  );
+
   const handleMouseMove = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       const canvas = canvasRef.current;
@@ -293,24 +447,59 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
       const cx = e.clientX - rect.left;
       const cy = e.clientY - rect.top;
       cursorRef.current = { cx, cy };
+
+      const drag = dragRef.current;
+      if (drag?.active) {
+        // Arrastar ponto
+        drag.point = toFrameCoords(cx, cy);
+        drag.didMove = true;
+        canvas.style.cursor = "grabbing";
+        draw();
+        return;
+      }
+
+      // Detectar ponto hovado para feedback visual
+      const idx = findNearestPoint(cx, cy);
+      hoveredPtRef.current = idx;
+      canvas.style.cursor = idx !== null ? "grab" : "none";
+
       setCoords(toFrameCoords(cx, cy));
       draw();
     },
-    [toFrameCoords, draw],
+    [toFrameCoords, draw, findNearestPoint],
   );
 
   const handleMouseLeave = useCallback(() => {
     cursorRef.current = null;
+    hoveredPtRef.current = null;
+    if (dragRef.current?.active) {
+      // Cancelar drag se sair do canvas
+      dragRef.current = { ...dragRef.current, active: false };
+    }
+    const canvas = canvasRef.current;
+    if (canvas) canvas.style.cursor = "none";
     setCoords(null);
     draw();
   }, [draw]);
 
   const handleClick = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
+      // Se acabámos de arrastar, não adicionar ponto
+      if (dragRef.current?.didMove) {
+        dragRef.current = null;
+        return;
+      }
+      dragRef.current = null;
+
       const canvas = canvasRef.current;
       if (!canvas) return;
       const rect  = canvas.getBoundingClientRect();
       const frame = toFrameCoords(e.clientX - rect.left, e.clientY - rect.top);
+
+      // Não adicionar se clicamos perto de um ponto existente (era para arrastar)
+      const idx = findNearestPoint(e.clientX - rect.left, e.clientY - rect.top);
+      if (idx !== null) return;
+
       if (mode === "line") {
         setLinePoints((prev) => {
           if (prev.length === 0) return [frame];
@@ -321,7 +510,7 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
         setPolyPoints((prev) => [...prev, frame]);
       }
     },
-    [mode, toFrameCoords],
+    [mode, toFrameCoords, findNearestPoint],
   );
 
   const handleDblClick = useCallback(
@@ -391,12 +580,12 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
   }, [mode, linePoints, polyPoints, apiBase, onApplied]);
 
   /* ── Keyboard shortcuts ─────────────────────────────── */
-  const applyRef   = useRef(apply);
-  const undoRef    = useRef(undoLast);
-  const resetRef   = useRef(resetPoints);
-  useEffect(() => { applyRef.current   = apply;       });
-  useEffect(() => { undoRef.current    = undoLast;    });
-  useEffect(() => { resetRef.current   = resetPoints; });
+  const applyRef  = useRef(apply);
+  const undoRef   = useRef(undoLast);
+  const resetRef  = useRef(resetPoints);
+  useEffect(() => { applyRef.current  = apply;       });
+  useEffect(() => { undoRef.current   = undoLast;    });
+  useEffect(() => { resetRef.current  = resetPoints; });
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -414,19 +603,19 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
   const points   = mode === "line" ? linePoints : polyPoints;
   const canApply = mode === "line" ? linePoints.length === 2 : polyPoints.length >= 3;
 
-  const accent     = mode === "line" ? "var(--cyan)"         : "var(--amber)";
-  const accentDim  = mode === "line" ? "var(--cyan-dim)"     : "var(--amber-dim)";
-  const accentBdr  = mode === "line" ? "var(--border-glow)"  : "var(--border-accent)";
+  const accent    = mode === "line" ? "var(--cyan)"        : "var(--amber)";
+  const accentDim = mode === "line" ? "var(--cyan-dim)"    : "var(--amber-dim)";
+  const accentBdr = mode === "line" ? "var(--border-glow)" : "var(--border-accent)";
 
   const instruction = (() => {
     if (mode === "line") {
       if (linePoints.length === 0) return "Clique no frame para definir o ponto inicial (A)";
       if (linePoints.length === 1) return "Clique para definir o ponto final (B)";
-      return "Linha pronta · pressione Aplicar ou reposicione clicando";
+      return "Linha pronta · arraste os pontos para reposicionar · pressione Aplicar";
     }
     if (polyPoints.length === 0) return "Clique para adicionar o primeiro vértice";
     if (polyPoints.length < 3)   return `Mais ${3 - polyPoints.length} vértice${3 - polyPoints.length !== 1 ? "s" : ""} para fechar`;
-    return "Duplo-clique para finalizar · ou pressione Aplicar";
+    return "Arraste vértices para ajustar · duplo-clique para remover o último · pressione Aplicar";
   })();
 
   /* ── Render ─────────────────────────────────────────── */
@@ -453,17 +642,16 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
         position: "fixed", inset: 0, zIndex: 999,
         background: "rgba(0,0,0,0.87)",
         display: "flex", alignItems: "center", justifyContent: "center",
-        padding: 16,
+        padding: 12,
         backdropFilter: "blur(6px)",
       }}>
-        {/* ── Modal ── */}
+        {/* ── Modal — maior ── */}
         <div style={{
           background: "var(--bg-surface)",
           border: "1px solid var(--border)",
           borderRadius: "var(--radius-xl)",
-          width: "100%",
-          maxWidth: 980,
-          maxHeight: "92vh",
+          width: "min(1320px, 96vw)",
+          maxHeight: "94vh",
           display: "flex",
           flexDirection: "column",
           overflow: "hidden",
@@ -511,7 +699,6 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
             </div>
 
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              {/* Live point counter */}
               {points.length > 0 && (
                 <div style={{
                   padding: "2px 10px",
@@ -622,7 +809,7 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
                     position: "absolute", inset: 0,
                     width: "100%", height: "100%",
                     objectFit: "contain",
-                    opacity: 0.78,
+                    opacity: 0.82,
                   }}
                 />
                 <canvas
@@ -631,6 +818,8 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
                   onDoubleClick={handleDblClick}
                   onMouseMove={handleMouseMove}
                   onMouseLeave={handleMouseLeave}
+                  onMouseDown={handleMouseDown}
+                  onMouseUp={handleMouseUp}
                   style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
                 />
 
@@ -646,6 +835,18 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
                     pointerEvents: "none", letterSpacing: "0.06em",
                   }}>
                     X {String(coords.x).padStart(4, "\u2007")} · Y {String(coords.y).padStart(4, "\u2007")}
+                  </div>
+                )}
+
+                {/* Drag hint */}
+                {points.length > 0 && (
+                  <div style={{
+                    position: "absolute", bottom: 10, right: 10,
+                    fontFamily: "var(--font-mono)", fontSize: 9,
+                    color: "rgba(255,255,255,0.30)",
+                    pointerEvents: "none", letterSpacing: "0.05em",
+                  }}>
+                    arraste pontos para reposicionar
                   </div>
                 )}
 
@@ -675,7 +876,7 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
 
             {/* ── Sidebar ── */}
             <div style={{
-              width: 224, flexShrink: 0,
+              width: 236, flexShrink: 0,
               display: "flex", flexDirection: "column",
               background: "var(--bg-elevated)",
               overflow: "hidden",

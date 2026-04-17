@@ -14,6 +14,7 @@ export function DisplayOverlayToggles({ apiBase }: Props) {
   const [heatmapOk, setHeatmapOk] = useState(false);
   const [sexOk, setSexOk] = useState(false);
   const [sexOn, setSexOn] = useState(true);
+  const [showRoi, setShowRoi] = useState(true);
   const [ready, setReady] = useState(false);
   const [pending, setPending] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -32,6 +33,7 @@ export function DisplayOverlayToggles({ apiBase }: Props) {
       const sxAvail = Boolean(j.sex_overlay_available);
       setSexOk(sxAvail);
       setSexOn(sxAvail ? Boolean(j.show_sex_overlay ?? true) : false);
+      setShowRoi(Boolean(j.show_roi ?? true));
       setReady(true);
     } catch {
       const base = apiBase.trim() || window.location.origin;
@@ -51,6 +53,7 @@ export function DisplayOverlayToggles({ apiBase }: Props) {
     show_heading?: boolean;
     show_heatmap?: boolean;
     show_sex_overlay?: boolean;
+    show_roi?: boolean;
   }) => {
     setPending(true);
     setErr(null);
@@ -68,6 +71,7 @@ export function DisplayOverlayToggles({ apiBase }: Props) {
       if (typeof j.show_heatmap === "boolean") setHeatmap(j.show_heatmap);
       if (typeof j.sex_overlay_available === "boolean") setSexOk(j.sex_overlay_available);
       if (typeof j.show_sex_overlay === "boolean") setSexOn(j.show_sex_overlay);
+      if (typeof j.show_roi === "boolean") setShowRoi(j.show_roi);
     } catch {
       setErr("Não foi possível atualizar");
     } finally {
@@ -238,6 +242,33 @@ export function DisplayOverlayToggles({ apiBase }: Props) {
           }}
         >
           {!heatmapOk ? "Indisponível" : heatmap ? "Ligado" : "Desligado"}
+        </button>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>Marcações ROI</span>
+        <button
+          type="button"
+          disabled={pending || !!err}
+          aria-pressed={showRoi}
+          onClick={() => {
+            if (pending || err) return;
+            void push({ show_roi: !showRoi });
+          }}
+          style={{
+            padding: "6px 16px",
+            minWidth: 96,
+            borderRadius: 999,
+            border: `1px solid ${showRoi ? "rgba(0, 212, 255, 0.45)" : "var(--border)"}`,
+            background: showRoi ? "rgba(0, 212, 255, 0.10)" : "var(--bg-hover)",
+            color: showRoi ? "var(--cyan)" : "var(--text-muted)",
+            fontWeight: 700,
+            fontSize: 12,
+            letterSpacing: "0.04em",
+            cursor: pending || !!err ? "not-allowed" : "pointer",
+            transition: "background 0.15s, border-color 0.15s, color 0.15s",
+          }}
+        >
+          {showRoi ? "Visível" : "Oculto"}
         </button>
       </div>
       {err && (

@@ -332,6 +332,7 @@ class SharedState:
         # overlays no MJPEG (caixas/labels mantêm-se; só rastro e seta PCA)
         self.show_trail_overlay: bool = True
         self.show_heading_overlay: bool = True
+        self.show_roi_overlay: bool = True
         # Mapa de calor: só tem efeito se o processo foi iniciado sem --no-heatmap (WEB_HEATMAP=1)
         self.heatmap_available: bool = False
         self.show_heatmap_overlay: bool = True
@@ -705,6 +706,8 @@ _C_SEX_MALE    = (235,  99,  37)
 _C_SEX_MALE_DIM = (155, 65, 25)
 _C_SEX_UNKNOWN = (148, 163, 184)
 _C_SEX_UNKNOWN_DIM = (100, 110, 125)
+_C_VEHICLE     = (  0, 140, 255)   # #FF8C00 laranja — veículos e não-pessoas
+_C_VEHICLE_DIM = (  0,  90, 170)   # stale veículo
 
 
 def _draw_corner_box(
@@ -1439,6 +1442,7 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 with shared.lock:
                     show_trail_ui = shared.show_trail_overlay
                     show_heading_ui = shared.show_heading_overlay
+                    show_roi_ui = shared.show_roi_overlay
 
                 for track_id, (xa, ya, xb, yb), stale in draw_items:
                     if track_id in raw_foot_by_id:
@@ -1449,6 +1453,7 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
 
                     det_cls = cls_by_tid.get(track_id, person_class_id)
                     cls_tag = short_class_tag(names, det_cls) if isinstance(names, dict) else "?"
+                    is_person = (det_cls == person_class_id)
 
                     # ── Estado de movimento (usa frame anterior) ──────────
                     is_loiter = track_id in _loitering_ids
@@ -1491,6 +1496,11 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                         base_mv_dim = _C_CYAN_DIM
                         side_tag = ""
                         label = f"{cls_tag}{track_id}" + ("~" if stale else "")
+
+                    # Veículos: cor laranja distinta — substitui cores de lado de linha
+                    if not is_person:
+                        base_mv = _C_VEHICLE
+                        base_mv_dim = _C_VEHICLE_DIM
 
                     # ── Cor final: loitering > parado > sexo (classify) > lado linha ───────────
                     if is_loiter:
@@ -1649,14 +1659,14 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                     shared.avg_move_speed_px_per_sec = avg_move_px_sec
                     shared.infer_fps_ema = ema_infer_fps
                 if count_mode == "polygon" and len(poly_pts) >= 3:
-                    arr = np.array(poly_pts, dtype=np.int32).reshape(-1, 1, 2)
-                    # Glow do polígono: sombra escura + amber
-                    shadow_poly = tuple(int(c * 0.25) for c in _C_AMBER)
-                    cv2.polylines(frame, [arr], isClosed=True, color=shadow_poly, thickness=5, lineType=cv2.LINE_AA)  # type: ignore[arg-type]
-                    cv2.polylines(frame, [arr], isClosed=True, color=_C_AMBER, thickness=2, lineType=cv2.LINE_AA)
-                    for pt in poly_pts:
-                        cv2.circle(frame, pt, 5, _C_BLACK, -1, lineType=cv2.LINE_AA)
-                        cv2.circle(frame, pt, 3, _C_AMBER,  -1, lineType=cv2.LINE_AA)
+                    if show_roi_ui:
+                        arr = np.array(poly_pts, dtype=np.int32).reshape(-1, 1, 2)
+                        shadow_poly = tuple(int(c * 0.25) for c in _C_AMBER)
+                        cv2.polylines(frame, [arr], isClosed=True, color=shadow_poly, thickness=5, lineType=cv2.LINE_AA)  # type: ignore[arg-type]
+                        cv2.polylines(frame, [arr], isClosed=True, color=_C_AMBER, thickness=2, lineType=cv2.LINE_AA)
+                        for pt in poly_pts:
+                            cv2.circle(frame, pt, 5, _C_BLACK, -1, lineType=cv2.LINE_AA)
+                            cv2.circle(frame, pt, 3, _C_AMBER,  -1, lineType=cv2.LINE_AA)
                     _overlay_text(frame, text, live_text, fw, fh)
                 elif count_mode == "polygon":
                     cv2.putText(
@@ -1671,7 +1681,8 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                     )
                     _overlay_text(frame, text, live_text, fw, fh)
                 else:
-                    _draw_count_line(frame, x1, y1, x2, y2)
+                    if show_roi_ui:
+                        _draw_count_line(frame, x1, y1, x2, y2)
                     _overlay_text(frame, text, live_text, fw, fh)
 
                 ok, encoded = cv2.imencode(".jpg", frame)
@@ -2208,6 +2219,7 @@ def create_app(shared: SharedState) -> Flask:
             show_hm = shared.show_heatmap_overlay
             sex_ok = shared.sex_overlay_available
             show_sex = shared.show_sex_overlay
+            show_roi = shared.show_roi_overlay
             apid = str(shared.active_preset_id or "").strip()
         return jsonify(
             {
@@ -2222,6 +2234,7 @@ def create_app(shared: SharedState) -> Flask:
                 "show_heatmap": show_hm if hm_ok else False,
                 "sex_overlay_available": sex_ok,
                 "show_sex_overlay": show_sex if sex_ok else False,
+                "show_roi": show_roi,
                 "active_preset_id": apid,
             }
         )
@@ -2238,12 +2251,15 @@ def create_app(shared: SharedState) -> Flask:
                 shared.show_heatmap_overlay = bool(data["show_heatmap"])
             if "show_sex_overlay" in data and shared.sex_overlay_available:
                 shared.show_sex_overlay = bool(data["show_sex_overlay"])
+            if "show_roi" in data:
+                shared.show_roi_overlay = bool(data["show_roi"])
             st = shared.show_trail_overlay
             sh = shared.show_heading_overlay
             shm = shared.show_heatmap_overlay
             hm_ok = shared.heatmap_available
             ssx = shared.show_sex_overlay
             sex_ok = shared.sex_overlay_available
+            sroi = shared.show_roi_overlay
         ev_overlay: dict = {"show_trail": st, "show_heading": sh}
         if hm_ok:
             ev_overlay["show_heatmap"] = shm
@@ -2259,6 +2275,7 @@ def create_app(shared: SharedState) -> Flask:
                 "show_heatmap": shm if hm_ok else False,
                 "sex_overlay_available": sex_ok,
                 "show_sex_overlay": ssx if sex_ok else False,
+                "show_roi": sroi,
             }
         )
 
