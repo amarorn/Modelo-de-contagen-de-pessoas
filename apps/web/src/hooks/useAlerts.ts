@@ -10,6 +10,8 @@ export type AlertEvent = {
   detail: Record<string, unknown>;
 };
 
+export type ToastEntry = AlertEvent & { hitCount: number };
+
 export type AlertsResponse = {
   alerts: AlertEvent[];
   latest_seq: number;
@@ -21,21 +23,21 @@ export type AlertsResponse = {
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 const POLL_INTERVAL_MS = 900;
 const MAX_TOASTS = 6;
-const TOAST_TTL_MS = 6000;
+const TOAST_TTL_MS = 7000;
 
 export function useAlerts() {
   const [enabled, setEnabled] = useState<{ cap: boolean; carColors: string[] }>({
     cap: false,
     carColors: [],
   });
-  const [recent, setRecent] = useState<AlertEvent[]>([]);
+  const [recent, setRecent] = useState<ToastEntry[]>([]);
   const [soundOn, setSoundOn] = useState<boolean>(() => {
     try { return localStorage.getItem("alerts.soundOn") !== "0"; } catch { return true; }
   });
   const [counts, setCounts] = useState<{ cap: number; car: number }>(() => {
     try {
       const saved = localStorage.getItem("alerts.counts");
-      return saved ? JSON.parse(saved) : { cap: 0, car: 0 };
+      return saved ? (JSON.parse(saved) as { cap: number; car: number }) : { cap: 0, car: 0 };
     } catch { return { cap: 0, car: 0 }; }
   });
   const sinceRef = useRef<number>(0);
@@ -65,11 +67,18 @@ export function useAlerts() {
         if (firstFetch || data.alerts.length === 0) return;
 
         if (soundOn) {
+          // Only beep once per batch regardless of how many duplicates arrived
+          const seen = new Set<string>();
           for (const ev of data.alerts) {
-            const kind = ev.kind === "cap" ? "cap" : ev.kind === "car_color" ? "car" : "default";
-            beep({ kind });
+            const key = `${ev.kind}:${ev.track_id}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              const kind = ev.kind === "cap" ? "cap" : ev.kind === "car_color" ? "car" : "default";
+              beep({ kind });
+            }
           }
         }
+
         setCounts(prev => {
           const next = { ...prev };
           for (const ev of data.alerts) {
@@ -79,17 +88,30 @@ export function useAlerts() {
           try { localStorage.setItem("alerts.counts", JSON.stringify(next)); } catch { /* ignore */ }
           return next;
         });
+
+        // Deduplicate by (kind, track_id): update in-place, bump hitCount
         setRecent(prev => {
-          const merged = [...data.alerts, ...prev].slice(0, MAX_TOASTS);
-          return merged;
+          let next = [...prev];
+          for (const ev of data.alerts) {
+            const idx = next.findIndex(
+              e => e.kind === ev.kind && e.track_id === ev.track_id
+            );
+            if (idx >= 0) {
+              next[idx] = { ...ev, hitCount: next[idx].hitCount + 1 };
+            } else {
+              next = [{ ...ev, hitCount: 1 }, ...next];
+            }
+          }
+          return next.slice(0, MAX_TOASTS);
         });
-        // expira toasts antigos
+
+        // Expire stale toasts (ts won't update for tracks that stopped firing)
         setTimeout(() => {
           const cutoff = Date.now() / 1000 - TOAST_TTL_MS / 1000;
           setRecent(prev => prev.filter(ev => ev.ts >= cutoff));
         }, TOAST_TTL_MS + 100);
       } catch {
-        /* offline, tenta de novo */
+        /* offline, retry next tick */
       }
     };
 

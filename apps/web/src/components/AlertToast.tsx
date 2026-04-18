@@ -3,6 +3,8 @@ import { primeAudio } from "../audio/beep";
 import { useAlerts } from "../hooks/useAlerts";
 import { AlertSettingsPanel } from "./AlertSettingsPanel";
 
+// ── Icons ────────────────────────────────────────────────────────────────────
+
 function IconCap({ size = 14 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
@@ -23,7 +25,7 @@ function IconCar({ size = 14 }: { size?: number }) {
     </svg>
   );
 }
-function IconSpeakerOn({ size = 14 }: { size?: number }) {
+function IconSpeakerOn({ size = 13 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
          stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -32,7 +34,7 @@ function IconSpeakerOn({ size = 14 }: { size?: number }) {
     </svg>
   );
 }
-function IconSpeakerOff({ size = 14 }: { size?: number }) {
+function IconSpeakerOff({ size = 13 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
          stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -52,6 +54,8 @@ function IconGear({ size = 12 }: { size?: number }) {
   );
 }
 
+// ── Component ────────────────────────────────────────────────────────────────
+
 export function AlertsLayer() {
   const { recent, enabled, soundOn, setSoundOn, dismiss, counts, resetCounts } = useAlerts();
   const [panelOpen, setPanelOpen] = useState(false);
@@ -67,172 +71,252 @@ export function AlertsLayer() {
   }, []);
 
   const anyEnabled = enabled.cap || enabled.carColors.length > 0;
+  const hasAlerts = anyEnabled || recent.length > 0 || counts.cap > 0 || counts.car > 0;
 
   return (
     <>
-      {/* Toast stack (bottom-right) */}
-      <div
-        style={{
-          position: "fixed",
-          bottom: 14,
-          right: 14,
-          display: "flex",
-          flexDirection: "column",
-          gap: 8,
-          zIndex: 9999,
-          maxWidth: 360,
-        }}
-      >
+      <style>{`
+        @keyframes _at_slideIn {
+          from { opacity: 0; transform: translateX(12px); }
+          to   { opacity: 1; transform: translateX(0); }
+        }
+        @keyframes _at_flash {
+          0%,100% { opacity: 1; }
+          50%      { opacity: 0.55; }
+        }
+        ._at_toast { animation: _at_slideIn 0.2s ease-out; }
+        ._at_toast:hover { opacity: 0.82; }
+        ._at_count-badge {
+          display: inline-flex; align-items: center; gap: 4px;
+          padding: 0 7px; height: 20px;
+          border-radius: 3px;
+          font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+          cursor: pointer; transition: opacity 0.15s;
+          border: 1px solid transparent;
+          white-space: nowrap;
+        }
+        ._at_count-badge:hover { opacity: 0.72; }
+        ._at_hud-seg {
+          display: flex; align-items: center;
+          padding: 0 10px; height: 100%;
+          cursor: pointer;
+          transition: background 0.14s, color 0.14s;
+        }
+        ._at_hud-seg:hover { background: rgba(255,255,255,0.04); }
+        ._at_divider {
+          width: 1px; background: var(--border);
+          align-self: stretch; flex-shrink: 0;
+        }
+      `}</style>
+
+      {/* ── Toast stack (bottom-right) ─────────────────────────── */}
+      <div style={{
+        position: "fixed", bottom: 14, right: 14,
+        display: "flex", flexDirection: "column", gap: 6,
+        zIndex: 9999, maxWidth: 340,
+      }}>
         {recent.map(ev => {
           const isCap = ev.kind === "cap";
-          const color = isCap ? "#00D4FF" : "#F59E0B";
-          const bg = isCap ? "rgba(0,212,255,0.10)" : "rgba(245,158,11,0.10)";
+          const accent = isCap ? "#00D4FF" : "#F59E0B";
+          const bg = isCap ? "rgba(0,212,255,0.07)" : "rgba(245,158,11,0.07)";
           return (
             <div
-              key={ev.seq}
+              key={`${ev.kind}:${ev.track_id}`}
+              className="_at_toast"
               onClick={() => dismiss(ev.seq)}
               style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                padding: "10px 14px",
+                display: "flex", alignItems: "center", gap: 10,
+                padding: "8px 12px",
                 background: "var(--bg-elevated)",
-                border: `1px solid ${color}`,
-                borderLeft: `3px solid ${color}`,
+                border: `1px solid ${accent}44`,
+                borderLeft: `3px solid ${accent}`,
                 borderRadius: "var(--radius-md)",
                 color: "var(--text-primary)",
                 fontFamily: "var(--font-mono)",
-                fontSize: 13,
+                fontSize: 12,
                 cursor: "pointer",
-                boxShadow: "0 10px 20px rgba(0,0,0,0.35)",
-                animation: "slideInFromRight 0.25s ease-out",
+                boxShadow: `0 8px 24px rgba(0,0,0,0.4), 0 0 0 1px ${accent}11`,
               }}
             >
-              <span style={{ color, display: "flex", alignItems: "center", padding: 4, background: bg, borderRadius: 6 }}>
-                {isCap ? <IconCap size={16} /> : <IconCar size={16} />}
+              {/* Icon */}
+              <span style={{
+                color: accent, display: "flex", alignItems: "center",
+                padding: 4, background: bg, borderRadius: 4, flexShrink: 0,
+              }}>
+                {isCap ? <IconCap size={14} /> : <IconCar size={14} />}
               </span>
-              <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
-                <span style={{ color: "var(--text-secondary)", fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
-                  {isCap ? "Alerta: Bone" : "Alerta: Carro"}
+
+              {/* Label */}
+              <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1 }}>
+                <span style={{
+                  color: "var(--text-muted)", fontSize: 9,
+                  letterSpacing: "0.1em", textTransform: "uppercase",
+                  marginBottom: 1,
+                }}>
+                  {isCap ? "Alerta · Bone" : "Alerta · Carro"}
                 </span>
-                <span style={{ fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                <span style={{
+                  fontWeight: 600, whiteSpace: "nowrap",
+                  overflow: "hidden", textOverflow: "ellipsis",
+                  color: "var(--text-primary)",
+                }}>
                   {ev.label}
                 </span>
               </div>
+
+              {/* Hit count badge — shown only when same track fired multiple times */}
+              {ev.hitCount > 1 && (
+                <span style={{
+                  flexShrink: 0,
+                  padding: "1px 6px",
+                  background: bg,
+                  border: `1px solid ${accent}55`,
+                  borderRadius: 3,
+                  color: accent,
+                  fontSize: 10,
+                  fontWeight: 700,
+                  letterSpacing: "0.04em",
+                }}>
+                  ×{ev.hitCount}
+                </span>
+              )}
             </div>
           );
         })}
       </div>
 
-      {/* Config panel */}
+      {/* ── Config panel ──────────────────────────────────────────── */}
       {panelOpen && <AlertSettingsPanel onClose={() => setPanelOpen(false)} />}
 
-      {/* Bottom-left controls */}
-      <div style={{
-        position: "fixed",
-        bottom: 14,
-        left: 14,
-        zIndex: 9998,
-        display: "flex",
-        alignItems: "center",
-        gap: 4,
-      }}>
-        {/* Sound toggle */}
-        <button
-          onClick={() => setSoundOn(!soundOn)}
-          title={soundOn ? "Alertas sonoros ativos (clique para silenciar)" : "Alertas sonoros silenciados"}
-          style={{
-            padding: "8px 12px",
-            background: "var(--bg-elevated)",
-            border: `1px solid ${soundOn ? "var(--amber)" : "var(--border)"}`,
-            borderRadius: "var(--radius-sm)",
-            color: soundOn ? "var(--amber)" : "var(--text-muted)",
-            fontFamily: "var(--font-display)",
-            fontSize: 11,
-            fontWeight: 700,
-            letterSpacing: "0.08em",
-            textTransform: "uppercase",
-            cursor: "pointer",
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-          }}
-        >
-          {soundOn ? <IconSpeakerOn size={14} /> : <IconSpeakerOff size={14} />}
-          Alertas {soundOn ? "ON" : "OFF"}
-          {anyEnabled && (
-            <span style={{ marginLeft: 4, fontSize: 10, color: "var(--text-muted)" }}>
-              {[enabled.cap && "bone", ...enabled.carColors].filter(Boolean).join(",")}
+      {/* ── Bottom-left HUD bar ───────────────────────────────────── */}
+      {hasAlerts && (
+        <div style={{
+          position: "fixed", bottom: 14, left: 14,
+          zIndex: 9998,
+          display: "flex", alignItems: "stretch",
+          height: 30,
+          background: "var(--bg-elevated)",
+          border: `1px solid ${anyEnabled ? "var(--border-accent)" : "var(--border)"}`,
+          borderRadius: "var(--radius-sm)",
+          overflow: "hidden",
+          boxShadow: anyEnabled
+            ? "0 0 16px rgba(240,165,0,0.08), 0 4px 12px rgba(0,0,0,0.4)"
+            : "0 4px 12px rgba(0,0,0,0.3)",
+        }}>
+
+          {/* Sound toggle segment */}
+          <button
+            className="_at_hud-seg"
+            onClick={() => setSoundOn(!soundOn)}
+            title={soundOn ? "Silenciar alertas" : "Ativar sons de alerta"}
+            style={{
+              background: "none", border: "none",
+              color: soundOn ? "var(--amber)" : "var(--text-muted)",
+              fontFamily: "var(--font-display)",
+              fontSize: 11, fontWeight: 700, letterSpacing: "0.1em",
+              gap: 6, cursor: "pointer",
+            }}
+          >
+            {soundOn ? <IconSpeakerOn size={13} /> : <IconSpeakerOff size={13} />}
+            <span style={{ textTransform: "uppercase" }}>
+              Alertas {soundOn ? "on" : "off"}
             </span>
+          </button>
+
+          {/* Counts section — only when there's something to show */}
+          {(counts.cap > 0 || counts.car > 0 || anyEnabled) && (
+            <>
+              <div className="_at_divider" />
+              <div style={{
+                display: "flex", alignItems: "center",
+                gap: 5, padding: "0 10px",
+              }}>
+
+                {/* Cap badge */}
+                {(enabled.cap || counts.cap > 0) && (
+                  <span
+                    className="_at_count-badge"
+                    onClick={resetCounts}
+                    title="Alertas de boné (clique para zerar)"
+                    style={{
+                      background: counts.cap > 0 ? "rgba(0,212,255,0.08)" : "transparent",
+                      borderColor: counts.cap > 0 ? "rgba(0,212,255,0.25)" : "var(--border)",
+                      color: counts.cap > 0 ? "#00D4FF" : "var(--text-muted)",
+                    }}
+                  >
+                    <IconCap size={10} />
+                    <span>{counts.cap}</span>
+                  </span>
+                )}
+
+                {/* Car badge — one per active color */}
+                {(enabled.carColors.length > 0 || counts.car > 0) && (
+                  <span
+                    className="_at_count-badge"
+                    onClick={resetCounts}
+                    title="Alertas de carro (clique para zerar)"
+                    style={{
+                      background: counts.car > 0 ? "rgba(245,158,11,0.08)" : "transparent",
+                      borderColor: counts.car > 0 ? "rgba(245,158,11,0.25)" : "var(--border)",
+                      color: counts.car > 0 ? "#F59E0B" : "var(--text-muted)",
+                    }}
+                  >
+                    <IconCar size={10} />
+                    <span>{counts.car}</span>
+                    {enabled.carColors.length > 0 && (
+                      <span style={{
+                        fontSize: 9, opacity: 0.7,
+                        letterSpacing: "0.04em",
+                      }}>
+                        {enabled.carColors.join("·")}
+                      </span>
+                    )}
+                  </span>
+                )}
+
+              </div>
+            </>
           )}
-        </button>
 
-        {/* Alert counters */}
-        {(counts.cap > 0 || counts.car > 0) && (
-          <div style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 3,
-            padding: "8px 10px",
-            background: "var(--bg-elevated)",
-            border: "1px solid var(--border)",
-            borderRadius: "var(--radius-sm)",
-            fontFamily: "var(--font-mono)",
-            fontSize: 11,
-            color: "var(--text-muted)",
-          }}>
-            {counts.cap > 0 && (
-              <span style={{ display: "flex", alignItems: "center", gap: 3, color: "#00D4FF" }}>
-                <IconCap size={11} />
-                {counts.cap}
-              </span>
-            )}
-            {counts.cap > 0 && counts.car > 0 && (
-              <span style={{ color: "var(--border)", margin: "0 1px" }}>·</span>
-            )}
-            {counts.car > 0 && (
-              <span style={{ display: "flex", alignItems: "center", gap: 3, color: "#F59E0B" }}>
-                <IconCar size={11} />
-                {counts.car}
-              </span>
-            )}
-            <button
-              onClick={resetCounts}
-              title="Zerar contadores"
-              style={{
-                marginLeft: 4,
-                background: "none",
-                border: "none",
-                color: "var(--text-muted)",
-                cursor: "pointer",
-                fontSize: 9,
-                padding: "0 2px",
-                lineHeight: 1,
-                opacity: 0.6,
-              }}
-            >✕</button>
-          </div>
-        )}
+          {/* Gear button */}
+          <div className="_at_divider" />
+          <button
+            className="_at_hud-seg"
+            onClick={() => setPanelOpen(p => !p)}
+            title="Configurar alertas"
+            style={{
+              background: panelOpen ? "rgba(240,165,0,0.10)" : "none",
+              border: "none",
+              color: panelOpen ? "var(--amber)" : "var(--text-muted)",
+              cursor: "pointer",
+              padding: "0 10px",
+            }}
+          >
+            <IconGear size={13} />
+          </button>
+        </div>
+      )}
 
-        {/* Config gear button */}
+      {/* Gear-only button when no alerts active and no counts — still allows config */}
+      {!hasAlerts && (
         <button
           onClick={() => setPanelOpen(p => !p)}
           title="Configurar alertas"
           style={{
-            padding: "8px 9px",
-            background: panelOpen ? "rgba(240,165,0,0.12)" : "var(--bg-elevated)",
-            border: `1px solid ${panelOpen ? "var(--amber)" : "var(--border)"}`,
+            position: "fixed", bottom: 14, left: 14, zIndex: 9998,
+            display: "flex", alignItems: "center",
+            padding: "7px 9px", height: 30,
+            background: panelOpen ? "rgba(240,165,0,0.10)" : "var(--bg-elevated)",
+            border: `1px solid ${panelOpen ? "var(--border-accent)" : "var(--border)"}`,
             borderRadius: "var(--radius-sm)",
             color: panelOpen ? "var(--amber)" : "var(--text-muted)",
             cursor: "pointer",
-            display: "flex",
-            alignItems: "center",
-            transition: "border-color 0.15s, background 0.15s, color 0.15s",
+            transition: "all 0.14s",
           }}
         >
           <IconGear size={13} />
         </button>
-      </div>
+      )}
     </>
   );
 }
