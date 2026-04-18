@@ -32,6 +32,12 @@ export function useAlerts() {
   const [soundOn, setSoundOn] = useState<boolean>(() => {
     try { return localStorage.getItem("alerts.soundOn") !== "0"; } catch { return true; }
   });
+  const [counts, setCounts] = useState<{ cap: number; car: number }>(() => {
+    try {
+      const saved = localStorage.getItem("alerts.counts");
+      return saved ? JSON.parse(saved) : { cap: 0, car: 0 };
+    } catch { return { cap: 0, car: 0 }; }
+  });
   const sinceRef = useRef<number>(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const bootRef = useRef<boolean>(true);
@@ -64,6 +70,15 @@ export function useAlerts() {
             beep({ kind });
           }
         }
+        setCounts(prev => {
+          const next = { ...prev };
+          for (const ev of data.alerts) {
+            if (ev.kind === "cap") next.cap++;
+            else if (ev.kind === "car_color") next.car++;
+          }
+          try { localStorage.setItem("alerts.counts", JSON.stringify(next)); } catch { /* ignore */ }
+          return next;
+        });
         setRecent(prev => {
           const merged = [...data.alerts, ...prev].slice(0, MAX_TOASTS);
           return merged;
@@ -88,5 +103,11 @@ export function useAlerts() {
 
   const dismiss = (seq: number) => setRecent(prev => prev.filter(a => a.seq !== seq));
 
-  return { recent, enabled, soundOn, setSoundOn, dismiss };
+  const resetCounts = () => {
+    const zero = { cap: 0, car: 0 };
+    setCounts(zero);
+    try { localStorage.setItem("alerts.counts", JSON.stringify(zero)); } catch { /* ignore */ }
+  };
+
+  return { recent, enabled, soundOn, setSoundOn, dismiss, counts, resetCounts };
 }

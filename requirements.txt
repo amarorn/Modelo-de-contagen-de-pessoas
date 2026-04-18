@@ -9,3 +9,5 @@ sqlalchemy>=2.0.0
 kafka-python>=2.0.2
 # Necessario se DATABASE_URL usar postgresql+psycopg2:// (servidor Postgres a parte).
 psycopg2-binary>=2.9.9
+# Detector CLIP de boné/chapéu (ALERT_CAP_ENABLED=1 no .env). Download ~350MB na 1ª execução.
+open-clip-torch>=2.24.0

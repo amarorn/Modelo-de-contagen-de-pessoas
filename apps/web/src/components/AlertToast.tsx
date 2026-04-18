@@ -53,7 +53,7 @@ function IconGear({ size = 12 }: { size?: number }) {
 }
 
 export function AlertsLayer() {
-  const { recent, enabled, soundOn, setSoundOn, dismiss } = useAlerts();
+  const { recent, enabled, soundOn, setSoundOn, dismiss, counts, resetCounts } = useAlerts();
   const [panelOpen, setPanelOpen] = useState(false);
 
   useEffect(() => {
@@ -166,6 +166,53 @@ export function AlertsLayer() {
             </span>
           )}
         </button>
+
+        {/* Alert counters */}
+        {(counts.cap > 0 || counts.car > 0) && (
+          <div style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 3,
+            padding: "8px 10px",
+            background: "var(--bg-elevated)",
+            border: "1px solid var(--border)",
+            borderRadius: "var(--radius-sm)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            color: "var(--text-muted)",
+          }}>
+            {counts.cap > 0 && (
+              <span style={{ display: "flex", alignItems: "center", gap: 3, color: "#00D4FF" }}>
+                <IconCap size={11} />
+                {counts.cap}
+              </span>
+            )}
+            {counts.cap > 0 && counts.car > 0 && (
+              <span style={{ color: "var(--border)", margin: "0 1px" }}>·</span>
+            )}
+            {counts.car > 0 && (
+              <span style={{ display: "flex", alignItems: "center", gap: 3, color: "#F59E0B" }}>
+                <IconCar size={11} />
+                {counts.car}
+              </span>
+            )}
+            <button
+              onClick={resetCounts}
+              title="Zerar contadores"
+              style={{
+                marginLeft: 4,
+                background: "none",
+                border: "none",
+                color: "var(--text-muted)",
+                cursor: "pointer",
+                fontSize: 9,
+                padding: "0 2px",
+                lineHeight: 1,
+                opacity: 0.6,
+              }}
+            >✕</button>
+          </div>
+        )}
 
         {/* Config gear button */}
         <button
