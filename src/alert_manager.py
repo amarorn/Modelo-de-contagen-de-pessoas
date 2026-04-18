@@ -52,6 +52,19 @@ class AlertManager:
     def cooldown_seconds(self) -> float:
         return self._cooldown
 
+    @cooldown_seconds.setter
+    def cooldown_seconds(self, value: float) -> None:
+        with self._lock:
+            self._cooldown = max(0.0, float(value))
+
+    @property
+    def server_beep(self) -> bool:
+        return self._server_beep
+
+    @server_beep.setter
+    def server_beep(self, value: bool) -> None:
+        self._server_beep = bool(value)
+
     def maybe_fire(
         self,
         kind: str,

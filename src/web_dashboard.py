@@ -314,6 +314,11 @@ class SharedState:
         self.alert_manager: AlertManager | None = None
         self.alert_cap_enabled: bool = False
         self.alert_car_colors: list[str] = []
+        self.alert_cap_detector: "OptionalCapDetector | None" = None
+        self.alert_car_color_clf: "CarColorClassifier | None" = None
+        self.alert_cap_threshold: float = 0.55
+        self.alert_car_min_score: float = 0.08
+        self.alert_server_beep: bool = False
         self.started_at = datetime.now()
         self.last_frame_jpeg: bytes | None = None
         self.last_error: str | None = None
@@ -1238,6 +1243,11 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
             shared.alert_manager = alert_mgr
             shared.alert_cap_enabled = bool(cap_detector is not None)
             shared.alert_car_colors = list(car_colors)
+            shared.alert_cap_detector = cap_detector
+            shared.alert_car_color_clf = car_color_clf
+            shared.alert_cap_threshold = args.cap_alert_threshold
+            shared.alert_car_min_score = args.car_color_min_score
+            shared.alert_server_beep = args.alert_server_beep
         if cap_detector is not None:
             print(
                 f"[web] Alerta de bone/chapeu ATIVO (CLIP, threshold={args.cap_alert_threshold}, "
@@ -1586,13 +1596,13 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                                 label=f"Pessoa com bone (#{track_id}, {cap_res.prob*100:.0f}%)",
                                 detail={"prob": cap_res.prob},
                             )
-                    elif (not is_person) and car_color_clf is not None and car_color_clf.enabled:
-                        col_res = car_color_clf.classify(
+                    elif (not is_person) and shared.alert_car_color_clf is not None and shared.alert_car_color_clf.enabled:
+                        col_res = shared.alert_car_color_clf.classify(
                             frame,
                             (float(xa), float(ya), float(xb), float(yb)),
                             track_id,
                         )
-                        if car_color_clf.matches_target(col_res) and col_res is not None:
+                        if shared.alert_car_color_clf.matches_target(col_res) and col_res is not None:
                             alert_mgr.maybe_fire(
                                 kind="car_color",
                                 track_id=int(track_id),
@@ -2685,8 +2695,67 @@ def create_app(shared: SharedState) -> Flask:
             "alerts": events,
             "latest_seq": mgr.latest_seq(),
             "cap_enabled": shared.alert_cap_enabled,
+            "cap_available": shared.alert_cap_detector is not None,
+            "cap_threshold": shared.alert_cap_threshold,
             "car_colors": list(shared.alert_car_colors),
+            "car_min_score": shared.alert_car_min_score,
             "cooldown_seconds": mgr.cooldown_seconds,
+            "server_beep": mgr.server_beep,
+        })
+
+    @app.post("/api/alerts/config")
+    def alerts_config() -> Response:
+        mgr = shared.alert_manager
+        if mgr is None:
+            return jsonify({"error": "AlertManager não inicializado"}), 400
+        body = request.get_json(force=True) or {}
+
+        if "cooldown_seconds" in body:
+            mgr.cooldown_seconds = float(body["cooldown_seconds"])
+        if "server_beep" in body:
+            mgr.server_beep = bool(body["server_beep"])
+            with shared.lock:
+                shared.alert_server_beep = bool(body["server_beep"])
+        if "cap_enabled" in body:
+            active = bool(body["cap_enabled"])
+            with shared.lock:
+                shared.alert_cap_enabled = active
+            if shared.alert_cap_detector is not None:
+                shared.alert_cap_detector.set_active(active)
+        if "cap_threshold" in body and shared.alert_cap_detector is not None:
+            th = float(body["cap_threshold"])
+            shared.alert_cap_detector.set_threshold(th)
+            with shared.lock:
+                shared.alert_cap_threshold = th
+        if "car_colors" in body:
+            new_colors = parse_target_colors(",".join(body["car_colors"]))
+            min_score = float(body.get("car_min_score", shared.alert_car_min_score))
+            with shared.lock:
+                if shared.alert_car_color_clf is not None:
+                    shared.alert_car_color_clf.update_targets(new_colors, min_score)
+                else:
+                    shared.alert_car_color_clf = CarColorClassifier(
+                        targets=new_colors,
+                        min_target_score=min_score,
+                    )
+                shared.alert_car_colors = new_colors
+                shared.alert_car_min_score = min_score
+        elif "car_min_score" in body and shared.alert_car_color_clf is not None:
+            min_score = float(body["car_min_score"])
+            shared.alert_car_color_clf.update_targets(
+                shared.alert_car_color_clf.targets, min_score
+            )
+            with shared.lock:
+                shared.alert_car_min_score = min_score
+
+        return jsonify({
+            "cap_enabled": shared.alert_cap_enabled,
+            "cap_available": shared.alert_cap_detector is not None,
+            "cap_threshold": shared.alert_cap_threshold,
+            "car_colors": list(shared.alert_car_colors),
+            "car_min_score": shared.alert_car_min_score,
+            "cooldown_seconds": mgr.cooldown_seconds,
+            "server_beep": mgr.server_beep,
         })
 
     @app.post("/api/export")

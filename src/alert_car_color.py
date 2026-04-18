@@ -127,6 +127,18 @@ class CarColorClassifier:
             self._cache[int(track_id)] = result
         return result
 
+    def update_targets(
+        self,
+        targets: "Iterable[str]",
+        min_target_score: float | None = None,
+    ) -> None:
+        new = {normalize_color_name(c) for c in targets if c}
+        self._targets = new
+        self._enabled = len(new) > 0
+        if min_target_score is not None:
+            self._min_target_score = float(np.clip(min_target_score, 0.0, 1.0))
+        self._cache.clear()
+
     def matches_target(self, result: ColorResult | None) -> bool:
         if result is None:
             return False

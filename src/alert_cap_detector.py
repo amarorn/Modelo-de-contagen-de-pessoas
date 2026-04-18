@@ -67,12 +67,23 @@ class OptionalCapDetector:
         self._lock = threading.Lock()
         self._cache: dict[int, CapResult] = {}
         self._enabled: bool = True
+        self._active: bool = True
         self._load_error: str | None = None
         self._num_positive = 0
 
     @property
     def enabled(self) -> bool:
-        return self._enabled
+        return self._enabled and self._active
+
+    def set_active(self, active: bool) -> None:
+        self._active = bool(active)
+        if not active:
+            self._cache.clear()
+
+    def set_threshold(self, threshold: float) -> None:
+        with self._lock:
+            self._threshold = float(np.clip(threshold, 0.0, 1.0))
+            self._cache.clear()
 
     @property
     def load_error(self) -> str | None:
