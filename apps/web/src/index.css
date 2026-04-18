@@ -179,6 +179,12 @@ body {
 /* ── Spinner ────────────────────────────────────────────────── */
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ── Toast de alerta ───────────────────────────────────────── */
+@keyframes slideInFromRight {
+  from { transform: translateX(120%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
 /* ── Section label ──────────────────────────────────────────── */
 .section-label {
   font-family: var(--font-display);

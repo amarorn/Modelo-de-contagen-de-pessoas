@@ -129,7 +129,9 @@ export function Header({ status, apiBase, onOpenSettings, onBackToLive }: Props)
             letterSpacing: "0.03em",
           }}
         >
-          {apiBase ? apiBase.replace(/^https?:\/\//, "") : "localhost:8080"}
+          {apiBase
+            ? apiBase.replace(/^https?:\/\//, "")
+            : import.meta.env.VITE_FLASK_DISPLAY_HOST}
         </div>
 
         {/* Connection badge */}

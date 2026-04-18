@@ -39,7 +39,7 @@ export function DisplayOverlayToggles({ apiBase }: Props) {
       const base = apiBase.trim() || window.location.origin;
       setErr(
         `Sem ligação a ${base}/api/config. Em desenvolvimento: na pasta apps/web execute pnpm dev (proxy /api → Flask). ` +
-          `Se abrir o build estático, defina VITE_API_BASE=http://127.0.0.1:PORT ao construir (PORT = WEB_PORT do .env, ex. 8080).`,
+          `Se abrir o build estático, defina VITE_API_BASE=http://127.0.0.1:PORT ao construir (PORT = WEB_PORT do .env, ex. 8081).`,
       );
     }
   }, [apiBase]);

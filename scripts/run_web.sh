@@ -112,6 +112,12 @@ YOLO_SEX_MODEL="${YOLO_SEX_MODEL:-}"
 YOLO_SEX_ABSTAIN="${YOLO_SEX_ABSTAIN:-0.65}"
 YOLO_AGE_MODEL="${YOLO_AGE_MODEL:-}"
 YOLO_AGE_ABSTAIN="${YOLO_AGE_ABSTAIN:-0.55}"
+ALERT_CAP_ENABLED="${ALERT_CAP_ENABLED:-0}"
+ALERT_CAP_THRESHOLD="${ALERT_CAP_THRESHOLD:-0.55}"
+ALERT_CAR_COLOR="${ALERT_CAR_COLOR:-}"
+ALERT_CAR_COLOR_MIN_SCORE="${ALERT_CAR_COLOR_MIN_SCORE:-0.08}"
+ALERT_COOLDOWN="${ALERT_COOLDOWN:-3.0}"
+ALERT_SERVER_BEEP="${ALERT_SERVER_BEEP:-0}"
 
 WEB_HOST="${WEB_HOST:-0.0.0.0}"
 WEB_PORT="${WEB_PORT:-8080}"
@@ -198,6 +204,16 @@ if [ -n "${YOLO_SEX_MODEL}" ]; then
 fi
 if [ -n "${YOLO_AGE_MODEL}" ]; then
   WEB_ARGS+=(--age-model "${YOLO_AGE_MODEL}" --age-abstain "${YOLO_AGE_ABSTAIN}")
+fi
+WEB_ARGS+=(--alert-cooldown "${ALERT_COOLDOWN}")
+if [ "${ALERT_CAP_ENABLED}" = "1" ]; then
+  WEB_ARGS+=(--cap-alert --cap-alert-threshold "${ALERT_CAP_THRESHOLD}")
+fi
+if [ -n "${ALERT_CAR_COLOR}" ]; then
+  WEB_ARGS+=(--car-color-alert "${ALERT_CAR_COLOR}" --car-color-min-score "${ALERT_CAR_COLOR_MIN_SCORE}")
+fi
+if [ "${ALERT_SERVER_BEEP}" = "1" ]; then
+  WEB_ARGS+=(--alert-server-beep)
 fi
 if [ "${YOLO_WEB_HEADING}" = "0" ]; then
   WEB_ARGS+=(--no-heading-arrow)

@@ -16,6 +16,7 @@ import { RoiEditor } from "./components/RoiEditor";
 import { SourceEditor } from "./components/SourceEditor";
 import { DisplayOverlayToggles } from "./components/DisplayOverlayToggles";
 import { SettingsDashboard } from "./components/SettingsDashboard";
+import { AlertsLayer } from "./components/AlertToast";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
@@ -282,6 +283,8 @@ export default function App() {
           onApplied={() => setRoiOpen(false)}
         />
       )}
+
+      <AlertsLayer />
 
       {/* ── Footer ──────────────────────────────────────────────── */}
       <footer

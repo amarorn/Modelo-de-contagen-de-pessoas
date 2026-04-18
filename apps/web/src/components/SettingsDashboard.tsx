@@ -144,7 +144,7 @@ export function SettingsDashboard({ apiBase, onBack }: Props) {
       r = await fetch(url);
     } catch {
       throw new Error(
-        "Sem ligação ao backend. Inicie o Flask (bash scripts/run_web.sh, porta 8080). " +
+        "Sem ligação ao backend. Inicie o Flask (bash scripts/run_web.sh; porta em WEB_PORT, omissão 8081). " +
           "Com pnpm dev, deixe VITE_API_BASE vazio para o proxy do Vite encaminhar /api."
       );
     }

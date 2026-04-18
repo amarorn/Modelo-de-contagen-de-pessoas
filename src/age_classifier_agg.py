@@ -7,6 +7,7 @@ Abaixo do limiar de confianca conta-se como unknown (abstencao).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -138,4 +139,46 @@ def _bucket_from_age_class_name(name: str) -> AgeBucket:
         return "young"
     if any(k in n for k in ("adult", "middle", "adulto")):
         return "adult"
+    numeric = _bucket_from_numeric_age(n)
+    if numeric is not None:
+        return numeric
     return "unknown"
+
+
+def _bucket_from_numeric_age(n: str) -> AgeBucket | None:
+    """Mapeia nomes de classe numericos (ex.: '13-15', '71+', '7 dan kichik', '<7')."""
+    # Uzbeque 'N dan kichik' / 'less than N' / '<N' => menor que N (crianca)
+    m = re.search(r"(\d+)\s*dan\s*kichik", n)
+    if m:
+        return _bucket_from_mid(max(0, int(m.group(1)) - 1))
+    m = re.search(r"(?:less\s*than|under|<)\s*(\d+)", n)
+    if m:
+        return _bucket_from_mid(max(0, int(m.group(1)) - 1))
+    # Faixa aberta superior: '71+', '60 and over', '65 ou mais'
+    m = re.search(r"(\d+)\s*(?:\+|and\s*over|or\s*older|or\s*more|ou\s*mais|e\s*mais)", n)
+    if m:
+        return _bucket_from_mid(int(m.group(1)) + 5)
+    # Intervalo 'N-M' / 'N to M' / 'N a M'
+    m = re.search(r"(\d+)\s*(?:-|to|a|\u2013|\u2014)\s*(\d+)", n)
+    if m:
+        lo, hi = int(m.group(1)), int(m.group(2))
+        if hi < lo:
+            lo, hi = hi, lo
+        return _bucket_from_mid((lo + hi) // 2)
+    # Um unico numero no nome, interpretado como idade
+    m = re.fullmatch(r"\s*(\d+)\s*", n)
+    if m:
+        return _bucket_from_mid(int(m.group(1)))
+    return None
+
+
+def _bucket_from_mid(age: int) -> AgeBucket:
+    if age < 13:
+        return "child"
+    if age < 18:
+        return "adolescent"
+    if age < 30:
+        return "young"
+    if age < 60:
+        return "adult"
+    return "elderly"

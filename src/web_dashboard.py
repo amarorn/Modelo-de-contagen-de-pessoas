@@ -46,6 +46,9 @@ from device_utils import resolve_device
 from stream_source_resolve import apply_opencv_ffmpeg_capture_env, resolve_stream_source
 from yolo_class_utils import resolve_yolo_classes_and_person_id, short_class_tag
 from age_classifier_agg import AgeAggregateStats, OptionalAgeClassifier
+from alert_car_color import CarColorClassifier, parse_target_colors
+from alert_cap_detector import OptionalCapDetector
+from alert_manager import AlertManager
 from sex_classifier_agg import OptionalSexClassifier, PerTrackSexSmoother, SexAggregateStats
 from env_settings import (
     EDITABLE_ENV_KEYS,
@@ -308,6 +311,9 @@ class SharedState:
         self.hourly_exits: list[int] = [0] * 24
         self.sex_classifier_enabled: bool = False
         self.age_classifier_enabled: bool = False
+        self.alert_manager: AlertManager | None = None
+        self.alert_cap_enabled: bool = False
+        self.alert_car_colors: list[str] = []
         self.started_at = datetime.now()
         self.last_frame_jpeg: bytes | None = None
         self.last_error: str | None = None
@@ -685,6 +691,39 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=10.0,
         help="Segundos continuos parada para marcar permanencia prolongada.",
+    )
+    p.add_argument(
+        "--alert-cooldown",
+        type=float,
+        default=3.0,
+        help="Segundos minimos entre alertas do mesmo tipo para o mesmo track_id.",
+    )
+    p.add_argument(
+        "--alert-server-beep",
+        action="store_true",
+        help="Tocar bell do terminal (\\a) no processo do servidor a cada alerta.",
+    )
+    p.add_argument(
+        "--cap-alert",
+        action="store_true",
+        help="Disparar alerta quando detectar pessoa com bone/chapeu via CLIP (zero-shot).",
+    )
+    p.add_argument(
+        "--cap-alert-threshold",
+        type=float,
+        default=0.55,
+        help="Probabilidade minima (CLIP) para confirmar 'pessoa com bone'.",
+    )
+    p.add_argument(
+        "--car-color-alert",
+        default="",
+        help="Lista separada por virgula das cores-alvo (vermelho,azul,...); vazio desativa.",
+    )
+    p.add_argument(
+        "--car-color-min-score",
+        type=float,
+        default=0.08,
+        help="Fracao minima de pixels com a cor-alvo no crop central para confirmar.",
     )
     return p.parse_args()
 
@@ -1182,6 +1221,34 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
             else:
                 print("[web] AVISO: --age-model nao ativo (ficheiro inexistente ou nao e YOLO classify)")
 
+        alert_mgr = AlertManager(
+            cooldown_seconds=args.alert_cooldown,
+            server_beep=args.alert_server_beep,
+        )
+        cap_detector = OptionalCapDetector(
+            device=resolved_device,
+            threshold=args.cap_alert_threshold,
+        ) if args.cap_alert else None
+        car_colors = parse_target_colors(args.car_color_alert)
+        car_color_clf = CarColorClassifier(
+            targets=car_colors,
+            min_target_score=args.car_color_min_score,
+        ) if car_colors else None
+        with shared.lock:
+            shared.alert_manager = alert_mgr
+            shared.alert_cap_enabled = bool(cap_detector is not None)
+            shared.alert_car_colors = list(car_colors)
+        if cap_detector is not None:
+            print(
+                f"[web] Alerta de bone/chapeu ATIVO (CLIP, threshold={args.cap_alert_threshold}, "
+                f"cooldown={args.alert_cooldown}s). Instale se faltar: pip install open-clip-torch"
+            )
+        if car_color_clf is not None and car_color_clf.enabled:
+            print(
+                f"[web] Alerta de cor de carro ATIVO: {sorted(car_color_clf.targets)} "
+                f"(min_score={args.car_color_min_score}, cooldown={args.alert_cooldown}s)"
+            )
+
         last_side_by_id: dict[int, float] = {}
         prev_inside_by_id: dict[int, bool] = {}
         prev_config_sig: str | None = None
@@ -1506,6 +1573,33 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                             else raw_sx
                         )
 
+                    if is_person and cap_detector is not None and cap_detector.enabled:
+                        cap_res = cap_detector.classify(
+                            frame,
+                            (float(xa), float(ya), float(xb), float(yb)),
+                            track_id,
+                        )
+                        if cap_res is not None and cap_res.has_cap:
+                            alert_mgr.maybe_fire(
+                                kind="cap",
+                                track_id=int(track_id),
+                                label=f"Pessoa com bone (#{track_id}, {cap_res.prob*100:.0f}%)",
+                                detail={"prob": cap_res.prob},
+                            )
+                    elif (not is_person) and car_color_clf is not None and car_color_clf.enabled:
+                        col_res = car_color_clf.classify(
+                            frame,
+                            (float(xa), float(ya), float(xb), float(yb)),
+                            track_id,
+                        )
+                        if car_color_clf.matches_target(col_res) and col_res is not None:
+                            alert_mgr.maybe_fire(
+                                kind="car_color",
+                                track_id=int(track_id),
+                                label=f"Carro {col_res.name} (#{track_id})",
+                                detail={"color": col_res.name, "score": col_res.score},
+                            )
+
                     # ── Cor base pelo lado da linha ───────────────────────
                     side_v = last_side_by_id.get(track_id) if count_mode == "line" else None
                     if count_mode == "line" and side_v is not None:
@@ -1636,6 +1730,11 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
 
                 if sex_smoother is not None:
                     sex_smoother.forget_stale(active_ids)
+                if cap_detector is not None:
+                    cap_detector.forget_stale_tracks(active_ids)
+                if car_color_clf is not None:
+                    car_color_clf.forget_stale_tracks(active_ids)
+                alert_mgr.forget_stale_tracks(active_ids)
 
                 moving_now = 0
                 stationary_now = 0
@@ -2565,6 +2664,30 @@ def create_app(shared: SharedState) -> Flask:
     @app.get("/api/stats")
     def stats() -> Response:
         return jsonify(build_stats_payload(shared))
+
+    @app.get("/api/alerts")
+    def alerts() -> Response:
+        try:
+            since = int(request.args.get("since", "0"))
+        except (TypeError, ValueError):
+            since = 0
+        mgr = shared.alert_manager
+        if mgr is None:
+            return jsonify({
+                "alerts": [],
+                "latest_seq": 0,
+                "cap_enabled": False,
+                "car_colors": [],
+                "cooldown_seconds": 0.0,
+            })
+        events = [ev.to_dict() for ev in mgr.since(since)]
+        return jsonify({
+            "alerts": events,
+            "latest_seq": mgr.latest_seq(),
+            "cap_enabled": shared.alert_cap_enabled,
+            "car_colors": list(shared.alert_car_colors),
+            "cooldown_seconds": mgr.cooldown_seconds,
+        })
 
     @app.post("/api/export")
     def export_csv() -> Response:
