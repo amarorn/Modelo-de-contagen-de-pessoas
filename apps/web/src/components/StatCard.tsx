@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
+import { Tooltip, InfoIcon } from "./Tooltip";
 
 interface Props {
   label: string;
@@ -12,6 +13,8 @@ interface Props {
   subtitle?: string;
   /** "card" = analytics grid card (default), "counter" = ops sidebar counter */
   variant?: "card" | "counter";
+  /** Tooltip text shown on ⓘ hover next to the label */
+  tooltip?: string;
 }
 
 export function StatCard({
@@ -24,6 +27,7 @@ export function StatCard({
   decimals = 0,
   subtitle,
   variant = "card",
+  tooltip,
 }: Props) {
   const prevRef = useRef(value);
   const numRef  = useRef<HTMLSpanElement>(null);
@@ -100,6 +104,13 @@ export function StatCard({
           >
             {label}
           </span>
+          {tooltip && (
+            <Tooltip text={tooltip} align="left">
+              <span style={{ color: "var(--text-muted)", opacity: 0.55, display: "flex", alignItems: "center" }}>
+                <InfoIcon size={11} />
+              </span>
+            </Tooltip>
+          )}
         </div>
 
         {/* Value */}

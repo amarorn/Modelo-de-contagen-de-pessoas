@@ -152,6 +152,37 @@ body {
 .badge-red   { background: var(--red-dim);   color: var(--red); border: 1px solid rgba(224,78,78,0.18); }
 .badge-amber { background: var(--amber-dim); color: var(--amber); }
 .badge-cyan  { background: var(--cyan-dim);  color: var(--cyan); }
+.badge-warn  { background: rgba(240,165,0,0.08); color: var(--amber); border: 1px solid rgba(240,165,0,0.20); }
+
+/* ── Tooltip ────────────────────────────────────────────────── */
+.tooltip-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  cursor: help;
+}
+.tooltip-box {
+  position: absolute;
+  bottom: calc(100% + 7px);
+  background: #1a2130;
+  border: 1px solid var(--border-accent);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 11px;
+  font-family: var(--font-sans);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-secondary);
+  white-space: normal;
+  line-height: 1.55;
+  z-index: 999;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+.tooltip-wrap:hover .tooltip-box { opacity: 1; }
 
 /* ── Pulse dot ──────────────────────────────────────────────── */
 .pulse-dot {

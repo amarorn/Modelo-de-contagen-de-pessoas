@@ -22,7 +22,10 @@ export function DisplayOverlayToggles({ apiBase }: Props) {
   const load = useCallback(async () => {
     setErr(null);
     try {
-      const r = await fetch(`${apiBase}/api/config`);
+      const ac = new AbortController();
+      const t = window.setTimeout(() => ac.abort(), 15000);
+      const r = await fetch(`${apiBase}/api/config`, { signal: ac.signal });
+      window.clearTimeout(t);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const j = await r.json();
       setTrail(Boolean(j.show_trail ?? true));
@@ -35,12 +38,18 @@ export function DisplayOverlayToggles({ apiBase }: Props) {
       setSexOn(sxAvail ? Boolean(j.show_sex_overlay ?? true) : false);
       setShowRoi(Boolean(j.show_roi ?? true));
       setReady(true);
-    } catch {
+    } catch (e) {
       const base = apiBase.trim() || window.location.origin;
-      setErr(
-        `Sem ligação a ${base}/api/config. Em desenvolvimento: na pasta apps/web execute pnpm dev (proxy /api → Flask). ` +
-          `Se abrir o build estático, defina VITE_API_BASE=http://127.0.0.1:PORT ao construir (PORT = WEB_PORT do .env, ex. 8081).`,
-      );
+      if (e instanceof Error && e.name === "AbortError") {
+        setErr(
+          `Timeout (15s) ao ligar a ${base}/api/config. Confirme que scripts/run_web.sh esta a correr na mesma porta do proxy (WEB_PORT / VITE_DEV_API_TARGET).`,
+        );
+      } else {
+        setErr(
+          `Sem ligação a ${base}/api/config. Em desenvolvimento: na pasta apps/web execute pnpm dev (proxy /api → Flask). ` +
+            `Se abrir o build estático, defina VITE_API_BASE=http://127.0.0.1:PORT ao construir (PORT = WEB_PORT do .env, ex. 8081).`,
+        );
+      }
     }
   }, [apiBase]);
 

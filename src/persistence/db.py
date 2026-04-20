@@ -9,6 +9,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from persistence.envutil import strip_env_comment
 from persistence.models import Base
+import persistence.heatmap_models  # noqa: F401 — registra HeatmapSlot e GridVersion no Base.metadata
+import persistence.dwell_models  # noqa: F401 — DwellSlot, ZoneStatsSlot
+import persistence.zone_models  # noqa: F401 — Zone, ZoneTemplate
 
 
 def database_url() -> str:

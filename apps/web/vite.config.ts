@@ -44,6 +44,8 @@ export default defineConfig(({ mode }) => {
   return {
     define: {
       "import.meta.env.VITE_FLASK_DISPLAY_HOST": JSON.stringify(displayHost),
+      /** Origem HTTP do Flask (ex. http://127.0.0.1:8081) — para /video_feed em dev sem passar pelo proxy. */
+      "import.meta.env.VITE_DEV_FLASK_ORIGIN": JSON.stringify(target),
     },
     plugins: [react()],
     server: {
@@ -61,9 +63,13 @@ export default defineConfig(({ mode }) => {
           target,
           changeOrigin: true,
         },
+        // MJPEG multipart atraves do proxy do Vite pode nunca entregar o 1o chunk / onLoad no <img>.
+        // O LiveFeed em dev usa VITE_DEV_FLASK_ORIGIN (injectado abaixo) para ir directo ao Flask.
         "/video_feed": {
           target,
           changeOrigin: true,
+          timeout: 0,
+          proxyTimeout: 0,
         },
       },
     },

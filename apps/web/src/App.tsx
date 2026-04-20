@@ -17,6 +17,8 @@ import { SourceEditor } from "./components/SourceEditor";
 import { DisplayOverlayToggles } from "./components/DisplayOverlayToggles";
 import { SettingsDashboard } from "./components/SettingsDashboard";
 import { AlertsLayer } from "./components/AlertToast";
+import { HeatmapCard } from "./components/HeatmapCard";
+import { ZonesPage } from "./pages/Zones";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
@@ -25,7 +27,7 @@ export default function App() {
   const config = useConfig();
   const [roiOpen, setRoiOpen]       = useState(false);
   const [sourceOpen, setSourceOpen] = useState(false);
-  const [view, setView]             = useState<"live" | "settings">("live");
+  const [view, setView]             = useState<"live" | "settings" | "zones">("live");
 
   return (
     <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
@@ -33,10 +35,12 @@ export default function App() {
         status={status}
         apiBase={API_BASE}
         onOpenSettings={view === "live" ? () => setView("settings") : undefined}
-        onBackToLive={view === "settings" ? () => setView("live") : undefined}
+        onBackToLive={view === "settings" || view === "zones" ? () => setView("live") : undefined}
       />
 
-      {view === "settings" ? (
+      {view === "zones" ? (
+        <ZonesPage apiBase={API_BASE} onBack={() => setView("live")} />
+      ) : view === "settings" ? (
         <SettingsDashboard apiBase={API_BASE} onBack={() => setView("live")} />
       ) : (
         <main
@@ -79,6 +83,11 @@ export default function App() {
                     icon={<IconVideo size={13} />}
                     label="Fonte de Vídeo"
                     onClick={() => setSourceOpen(true)}
+                  />
+                  <ActionButton
+                    icon={<IconTarget size={13} />}
+                    label="Zonas e hotspots"
+                    onClick={() => setView("zones")}
                   />
                 </div>
                 <div style={{ flex: "1 1 240px", minWidth: 0 }}>
@@ -132,7 +141,7 @@ export default function App() {
                 icon={<IconArrowUp size={14} />}
                 color="var(--green)"
                 colorDim="var(--green-dim)"
-                subtitle="total acumulado"
+                subtitle="sessão atual"
               />
               <StatCard
                 variant="counter"
@@ -141,16 +150,17 @@ export default function App() {
                 icon={<IconArrowDown size={14} />}
                 color="var(--red)"
                 colorDim="var(--red-dim)"
-                subtitle="total acumulado"
+                subtitle="sessão atual"
               />
               <StatCard
                 variant="counter"
-                label="Ocupação"
+                label="Presentes agora"
                 value={stats.occupancy_now}
                 icon={<IconUsers size={14} />}
                 color="var(--cyan)"
                 colorDim="var(--cyan-dim)"
-                subtitle="pessoas em cena"
+                subtitle="snapshot · ~2s"
+                tooltip="Contagem de IDs ativos no tracking no momento atual. Pode subcontar em casos de oclusão prolongada ou perda de ID. Para uma estimativa mais estável, use o Resumo de Fluxo (entradas − saídas)."
               />
               <StatCard
                 variant="counter"
@@ -241,6 +251,11 @@ export default function App() {
           {/* ── Demographics ────────────────────────────────────── */}
           <div style={{ marginTop: 0 }}>
             <DemographicsChart stats={stats} />
+          </div>
+
+          {/* ── Heatmap analítico ───────────────────────────────── */}
+          <div style={{ marginTop: 0 }}>
+            <HeatmapCard apiBase={API_BASE} />
           </div>
 
           {/* ── Error banner ──────────────────────────────────── */}

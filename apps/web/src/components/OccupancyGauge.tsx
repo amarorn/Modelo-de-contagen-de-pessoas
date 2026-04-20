@@ -58,7 +58,7 @@ export function OccupancyGauge({
       },
     },
     stroke: { lineCap: "round" },
-    labels: ["Em Cena"],
+    labels: ["agora"],
   };
 
   const fmt = (s: number) =>
@@ -68,7 +68,7 @@ export function OccupancyGauge({
 
   return (
     <div className="card" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <p className="section-label">Ocupação em Tempo Real</p>
+      <p className="section-label">Presentes agora</p>
       <ReactApexChart options={options} series={[Math.round(pct)]} type="radialBar" height={220} />
       <hr className="divider" />
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>

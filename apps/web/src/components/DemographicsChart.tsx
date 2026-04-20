@@ -2,8 +2,11 @@ import ReactApexChart from "react-apexcharts";
 import type { ApexOptions } from "apexcharts";
 import type { Stats } from "../types/api";
 import { IconLock, IconBarChart } from "./Icons";
+import { Tooltip, WarnIcon } from "./Tooltip";
 
 interface Props { stats: Stats }
+
+const ESTIMATE_TOOLTIP = "Inferência probabilística por modelo de visão computacional. Acurácia reduzida em casos de oclusão, ângulo desfavorável, baixa iluminação ou distância. Não use para decisões operacionais críticas.";
 
 function DonutCard({
   title, labels, series, colors, enabled,
@@ -54,7 +57,17 @@ function DonutCard({
 
   return (
     <div className="card" style={{ flex: 1, minWidth: 0 }}>
-      <p className="section-label" style={{ marginBottom: 4 }}>{title}</p>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+        <p className="section-label" style={{ marginBottom: 0 }}>{title}</p>
+        {enabled && total > 0 && (
+          <Tooltip text={ESTIMATE_TOOLTIP} align="right" width={240}>
+            <span className="badge badge-warn" style={{ gap: 4, cursor: "help" }}>
+              <WarnIcon size={10} color="var(--amber)" />
+              estimativa
+            </span>
+          </Tooltip>
+        )}
+      </div>
       {!enabled ? (
         <Placeholder icon={<IconLock size={32} />} text="Classificador não ativo" />
       ) : total === 0 ? (
@@ -70,7 +83,7 @@ export function DemographicsChart({ stats }: Props) {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
       <DonutCard
-        title="Distribuição por Sexo"
+        title="Perfil estimado — Gênero"
         labels={["Feminino", "Masculino", "Indefinido"]}
         series={[stats.sex_female_agg, stats.sex_male_agg, stats.sex_unknown_agg]}
         colors={["#EC4899", "#6366F1", "#6B7280"]}
@@ -81,7 +94,7 @@ export function DemographicsChart({ stats }: Props) {
         }
       />
       <DonutCard
-        title="Faixa Etária"
+        title="Perfil estimado — Idade"
         labels={["Criança", "Adolescente", "Jovem", "Adulto", "Idoso", "Indef."]}
         series={[stats.age_child_agg, stats.age_adolescent_agg, stats.age_young_agg,
                  stats.age_adult_agg, stats.age_elderly_agg, stats.age_unknown_agg]}

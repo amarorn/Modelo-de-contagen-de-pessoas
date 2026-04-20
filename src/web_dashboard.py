@@ -59,6 +59,14 @@ from env_settings import (
 )
 from persistence.emitter import emit_config_event, shutdown_emitter, start_stats_emitter_thread
 from persistence.db import get_session_factory
+from persistence.dwell_store import DwellStore
+from persistence.heatmap_store import HeatmapStore
+from dwell_accumulator import DwellGridLive, ZoneSlotTracker
+from dwell_slot_aggregator import DwellSlotAggregator
+from heatmap_aggregator import SlotAggregator
+from hotspot_scorer import HotspotScorer, rasterize_norm_polygon
+from zones.zone_assigner import ZoneAssigner
+from zones.zone_store import ZoneStore, ensure_builtin_templates
 
 import persistence.camera_calibration_store as cam_cal
 
@@ -356,6 +364,83 @@ class SharedState:
         # Sexo (classify): disponivel se --sex-model carregou; overlay ligavel na UI como o mapa de calor
         self.sex_overlay_available: bool = False
         self.show_sex_overlay: bool = True
+        # GridLive — payload serializado para /api/heatmap/live; atualizado a cada ~30 frames
+        self.heatmap_live_payload: dict = {
+            "grid_w": 32, "grid_h": 18, "max_val": 0.0, "total_events": 0, "cells": [],
+        }
+        self.dwell_live_payload: dict = {
+            "grid_w": 32, "grid_h": 18, "max_val": 0.0, "total_dwell_s": 0.0, "cells": [],
+        }
+        self.hotspots_live_payload: dict = {
+            "grid_w": 32, "grid_h": 18, "max_val": 0.0, "cells": [], "mode": "composite", "alpha": 0.6,
+        }
+        self.zones_reload_flag: bool = True
+
+
+class GridLive:
+    """Grade 32×18 de centroides acumulados por sessão; exportada via /api/heatmap/live."""
+
+    GRID_W: int = 32
+    GRID_H: int = 18
+    MIN_DISPLACEMENT: float = 0.015  # 1.5% da largura — move mínimo para emitir
+    MAX_INTERVAL_S: float = 5.0       # fallback para tracks parados
+
+    def __init__(self) -> None:
+        self._grid = np.zeros((self.GRID_H, self.GRID_W), dtype=np.float32)
+        self._frame_delta = np.zeros((self.GRID_H, self.GRID_W), dtype=np.float32)
+        self._last: dict[int, tuple[float, float, float]] = {}  # tid → (cx, cy, ts)
+
+    def update_track(self, track_id: int, cx_norm: float, cy_norm: float, ts: float) -> None:
+        """cx_norm, cy_norm em [0, 1] (coordenadas normalizadas pelo frame)."""
+        if not self._should_emit(track_id, cx_norm, cy_norm, ts):
+            return
+        gx = int(min(cx_norm * self.GRID_W, self.GRID_W - 1))
+        gy = int(min(cy_norm * self.GRID_H, self.GRID_H - 1))
+        self._grid[gy, gx] += 1.0
+        self._frame_delta[gy, gx] += 1.0
+
+    def take_frame_delta(self) -> np.ndarray:
+        d = self._frame_delta.copy()
+        self._frame_delta[:] = 0.0
+        return d
+
+    def _should_emit(self, track_id: int, cx: float, cy: float, ts: float) -> bool:
+        if track_id not in self._last:
+            self._last[track_id] = (cx, cy, ts)
+            return True
+        lx, ly, lt = self._last[track_id]
+        dist = ((cx - lx) ** 2 + (cy - ly) ** 2) ** 0.5
+        if dist >= self.MIN_DISPLACEMENT or (ts - lt) >= self.MAX_INTERVAL_S:
+            self._last[track_id] = (cx, cy, ts)
+            return True
+        return False
+
+    def evict_track(self, track_id: int) -> None:
+        self._last.pop(track_id, None)
+
+    def to_payload(self) -> dict:
+        max_val = float(self._grid.max())
+        total = int(self._grid.sum())
+        if max_val < 1e-6:
+            cells: list = []
+        else:
+            cells = (self._grid / max_val).tolist()
+        return {
+            "grid_w": self.GRID_W,
+            "grid_h": self.GRID_H,
+            "max_val": max_val,
+            "total_events": total,
+            "cells": cells,
+        }
+
+    def to_raw_array(self) -> np.ndarray:
+        """Retorna cópia do grid com contagens brutas (não normalizado)."""
+        return self._grid.copy()
+
+    def reset(self) -> None:
+        self._grid[:] = 0.0
+        self._frame_delta[:] = 0.0
+        self._last.clear()
 
 
 class HeatmapAccumulator:
@@ -1278,6 +1363,32 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 f"radius={args.heat_radius} alpha={args.heat_alpha}"
             )
 
+        grid_live = GridLive()
+        _grid_live_counter: int = 0
+        heatmap_store = HeatmapStore()
+        slot_aggregator = SlotAggregator(grid_h=GridLive.GRID_H, grid_w=GridLive.GRID_W)
+        with shared.lock:
+            _hm_site_id = cam_cal.site_id()
+            _hm_cam_id = shared.active_preset_id or "default"
+            _hm_sess_id = shared.session_id
+        _hm_grid_version = heatmap_store.get_or_create_grid_version(_hm_site_id, _hm_cam_id)
+
+        ensure_builtin_templates()
+        dwell_store = DwellStore()
+        dwell_slot_aggregator = DwellSlotAggregator(
+            grid_h=GridLive.GRID_H, grid_w=GridLive.GRID_W
+        )
+        dwell_grid = DwellGridLive()
+        zone_store_inf = ZoneStore()
+        zone_tracker = ZoneSlotTracker([])
+        zone_tracker_ids: tuple[int, ...] = ()
+        last_ts_by_id: dict[int, float] = {}
+        hotspot_scorer = HotspotScorer(
+            _hm_site_id, _hm_cam_id, _hm_grid_version, heatmap_store, dwell_store
+        )
+        _hotspot_payload_counter = 0
+        _last_hotspot_cam: str | None = None
+
         tracker_yaml = resolve_tracker_yaml(args.tracker)
         box_overlay = TrackBoxOverlay(args.track_ema, args.track_hold_frames)
         print(
@@ -1375,6 +1486,16 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
 
                 _frames_received += 1
                 fh, fw = frame.shape[:2]
+                with shared.lock:
+                    _hm_cam_id = shared.active_preset_id or "default"
+                if _hm_cam_id != _last_hotspot_cam:
+                    _last_hotspot_cam = _hm_cam_id
+                    _hm_grid_version = heatmap_store.get_or_create_grid_version(
+                        _hm_site_id, _hm_cam_id
+                    )
+                    hotspot_scorer.camera_id = _hm_cam_id
+                    hotspot_scorer.grid_version = _hm_grid_version
+                    hotspot_scorer._hist_cache = None
                 with shared.lock:
                     raw_line = shared.line_live
                     count_mode = shared.count_mode
@@ -1475,6 +1596,12 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                             args.min_person_height_px,
                         )
                     cls_by_tid = {int(tid): int(c) for tid, c in zip(ids_list, clss_raw)}
+                    dt_by_tid: dict[int, float] = {}
+                    for tid in ids_list:
+                        it = int(tid)
+                        prev = last_ts_by_id.get(it, frame_ts)
+                        dt_by_tid[it] = max(0.0, min(frame_ts - prev, 2.0))
+                        last_ts_by_id[it] = frame_ts
                     for track_id, (x_min, y_min, x_max, y_max) in zip(ids_list, xys_raw):
                         foot_x = (x_min + x_max) / 2.0
                         foot_y = float(y_max)
@@ -1484,6 +1611,13 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                         if inside_for_presence:
                             current_present_ids.add(track_id)
                             zone_entered_at_by_id.setdefault(track_id, frame_ts)
+                        grid_live.update_track(int(track_id), foot_x / fw, foot_y / fh, frame_ts)
+                        dwell_grid.update_track(
+                            int(track_id),
+                            foot_x / float(fw),
+                            foot_y / float(fh),
+                            dt_by_tid.get(int(track_id), 0.0),
+                        )
                         _is_veh = cls_by_tid.get(track_id, person_class_id) != person_class_id
                         if count_mode == "polygon" and len(poly_pts) >= 3:
                             inside = inside_for_presence
@@ -1522,6 +1656,36 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                                     _bump_hourly(shared, "exit")
                             last_side_by_id[track_id] = side
 
+                    if (
+                        ids_list is not None
+                        and xys_raw is not None
+                        and len(ids_list) == len(xys_raw)
+                    ):
+                        with shared.lock:
+                            _zr = shared.zones_reload_flag
+                        if _zr:
+                            with shared.lock:
+                                shared.zones_reload_flag = False
+                            _hm_grid_version = heatmap_store.get_or_create_grid_version(
+                                _hm_site_id, _hm_cam_id
+                            )
+                            hotspot_scorer.grid_version = _hm_grid_version
+                        zrec = zone_store_inf.load_zone_records(_hm_site_id, _hm_cam_id)
+                        cur_zids = tuple(z.id for z in zrec)
+                        if cur_zids != zone_tracker_ids:
+                            zone_tracker = ZoneSlotTracker(list(cur_zids))
+                            zone_tracker_ids = cur_zids
+                        assigner = ZoneAssigner(zrec, fw, fh)
+                        positions = [
+                            (
+                                int(tid),
+                                float((xa + xb) / 2.0),
+                                float(yb),
+                            )
+                            for tid, (xa, ya, xb, yb) in zip(ids_list, xys_raw)
+                        ]
+                        zone_tracker.step_frame(assigner, positions, dt_by_tid)
+
                 draw_items = box_overlay.step(ids_list, xys_raw)
                 active_ids = {t for t, _, _ in draw_items}
                 raw_foot_by_id: dict[int, tuple[int, int]] = {}
@@ -1534,6 +1698,7 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 for tid in list(last_side_by_id.keys()):
                     if tid not in active_ids:
                         del last_side_by_id[tid]
+                        grid_live.evict_track(tid)
                 for tid in list(prev_inside_by_id.keys()):
                     if tid not in active_ids:
                         del prev_inside_by_id[tid]
@@ -1546,6 +1711,10 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 for tid in list(stationary_since_by_id.keys()):
                     if tid not in current_present_ids:
                         del stationary_since_by_id[tid]
+                for tid in list(last_ts_by_id.keys()):
+                    if tid not in active_ids:
+                        last_ts_by_id.pop(tid, None)
+                        zone_tracker.forget_track(tid)
 
                 with shared.lock:
                     show_trail_ui = shared.show_trail_overlay
@@ -1798,6 +1967,65 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                     shared.avg_move_speed_px_per_frame = avg_move_px_frame
                     shared.avg_move_speed_px_per_sec = avg_move_px_sec
                     shared.infer_fps_ema = ema_infer_fps
+                    _hm_sess_id = shared.session_id
+                    _grid_live_counter += 1
+                    _hotspot_payload_counter += 1
+                    if _grid_live_counter >= 30:
+                        _grid_live_counter = 0
+                        shared.heatmap_live_payload = grid_live.to_payload()
+                        _hm_cam_id = shared.active_preset_id or "default"
+                        _hm_sess_id = shared.session_id
+                    if _hotspot_payload_counter >= 30:
+                        _hotspot_payload_counter = 0
+                        shared.dwell_live_payload = dwell_grid.to_payload()
+                        _zrec_h = zone_store_inf.load_zone_records(_hm_site_id, _hm_cam_id)
+                        _masks = [
+                            (z.id, rasterize_norm_polygon(z.polygon_norm))
+                            for z in _zrec_h
+                        ]
+                        _sg = hotspot_scorer.score_grid("composite")
+                        _zs = (
+                            hotspot_scorer.score_zones(_masks, "composite") if _masks else []
+                        )
+                        shared.hotspots_live_payload = {**_sg, "zones": _zs}
+                slot_aggregator.feed(grid_live.to_raw_array(), time.time())
+                for _slot_ts, _slot_grid in slot_aggregator.pop_pending():
+                    heatmap_store.write_slot(
+                        site_id=_hm_site_id,
+                        camera_id=_hm_cam_id,
+                        session_id=_hm_sess_id,
+                        slot_ts=_slot_ts,
+                        raw_grid=_slot_grid,
+                        grid_version=_hm_grid_version,
+                    )
+                _vd = grid_live.take_frame_delta()
+                _dd = dwell_grid.take_frame_delta()
+                hotspot_scorer.push_frame_deltas(frame_ts, _vd, _dd)
+                dwell_slot_aggregator.feed(_dd, time.time())
+                for _slot_ts, _dg in dwell_slot_aggregator.pop_pending():
+                    dwell_store.write_dwell_slot(
+                        site_id=_hm_site_id,
+                        camera_id=_hm_cam_id,
+                        session_id=_hm_sess_id,
+                        slot_ts=_slot_ts,
+                        raw_grid=_dg,
+                        grid_version=_hm_grid_version,
+                    )
+                    for row in zone_tracker.flush_stats():
+                        dwell_store.write_zone_stats_slot(
+                            site_id=_hm_site_id,
+                            camera_id=_hm_cam_id,
+                            session_id=_hm_sess_id,
+                            slot_ts=_slot_ts,
+                            grid_version=_hm_grid_version,
+                            zone_id=int(row["zone_id"]),
+                            visits=int(row["visits"]),
+                            unique_ids=int(row["unique_ids"]),
+                            total_dwell_s=float(row["total_dwell_s"]),
+                            avg_dwell_s=float(row["avg_dwell_s"]),
+                            p95_dwell_s=float(row["p95_dwell_s"]),
+                            peak_occupancy=int(row["peak_occupancy"]),
+                        )
                 if count_mode == "polygon" and len(poly_pts) >= 3:
                     if show_roi_ui:
                         arr = np.array(poly_pts, dtype=np.int32).reshape(-1, 1, 2)
@@ -2058,6 +2286,9 @@ def create_app(shared: SharedState) -> Flask:
     app = Flask(__name__)
     CORS(app, resources={r"/api/*": {"origins": "*"}, r"/video_feed": {"origins": "*"}})
     env_file = Path(__file__).resolve().parent.parent / ".env"
+    heatmap_store_api = HeatmapStore()
+    dwell_store_api = DwellStore()
+    zone_store_api = ZoneStore()
 
     @app.get("/api/settings")
     def get_settings() -> Response:
@@ -2675,6 +2906,221 @@ def create_app(shared: SharedState) -> Flask:
     def stats() -> Response:
         return jsonify(build_stats_payload(shared))
 
+    @app.get("/api/heatmap/live")
+    def heatmap_live() -> Response:
+        with shared.lock:
+            payload = shared.heatmap_live_payload
+        return jsonify(payload)
+
+    @app.get("/api/heatmap/historical")
+    def heatmap_historical() -> Response:
+        """Retorna heatmap agregado para um período.
+        ?period=session|1h|today  (padrão: session)
+        """
+        from datetime import datetime as _dt
+
+        period = request.args.get("period", "session")
+        now = time.time()
+
+        if period == "1h":
+            from_ts = now - 3600.0
+        elif period == "today":
+            today_midnight = _dt.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            from_ts = today_midnight.timestamp()
+        else:  # session
+            with shared.lock:
+                from_ts = shared.started_at.timestamp()
+
+        with shared.lock:
+            cam_id = shared.active_preset_id or "default"
+
+        payload = heatmap_store_api.query_historical(
+            site_id=cam_cal.site_id(),
+            camera_id=cam_id,
+            from_ts=from_ts,
+            to_ts=now,
+        )
+        payload["period"] = period
+        payload["from_ts"] = int(from_ts)
+        payload["to_ts"] = int(now)
+        return jsonify(payload)
+
+    @app.get("/api/heatmap/grid_version")
+    def heatmap_grid_version() -> Response:
+        with shared.lock:
+            cam_id = shared.active_preset_id or "default"
+        version = heatmap_store_api.get_or_create_grid_version(cam_cal.site_id(), cam_id)
+        return jsonify({"camera_id": cam_id, "grid_version": version})
+
+    @app.get("/api/dwell/live")
+    def dwell_live() -> Response:
+        with shared.lock:
+            payload = shared.dwell_live_payload
+        return jsonify(payload)
+
+    @app.get("/api/hotspots/live")
+    def hotspots_live() -> Response:
+        with shared.lock:
+            payload = shared.hotspots_live_payload
+        return jsonify(payload)
+
+    @app.get("/api/hotspots/historical")
+    def hotspots_historical() -> Response:
+        mode = request.args.get("window", "composite") or "composite"
+        if mode not in ("recent", "hist", "composite"):
+            mode = "composite"
+        try:
+            from_ts = float(request.args.get("from", "0"))
+        except (TypeError, ValueError):
+            from_ts = 0.0
+        try:
+            to_ts = float(request.args.get("to", str(time.time())))
+        except (TypeError, ValueError):
+            to_ts = time.time()
+        with shared.lock:
+            cam_id = shared.active_preset_id or "default"
+        gv = heatmap_store_api.get_or_create_grid_version(cam_cal.site_id(), cam_id)
+        hs = HotspotScorer(cam_cal.site_id(), cam_id, gv, heatmap_store_api, dwell_store_api)
+        return jsonify(hs.score_grid(mode))
+
+    @app.get("/api/zone-templates")
+    def zone_templates_list() -> Response:
+        return jsonify({"templates": zone_store_api.list_templates()})
+
+    @app.post("/api/zone-templates")
+    def zone_templates_create() -> Response:
+        body = request.get_json(silent=True) or {}
+        slug = str(body.get("slug", "")).strip()
+        name = str(body.get("name", "")).strip()
+        zones = body.get("zones")
+        if not slug or not name or not isinstance(zones, list):
+            return jsonify({"error": "slug, name e zones (lista) obrigatorios"}), 400
+        try:
+            tid = zone_store_api.create_custom_template(
+                slug=slug,
+                name=name,
+                description=str(body.get("description", "")),
+                zones=zones,
+                weights=body.get("weights") if isinstance(body.get("weights"), dict) else None,
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify({"ok": True, "id": tid})
+
+    @app.get("/api/zones")
+    def zones_list() -> Response:
+        cam = str(request.args.get("camera_id", "")).strip() or "default"
+        return jsonify({"zones": zone_store_api.list_zones(cam_cal.site_id(), cam)})
+
+    @app.post("/api/zones")
+    def zones_create() -> Response:
+        body = request.get_json(silent=True) or {}
+        cam = str(body.get("camera_id", "")).strip() or "default"
+        name = str(body.get("name", "")).strip()
+        raw_poly = body.get("polygon")
+        zt = str(body.get("zone_type", "generic")).strip() or "generic"
+        if not name or not isinstance(raw_poly, list):
+            return jsonify({"error": "name e polygon (lista) obrigatorios"}), 400
+        poly: list[tuple[float, float]] = []
+        for p in raw_poly:
+            if isinstance(p, dict) and "x" in p and "y" in p:
+                poly.append((float(p["x"]), float(p["y"])))
+            elif isinstance(p, (list, tuple)) and len(p) >= 2:
+                poly.append((float(p[0]), float(p[1])))
+        if len(poly) < 3:
+            return jsonify({"error": "poligono invalido"}), 400
+        tpl_id = body.get("template_id")
+        tpl_id_i = int(tpl_id) if tpl_id is not None else None
+        gv = heatmap_store_api.bump_grid_version(cam_cal.site_id(), cam, reason="zone_create")
+        try:
+            zid = zone_store_api.create_zone(
+                site_id=cam_cal.site_id(),
+                camera_id=cam,
+                name=name,
+                zone_type=zt,
+                polygon_norm=poly,
+                template_id=tpl_id_i,
+                grid_version=gv,
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        with shared.lock:
+            shared.zones_reload_flag = True
+        return jsonify({"ok": True, "id": zid, "grid_version": gv})
+
+    @app.post("/api/zones/from-template")
+    def zones_from_template() -> Response:
+        body = request.get_json(silent=True) or {}
+        slug = str(body.get("template_slug", "")).strip()
+        cam = str(body.get("camera_id", "")).strip() or "default"
+        if not slug:
+            return jsonify({"error": "template_slug obrigatorio"}), 400
+        try:
+            ids = zone_store_api.instantiate_from_template(
+                site_id=cam_cal.site_id(),
+                camera_id=cam,
+                template_slug=slug,
+                heatmap_store=heatmap_store_api,
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        with shared.lock:
+            shared.zones_reload_flag = True
+        gv = heatmap_store_api.get_or_create_grid_version(cam_cal.site_id(), cam)
+        return jsonify({"ok": True, "zone_ids": ids, "grid_version": gv})
+
+    @app.put("/api/zones/<int:zone_id>")
+    def zones_update(zone_id: int) -> Response:
+        body = request.get_json(silent=True) or {}
+        cam = str(body.get("camera_id", "")).strip() or "default"
+        gv = heatmap_store_api.bump_grid_version(cam_cal.site_id(), cam, reason="zone_update")
+        poly = None
+        if "polygon" in body:
+            raw_poly = body["polygon"]
+            if not isinstance(raw_poly, list):
+                return jsonify({"error": "polygon invalido"}), 400
+            poly = []
+            for p in raw_poly:
+                if isinstance(p, dict) and "x" in p and "y" in p:
+                    poly.append((float(p["x"]), float(p["y"])))
+                elif isinstance(p, (list, tuple)) and len(p) >= 2:
+                    poly.append((float(p[0]), float(p[1])))
+        ok = zone_store_api.update_zone(
+            zone_id,
+            name=str(body["name"]) if "name" in body else None,
+            zone_type=str(body["zone_type"]) if "zone_type" in body else None,
+            polygon_norm=poly,
+            grid_version=gv,
+        )
+        if not ok:
+            return jsonify({"error": "zona nao encontrada"}), 404
+        with shared.lock:
+            shared.zones_reload_flag = True
+        return jsonify({"ok": True, "grid_version": gv})
+
+    @app.delete("/api/zones/<int:zone_id>")
+    def zones_delete(zone_id: int) -> Response:
+        cam = str(request.args.get("camera_id", "")).strip() or "default"
+        heatmap_store_api.bump_grid_version(cam_cal.site_id(), cam, reason="zone_delete")
+        if not zone_store_api.delete_zone(zone_id):
+            return jsonify({"error": "zona nao encontrada"}), 404
+        with shared.lock:
+            shared.zones_reload_flag = True
+        return jsonify({"ok": True})
+
+    @app.get("/api/zones/<int:zone_id>/stats")
+    def zones_stats(zone_id: int) -> Response:
+        try:
+            from_ts = float(request.args.get("from", "0"))
+        except (TypeError, ValueError):
+            from_ts = 0.0
+        try:
+            to_ts = float(request.args.get("to", str(time.time())))
+        except (TypeError, ValueError):
+            to_ts = time.time()
+        rows = dwell_store_api.query_zone_stats(zone_id, from_ts, to_ts)
+        return jsonify({"zone_id": zone_id, "slots": rows})
+
     @app.get("/api/alerts")
     def alerts() -> Response:
         try:
@@ -2771,6 +3217,82 @@ def create_app(shared: SharedState) -> Flask:
             age = shared.age_agg if shared.age_classifier_enabled else None
             write_summary_csv(csv_path, shared.counter, shared.started_at, sex=sex, age=age)
         return jsonify({"csv_path": str(csv_path)})
+
+    @app.post("/api/export/zones")
+    def export_zones_csv() -> Response:
+        body = request.get_json(silent=True) or {}
+        cam = str(body.get("camera_id", "")).strip() or "default"
+        try:
+            from_ts = float(body.get("from", 0))
+        except (TypeError, ValueError):
+            from_ts = 0.0
+        to_ts = time.time()
+        zones = zone_store_api.list_zones(cam_cal.site_id(), cam)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        csv_path = Path("outputs") / f"zones_stats_{cam}_{ts}.csv"
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(
+                [
+                    "zone_id",
+                    "name",
+                    "slot_ts",
+                    "visits",
+                    "unique_ids",
+                    "total_dwell_s",
+                    "avg_dwell_s",
+                    "p95_dwell_s",
+                    "peak_occupancy",
+                ]
+            )
+            for z in zones:
+                zid = int(z["id"])
+                rows = dwell_store_api.query_zone_stats(zid, from_ts, to_ts)
+                name = str(z.get("name", ""))
+                for row in rows:
+                    w.writerow(
+                        [
+                            zid,
+                            name,
+                            row["slot_ts"],
+                            row["visits"],
+                            row["unique_ids"],
+                            row["total_dwell_s"],
+                            row["avg_dwell_s"],
+                            row["p95_dwell_s"],
+                            row["peak_occupancy"],
+                        ]
+                    )
+        return jsonify({"ok": True, "csv_path": str(csv_path)})
+
+    @app.post("/api/export/dwell-report")
+    def export_dwell_report() -> Response:
+        body = request.get_json(silent=True) or {}
+        cam = str(body.get("camera_id", "")).strip() or "default"
+        ts = datetime.now().strftime("%Y%m%d")
+        out = Path("outputs") / f"dwell_report_{cam}_{ts}.txt"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        lines = [
+            f"Relatorio dwell — camera {cam}",
+            f"Data UTC: {datetime.utcnow().isoformat()}Z",
+            "",
+        ]
+        zones = zone_store_api.list_zones(cam_cal.site_id(), cam)
+        for z in zones:
+            zid = int(z["id"])
+            rows = dwell_store_api.query_zone_stats(zid, 0, time.time())
+            lines.append(f"Zona {zid} ({z.get('name', '')}):")
+            if not rows:
+                lines.append("  (sem slots)")
+                continue
+            last = rows[-1]
+            lines.append(
+                f"  ultimo slot: visits={last['visits']} "
+                f"avg_dwell_s={last['avg_dwell_s']:.2f} p95={last['p95_dwell_s']:.2f}"
+            )
+        out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return jsonify({"ok": True, "path": str(out)})
 
     @app.get("/video_feed")
     def video_feed() -> Response:

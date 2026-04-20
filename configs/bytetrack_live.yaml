@@ -3,9 +3,12 @@
 # Base: ultralytics/cfg/trackers/bytetrack.yaml
 
 tracker_type: bytetrack
-track_high_thresh: 0.22
-track_low_thresh: 0.08
-new_track_thresh: 0.22
-track_buffer: 15
-match_thresh: 0.75
+# Limiares reduzidos para nao descartar deteccoes de pessoas distantes/oclusas
+# antes de virarem track (antes: 0.22 / 0.08 / 0.22, muitas sumiam no stream HLS).
+track_high_thresh: 0.12
+track_low_thresh: 0.05
+new_track_thresh: 0.12
+# Buffer maior: preserva ID quando a pessoa some por alguns frames atras de outra.
+track_buffer: 30
+match_thresh: 0.80
 fuse_score: true

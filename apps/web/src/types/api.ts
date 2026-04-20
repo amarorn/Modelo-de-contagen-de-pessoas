@@ -57,6 +57,67 @@ export interface ApiConfig {
   show_sex_overlay?: boolean;
   /** Mostrar/ocultar marcações ROI (linha/polígono) no vídeo */
   show_roi?: boolean;
+  /** Preset de fonte ativo (alinhado a zonas / heatmap por camera) */
+  active_preset_id?: string;
 }
 
 export type ConnectionStatus = "connected" | "connecting" | "error";
+
+export interface HeatmapPayload {
+  grid_w: number;
+  grid_h: number;
+  max_val: number;
+  total_events: number;
+  /** Matriz [grid_h][grid_w] normalizada em [0, 1]; vazia quando sem dados */
+  cells: number[][];
+}
+
+export type HeatmapPeriod = "session" | "1h" | "today";
+
+export interface DwellPayload {
+  grid_w: number;
+  grid_h: number;
+  max_val: number;
+  total_dwell_s: number;
+  cells: number[][];
+}
+
+export interface HotspotZoneScore {
+  id: number;
+  score: number;
+}
+
+export interface HotspotPayload {
+  grid_w: number;
+  grid_h: number;
+  max_val: number;
+  cells: number[][];
+  mode: string;
+  alpha: number;
+  zones?: HotspotZoneScore[];
+}
+
+export interface ZoneRow {
+  id: number;
+  name: string;
+  zone_type: string;
+  template_id: number | null;
+  polygon: [number, number][];
+  grid_version: number;
+}
+
+export interface ZoneTemplateRow {
+  id: number;
+  slug: string;
+  name: string;
+  description: string;
+  builtin: boolean;
+  default_weights: Record<string, number>;
+}
+
+export interface HistoricalHeatmapPayload extends HeatmapPayload {
+  period: HeatmapPeriod;
+  from_ts: number;
+  to_ts: number;
+  slots_merged: number;
+}

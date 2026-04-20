@@ -7,6 +7,7 @@ import {
   IconZap,
   IconCar,
 } from "./Icons";
+import { Tooltip, InfoIcon } from "./Tooltip";
 
 interface Props {
   entries: number;
@@ -32,7 +33,7 @@ export function FlowSummaryCard({ entries, exits, total, peakFlow, peakHour, veh
         display: "flex",
         flexDirection: "column",
         padding: 0,
-        overflow: "hidden",
+        overflow: "visible",
         height: "100%",
       }}
     >
@@ -43,7 +44,7 @@ export function FlowSummaryCard({ entries, exits, total, peakFlow, peakHour, veh
           borderBottom: "1px solid var(--border)",
         }}
       >
-        <p className="section-label" style={{ marginBottom: 0 }}>Resumo de Fluxo</p>
+        <p className="section-label" style={{ marginBottom: 0 }}>Fluxo da Sessão</p>
       </div>
 
       {/* Rows */}
@@ -68,9 +69,10 @@ export function FlowSummaryCard({ entries, exits, total, peakFlow, peakHour, veh
         />
         <FlowRow
           icon={<IconBalance size={14} color={balanceColor} />}
-          label="Saldo"
+          label="Fluxo líquido"
           value={Math.abs(balance).toLocaleString("pt-BR")}
           color={balanceColor}
+          tooltip="Entradas − Saídas desde o início da sessão. Não captura pessoas que saíram sem cruzar a linha configurada."
         />
 
         {/* Divisor veículos */}
@@ -111,6 +113,7 @@ export function FlowSummaryCard({ entries, exits, total, peakFlow, peakHour, veh
           style={{
             marginTop: "auto",
             borderTop: "1px solid var(--border)",
+            borderRadius: "0 0 var(--radius-lg) var(--radius-lg)",
             padding: "14px 16px",
             background: "var(--amber-dim)",
             display: "flex",
@@ -187,8 +190,8 @@ export function FlowSummaryCard({ entries, exits, total, peakFlow, peakHour, veh
 }
 
 function FlowRow({
-  icon, label, value, color,
-}: { icon: ReactNode; label: string; value: string; color: string }) {
+  icon, label, value, color, tooltip,
+}: { icon: ReactNode; label: string; value: string; color: string; tooltip?: string }) {
   return (
     <div
       style={{
@@ -234,6 +237,13 @@ function FlowRow({
         >
           {label}
         </span>
+        {tooltip && (
+          <Tooltip text={tooltip} align="left">
+            <span style={{ color: "var(--text-muted)", opacity: 0.5, display: "flex", alignItems: "center" }}>
+              <InfoIcon size={11} />
+            </span>
+          </Tooltip>
+        )}
       </div>
       <span
         style={{

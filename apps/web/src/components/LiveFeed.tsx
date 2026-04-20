@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { HeatmapCanvas } from "./HeatmapCanvas";
+import { useHeatmap } from "../hooks/useHeatmap";
 
 interface SourcePreset {
   id: string;
@@ -23,10 +25,25 @@ export function LiveFeed({ apiBase, hero = false }: Props) {
   const [activePresetId, setActivePresetId] = useState<string>("");
   const [switching, setSwitching]       = useState(false);
 
+  const [showHeatmap, setShowHeatmap]       = useState(false);
+  const [heatmapOpacity, setHeatmapOpacity] = useState(0.6);
+
+  const heatmapPayload = useHeatmap(apiBase, showHeatmap);
+
   const imgRef       = useRef<HTMLImageElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const src = `${apiBase}/video_feed?t=${reloadKey}`;
+  /* MJPEG multipart: o proxy do Vite (5173) pode bufferizar e o <img> nunca dispara onLoad.
+     Em desenvolvimento, usar o Flask directamente (mesmo define que WEB_PORT). */
+  const feedOrigin = (() => {
+    const o = import.meta.env.VITE_VIDEO_FEED_ORIGIN?.trim();
+    if (o) return o.replace(/\/$/, "");
+    if (import.meta.env.DEV && import.meta.env.VITE_DEV_FLASK_ORIGIN) {
+      return String(import.meta.env.VITE_DEV_FLASK_ORIGIN).replace(/\/$/, "");
+    }
+    return apiBase.replace(/\/$/, "");
+  })();
+  const src = `${feedOrigin}/video_feed?t=${reloadKey}`;
 
   /* ── Load presets on mount ─────────────────────────────────── */
   useEffect(() => {
@@ -44,6 +61,18 @@ export function LiveFeed({ apiBase, hero = false }: Props) {
     setError(false);
     setLoading(true);
   }, [src]);
+
+  /* Se a inferencia nunca enviar JPEG (stream HLS preso) ou onLoad falhar, nao ficar eternamente a carregar. */
+  useEffect(() => {
+    if (error || !loading) return;
+    const raw = import.meta.env.VITE_VIDEO_FEED_LOAD_TIMEOUT_MS;
+    const ms = raw ? Number(raw) : 120000;
+    const t = window.setTimeout(() => {
+      setError(true);
+      setLoading(false);
+    }, Number.isFinite(ms) && ms > 0 ? ms : 120000);
+    return () => window.clearTimeout(t);
+  }, [src, loading, error]);
 
   /* ── Active preset index ───────────────────────────────────── */
   const activeIdx = (() => {
@@ -222,6 +251,54 @@ export function LiveFeed({ apiBase, hero = false }: Props) {
             </svg>
           </button>
 
+          {/* ── Heatmap toggle ── */}
+          <button
+            onClick={() => setShowHeatmap((v) => !v)}
+            title={showHeatmap ? "Ocultar heatmap de sessão" : "Mostrar heatmap de sessão"}
+            style={{
+              background: showHeatmap ? "rgba(61,170,200,0.15)" : "var(--bg-surface)",
+              border: `1px solid ${showHeatmap ? "var(--cyan)" : "var(--border)"}`,
+              borderRadius: "var(--radius-sm)",
+              cursor: "pointer",
+              padding: "4px 8px",
+              color: showHeatmap ? "var(--cyan)" : "var(--text-muted)",
+              fontFamily: "var(--font-display)",
+              fontSize: 10,
+              fontWeight: 700,
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+              transition: "background 0.15s, border-color 0.15s, color 0.15s",
+            }}
+          >
+            {/* flame icon */}
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2c0 0-4 4-4 9a4 4 0 0 0 8 0c0-5-4-9-4-9z"/>
+              <path d="M12 12c0 0-2 2-2 4a2 2 0 0 0 4 0c0-2-2-4-2-4z"/>
+            </svg>
+            Heat
+          </button>
+
+          {/* ── Opacity slider (only when heatmap is on) ── */}
+          {showHeatmap && (
+            <input
+              type="range"
+              min={0.1}
+              max={1}
+              step={0.05}
+              value={heatmapOpacity}
+              onChange={(e) => setHeatmapOpacity(Number(e.target.value))}
+              title={`Opacidade: ${Math.round(heatmapOpacity * 100)}%`}
+              style={{
+                width: 56,
+                accentColor: "var(--cyan)",
+                cursor: "pointer",
+              }}
+            />
+          )}
+
           {/* ── LIVE badge ── */}
           <div className="badge badge-red" style={{ fontSize: 10, padding: "2px 7px" }}>
             <span
@@ -351,6 +428,11 @@ export function LiveFeed({ apiBase, hero = false }: Props) {
               ...(isFullscreen ? { maxHeight: "100vh" } : {}),
             }}
           />
+        )}
+
+        {/* Heatmap canvas overlay */}
+        {showHeatmap && !loading && !error && (
+          <HeatmapCanvas payload={heatmapPayload} opacity={heatmapOpacity} />
         )}
 
         {/* Corner bracket decorations */}
@@ -762,8 +844,9 @@ function ErrorState({ onRetry }: { onRetry: () => void }) {
         >
           Stream indisponível
         </div>
-        <div style={{ fontSize: 12, fontFamily: "var(--font-mono)" }}>
-          Verifique se o servidor Flask está ativo
+        <div style={{ fontSize: 12, fontFamily: "var(--font-mono)", maxWidth: 360, textAlign: "center", lineHeight: 1.45 }}>
+          Confirme run_web.sh / WEB_PORT, stream HLS no .env e GPU. Em dev o feed usa o Flask directamente
+          (evita proxy); se abrir de outro PC, defina VITE_VIDEO_FEED_ORIGIN no apps/web.
         </div>
       </div>
       <button
