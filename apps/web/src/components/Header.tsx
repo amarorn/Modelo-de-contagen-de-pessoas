@@ -1,9 +1,16 @@
 import React from "react";
 import type { ConnectionStatus } from "../types/api";
+import { CameraDriftBadge } from "./CameraDriftBadge";
 
 interface Props {
   status: ConnectionStatus;
   apiBase: string;
+  confidence?: "high" | "medium" | "low";
+  confidenceReasons?: string[];
+  camDriftLevel?: "ok" | "illumination" | "focus" | "position";
+  camDriftScore?: number;
+  camDriftReason?: string;
+  camDriftBaselineReady?: boolean;
   onOpenSettings?: () => void;
   onBackToLive?: () => void;
 }
@@ -14,7 +21,18 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
   error:      "Offline",
 };
 
-export function Header({ status, apiBase, onOpenSettings, onBackToLive }: Props) {
+export function Header({
+  status,
+  apiBase,
+  confidence,
+  confidenceReasons,
+  camDriftLevel = "ok",
+  camDriftScore = 0,
+  camDriftReason = "",
+  camDriftBaselineReady = false,
+  onOpenSettings,
+  onBackToLive,
+}: Props) {
   return (
     <header
       style={{
@@ -134,6 +152,19 @@ export function Header({ status, apiBase, onOpenSettings, onBackToLive }: Props)
             : import.meta.env.VITE_FLASK_DISPLAY_HOST}
         </div>
 
+        {/* Camera confidence badge */}
+        {confidence && (
+          <ConfidenceBadge level={confidence} reasons={confidenceReasons ?? []} />
+        )}
+
+        <CameraDriftBadge
+          apiBase={apiBase}
+          level={camDriftLevel}
+          score={camDriftScore}
+          reason={camDriftReason}
+          baselineReady={camDriftBaselineReady}
+        />
+
         {/* Connection badge */}
         <div
           className={`badge badge-${
@@ -220,6 +251,125 @@ function HeaderButton({
     >
       {children}
     </button>
+  );
+}
+
+const CONFIDENCE_CONFIG = {
+  high:   { label: "Alta confiança",  color: "var(--green)",  dim: "rgba(52,211,153,0.12)", dot: "#34d399" },
+  medium: { label: "Média confiança", color: "var(--amber)",  dim: "var(--amber-dim)",      dot: "var(--amber)" },
+  low:    { label: "Baixa confiança", color: "var(--red)",    dim: "var(--red-dim)",         dot: "var(--red)" },
+};
+
+const REASON_LABELS: Record<string, string> = {
+  fps_critical:       "FPS crítico",
+  fps_low:            "FPS baixo",
+  blur:               "Imagem desfocada",
+  bbox_small:         "Pessoas muito pequenas",
+  tracking_unstable:  "Tracking instável",
+};
+
+function ConfidenceBadge({
+  level,
+  reasons,
+}: { level: "high" | "medium" | "low"; reasons: string[] }) {
+  const cfg = CONFIDENCE_CONFIG[level];
+  const [hovered, setHovered] = React.useState(false);
+
+  return (
+    <div
+      style={{ position: "relative" }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 5,
+          padding: "4px 10px",
+          background: cfg.dim,
+          border: `1px solid ${cfg.color}`,
+          borderRadius: "var(--radius-sm)",
+          color: cfg.color,
+          fontFamily: "var(--font-display)",
+          fontSize: 11,
+          fontWeight: 700,
+          letterSpacing: "0.08em",
+          textTransform: "uppercase",
+          cursor: "default",
+          whiteSpace: "nowrap",
+        }}
+      >
+        <span
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: "50%",
+            background: cfg.dot,
+            flexShrink: 0,
+            ...(level !== "high" ? { animation: "pulse 2.5s infinite" } : {}),
+          }}
+        />
+        {cfg.label}
+      </div>
+
+      {hovered && (
+        <div
+          style={{
+            position: "absolute",
+            top: "calc(100% + 7px)",
+            right: 0,
+            minWidth: 200,
+            background: "var(--bg-elevated)",
+            border: "1px solid var(--border)",
+            borderRadius: "var(--radius-md)",
+            padding: "10px 12px",
+            zIndex: 200,
+            boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+            pointerEvents: "none",
+          }}
+        >
+          <div
+            style={{
+              fontFamily: "var(--font-display)",
+              fontSize: 10,
+              fontWeight: 700,
+              letterSpacing: "0.14em",
+              textTransform: "uppercase",
+              color: "var(--text-muted)",
+              marginBottom: 8,
+            }}
+          >
+            Sinais de qualidade
+          </div>
+
+          {reasons.length === 0 ? (
+            <div style={{ fontSize: 12, color: "var(--green)", fontFamily: "var(--font-mono)" }}>
+              Todos os sinais OK
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {reasons.map((r) => (
+                <div
+                  key={r}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    fontSize: 12,
+                    color: "var(--text-secondary)",
+                    fontFamily: "var(--font-mono)",
+                  }}
+                >
+                  <span style={{ color: "var(--red)", fontSize: 10 }}>▲</span>
+                  {REASON_LABELS[r] ?? r}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

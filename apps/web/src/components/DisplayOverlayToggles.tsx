@@ -8,13 +8,13 @@ interface Props {
  * Liga/desliga overlays no servidor: rastro dos pés, seta (PCA), sexo (F/M) e mapa de calor.
  */
 export function DisplayOverlayToggles({ apiBase }: Props) {
-  const [trail, setTrail] = useState(true);
-  const [heading, setHeading] = useState(true);
-  const [heatmap, setHeatmap] = useState(true);
+  const [trail, setTrail] = useState(false);
+  const [heading, setHeading] = useState(false);
+  const [heatmap, setHeatmap] = useState(false);
   const [heatmapOk, setHeatmapOk] = useState(false);
   const [sexOk, setSexOk] = useState(false);
-  const [sexOn, setSexOn] = useState(true);
-  const [showRoi, setShowRoi] = useState(true);
+  const [sexOn, setSexOn] = useState(false);
+  const [showRoi, setShowRoi] = useState(false);
   const [ready, setReady] = useState(false);
   const [pending, setPending] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -28,15 +28,15 @@ export function DisplayOverlayToggles({ apiBase }: Props) {
       window.clearTimeout(t);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const j = await r.json();
-      setTrail(Boolean(j.show_trail ?? true));
-      setHeading(Boolean(j.show_heading ?? true));
+      setTrail(Boolean(j.show_trail ?? false));
+      setHeading(Boolean(j.show_heading ?? false));
       const hmAvail = Boolean(j.heatmap_available);
       setHeatmapOk(hmAvail);
-      setHeatmap(hmAvail ? Boolean(j.show_heatmap ?? true) : false);
+      setHeatmap(hmAvail ? Boolean(j.show_heatmap ?? false) : false);
       const sxAvail = Boolean(j.sex_overlay_available);
       setSexOk(sxAvail);
-      setSexOn(sxAvail ? Boolean(j.show_sex_overlay ?? true) : false);
-      setShowRoi(Boolean(j.show_roi ?? true));
+      setSexOn(sxAvail ? Boolean(j.show_sex_overlay ?? false) : false);
+      setShowRoi(Boolean(j.show_roi ?? false));
       setReady(true);
     } catch (e) {
       const base = apiBase.trim() || window.location.origin;

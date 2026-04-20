@@ -3,7 +3,7 @@ import { useStats } from "./hooks/useStats";
 import { useConfig } from "./hooks/useConfig";
 import {
   IconArrowUp, IconArrowDown, IconUsers, IconArrowsUpDown,
-  IconTarget, IconVideo, IconCar,
+  IconTarget, IconVideo, IconCar, IconQueue, IconPerson,
 } from "./components/Icons";
 import { Header } from "./components/Header";
 import { StatCard } from "./components/StatCard";
@@ -19,11 +19,20 @@ import { SettingsDashboard } from "./components/SettingsDashboard";
 import { AlertsLayer } from "./components/AlertToast";
 import { HeatmapCard } from "./components/HeatmapCard";
 import { ZonesPage } from "./pages/Zones";
+import { ProfileSelector } from "./components/ProfileSelector";
+import { AuditLogPanel } from "./components/AuditLogPanel";
+import { FlowInsightsCard } from "./components/FlowInsightsCard";
+import { TrackingModeToggle } from "./components/TrackingModeToggle";
+import { useFlowInsights } from "./hooks/useFlowInsights";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
 export default function App() {
   const { stats, status } = useStats();
+  const { data: flowInsights, error: flowInsightsErr } = useFlowInsights(
+    API_BASE,
+    status === "connected",
+  );
   const config = useConfig();
   const [roiOpen, setRoiOpen]       = useState(false);
   const [sourceOpen, setSourceOpen] = useState(false);
@@ -34,6 +43,12 @@ export default function App() {
       <Header
         status={status}
         apiBase={API_BASE}
+        confidence={stats.cam_confidence}
+        confidenceReasons={stats.cam_confidence_reasons}
+        camDriftLevel={stats.cam_drift_level ?? "ok"}
+        camDriftScore={stats.cam_drift_score ?? 0}
+        camDriftReason={stats.cam_drift_reason ?? ""}
+        camDriftBaselineReady={stats.cam_drift_baseline_ready ?? false}
         onOpenSettings={view === "live" ? () => setView("settings") : undefined}
         onBackToLive={view === "settings" || view === "zones" ? () => setView("live") : undefined}
       />
@@ -73,7 +88,14 @@ export default function App() {
                   flexShrink: 0,
                 }}
               >
-                <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <TrackingModeToggle
+                    apiBase={API_BASE}
+                    vehicleTrackingAvailable={stats.vehicle_tracking_available ?? false}
+                    yoloCountClassIds={stats.yolo_count_class_ids ?? []}
+                    yoloClassLabels={stats.yolo_class_labels ?? {}}
+                    trackActiveClassIds={stats.track_active_class_ids ?? []}
+                  />
                   <ActionButton
                     icon={<IconTarget size={13} />}
                     label="Configurar ROI"
@@ -93,6 +115,10 @@ export default function App() {
                 <div style={{ flex: "1 1 240px", minWidth: 0 }}>
                   <DisplayOverlayToggles apiBase={API_BASE} />
                 </div>
+                <ProfileSelector
+                  apiBase={API_BASE}
+                  activeProfile={stats.active_env_profile}
+                />
               </div>
             </div>
 
@@ -180,6 +206,34 @@ export default function App() {
                 colorDim="rgba(249,115,22,0.12)"
                 subtitle={`↑${stats.vehicle_entries ?? 0} ↓${stats.vehicle_exits ?? 0}`}
               />
+              {stats.reid_unique_persons > 0 && (
+                <StatCard
+                  variant="counter"
+                  label="Visitantes únicos"
+                  value={stats.reid_unique_persons}
+                  icon={<IconPerson size={14} />}
+                  color="var(--cyan)"
+                  colorDim="var(--cyan-dim)"
+                  subtitle={
+                    stats.reid_revisited > 0
+                      ? `${stats.reid_revisited} revisita${stats.reid_revisited !== 1 ? "s" : ""} · ${stats.reid_avg_dwell_s.toFixed(0)}s médios`
+                      : `${stats.reid_avg_dwell_s.toFixed(0)}s tempo médio`
+                  }
+                  tooltip="Estimativa de indivíduos distintos na sessão, via re-identificação espaço-temporal leve (sem biometria). Tracks que reaparecem a menos de 18% da largura do frame em até 20s são re-linkados ao mesmo visitante."
+                />
+              )}
+              {stats.queue_size > 0 && (
+                <StatCard
+                  variant="counter"
+                  label="Fila detectada"
+                  value={stats.queue_size}
+                  icon={<IconQueue size={14} />}
+                  color={stats.queue_saturated ? "var(--red)" : "var(--amber)"}
+                  colorDim={stats.queue_saturated ? "var(--red-dim)" : "var(--amber-dim)"}
+                  subtitle={`espera média: ${stats.queue_avg_wait_s.toFixed(0)}s${stats.queue_saturated ? " · saturada" : ""}`}
+                  tooltip="Fila detectada automaticamente: tracks lentos com alinhamento espacial (PCA). Saturada quando ≥ 8 pessoas."
+                />
+              )}
 
               {/* Spacer + fps readout */}
               <div
@@ -209,6 +263,16 @@ export default function App() {
                 <DataRow label="Em movimento" value={String(stats.moving_now)} />
                 <DataRow label="Parados" value={String(stats.stationary_now)} />
                 <DataRow label="Loitering" value={String(stats.loitering_now)} />
+                {(stats.low_conf_tracks ?? 0) > 0 && (
+                  <DataRow label="Tracks baixa conf." value={String(stats.low_conf_tracks)} />
+                )}
+                {(stats.suppressed_events ?? 0) > 0 && (
+                  <DataRow
+                    label="Cruzamentos suprimidos"
+                    value={String(stats.suppressed_events)}
+                    hint="Contagem bloqueada por confiança do track (6.1)"
+                  />
+                )}
               </div>
             </div>
           </div>
@@ -248,6 +312,15 @@ export default function App() {
             </div>
           </div>
 
+          {/* ── Flow intelligence (7.x) ───────────────────────── */}
+          <div style={{ marginTop: 14 }}>
+            <FlowInsightsCard
+              payload={flowInsightsErr ? null : flowInsights}
+              loading={status === "connected" && !flowInsights && !flowInsightsErr}
+              fetchError={flowInsightsErr}
+            />
+          </div>
+
           {/* ── Demographics ────────────────────────────────────── */}
           <div style={{ marginTop: 0 }}>
             <DemographicsChart stats={stats} />
@@ -256,6 +329,11 @@ export default function App() {
           {/* ── Heatmap analítico ───────────────────────────────── */}
           <div style={{ marginTop: 0 }}>
             <HeatmapCard apiBase={API_BASE} />
+          </div>
+
+          {/* ── Audit log (6.2) ─────────────────────────────────── */}
+          <div style={{ marginTop: 14 }}>
+            <AuditLogPanel apiBase={API_BASE} />
           </div>
 
           {/* ── Error banner ──────────────────────────────────── */}
@@ -382,9 +460,10 @@ function ActionButton({
   );
 }
 
-function DataRow({ label, value }: { label: string; value: string }) {
+function DataRow({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
     <div
+      title={hint}
       style={{
         display: "flex",
         justifyContent: "space-between",

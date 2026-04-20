@@ -193,3 +193,119 @@ class HeatmapStore:
             "cells": cells,
             "slots_merged": len(rows),
         }
+
+    def query_slots_raw(
+        self,
+        site_id: str,
+        camera_id: str,
+        from_ts: float,
+        to_ts: float,
+        grid_version: Optional[int] = None,
+        max_slots: int = 96,
+    ) -> list[tuple[int, np.ndarray]]:
+        """Retorna lista de (slot_ts, raw_grid) ordenada por slot_ts."""
+        try:
+            sf = self._get_sf()
+            with sf() as session:
+                stmt = (
+                    select(HeatmapSlot)
+                    .where(HeatmapSlot.site_id == site_id)
+                    .where(HeatmapSlot.camera_id == camera_id)
+                    .where(HeatmapSlot.slot_ts >= int(from_ts))
+                    .where(HeatmapSlot.slot_ts < int(to_ts))
+                    .order_by(HeatmapSlot.slot_ts.asc())
+                    .limit(max_slots)
+                )
+                if grid_version is not None:
+                    stmt = stmt.where(HeatmapSlot.grid_version == grid_version)
+                rows = list(session.scalars(stmt).all())
+        except Exception:
+            log.exception("[heatmap] query_slots_raw failed")
+            return []
+
+        result: list[tuple[int, np.ndarray]] = []
+        for row in rows:
+            try:
+                arr = np.array(json.loads(row.cells_json), dtype=np.float64).reshape(
+                    row.grid_h, row.grid_w
+                )
+                result.append((int(row.slot_ts), arr))
+            except (json.JSONDecodeError, ValueError):
+                log.warning("[heatmap] bad cells_json slot_ts=%d", row.slot_ts)
+        return result
+
+    def query_diff(
+        self,
+        site_id: str,
+        camera_id: str,
+        period_from: float,
+        period_to: float,
+        baseline_from: float,
+        baseline_to: float,
+        grid_version: Optional[int] = None,
+        grid_w: int = 32,
+        grid_h: int = 18,
+    ) -> dict:
+        """Compara período recente contra baseline histórico.
+
+        Retorna:
+          delta   — (period_norm − baseline_norm) normalizado em [-1, +1]
+          anomaly — z-score normalizado em [0, 1]; NaN tratado como 0
+        """
+        period_slots  = self.query_slots_raw(site_id, camera_id, period_from,  period_to,  grid_version)
+        baseline_slots = self.query_slots_raw(site_id, camera_id, baseline_from, baseline_to, grid_version)
+
+        empty = {
+            "grid_w": grid_w, "grid_h": grid_h,
+            "delta": [], "anomaly": [],
+            "period_events": 0, "baseline_events": 0,
+            "has_anomaly_data": False,
+        }
+        if not period_slots or not baseline_slots:
+            return empty
+
+        gw = period_slots[0][1].shape[1]
+        gh = period_slots[0][1].shape[0]
+
+        # Somar slots de cada janela
+        period_sum = np.zeros((gh, gw), dtype=np.float64)
+        for _, arr in period_slots:
+            period_sum += arr
+
+        baseline_sum = np.zeros((gh, gw), dtype=np.float64)
+        for _, arr in baseline_slots:
+            baseline_sum += arr
+
+        # Normalizar cada soma independentemente em [0, 1]
+        pm = float(period_sum.max())
+        bm = float(baseline_sum.max())
+        period_norm   = period_sum   / pm if pm > 1e-9 else period_sum
+        baseline_norm = baseline_sum / bm if bm > 1e-9 else baseline_sum
+
+        delta = period_norm - baseline_norm  # [-1, +1]
+
+        # Anomalia: z-score por célula sobre os slots de baseline normalizados
+        has_anomaly = len(baseline_slots) >= 3
+        if has_anomaly:
+            stack = np.stack([
+                arr / max(float(arr.max()), 1e-9)
+                for _, arr in baseline_slots
+            ], axis=0)  # shape: (n_slots, gh, gw)
+            b_mean = stack.mean(axis=0)
+            b_std  = stack.std(axis=0)
+            z = (period_norm - b_mean) / np.maximum(b_std, 0.08)
+            # Normalizar z positivo para [0, 1] (clip em 3σ)
+            z_norm = np.clip(z, 0.0, 3.0) / 3.0
+            anomaly_cells = z_norm.tolist()
+        else:
+            anomaly_cells = []
+
+        return {
+            "grid_w": gw,
+            "grid_h": gh,
+            "delta": delta.tolist(),
+            "anomaly": anomaly_cells,
+            "period_events": sum(int(arr.sum()) for _, arr in period_slots),
+            "baseline_events": sum(int(arr.sum()) for _, arr in baseline_slots),
+            "has_anomaly_data": has_anomaly,
+        }

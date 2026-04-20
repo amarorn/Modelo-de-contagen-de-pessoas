@@ -13,6 +13,7 @@ import {
   IconRuler, IconPolygon, IconX, IconCheck,
   IconRotateCcw, IconTrash, IconAlertTriangle,
 } from "./Icons";
+import { SuggestLineButton, SuggestZonesButton } from "./SuggestButton";
 
 interface Props {
   apiBase: string;
@@ -787,6 +788,29 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
                     {m === "line" ? "Linha" : "Polígono"}
                   </button>
                 ))}
+                <div style={{ flex: 1 }} />
+                {mode === "line" && (
+                  <SuggestLineButton
+                    apiBase={apiBase}
+                    frameW={imgSize.w}
+                    frameH={imgSize.h}
+                    onSuggested={(l) => {
+                      setLinePoints([{ x: l.x1, y: l.y1 }, { x: l.x2, y: l.y2 }]);
+                    }}
+                  />
+                )}
+                {mode === "polygon" && (
+                  <SuggestZonesButton
+                    apiBase={apiBase}
+                    frameW={imgSize.w}
+                    frameH={imgSize.h}
+                    onSuggested={(zones) => {
+                      if (zones.length > 0) {
+                        setPolyPoints(zones[0].polygon.map(([x, y]) => ({ x, y })));
+                      }
+                    }}
+                  />
+                )}
               </div>
 
               {/* Canvas */}

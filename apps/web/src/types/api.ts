@@ -41,6 +41,50 @@ export interface Stats {
   hourly_exits: number[];
   peak_hour: number;
   peak_flow: number;
+
+  cam_confidence: "high" | "medium" | "low";
+  cam_confidence_reasons: string[];
+
+  queue_size: number;
+  queue_avg_wait_s: number;
+  queue_saturated: boolean;
+
+  reid_unique_persons: number;
+  reid_active_persons: number;
+  reid_revisited: number;
+  reid_avg_dwell_s: number;
+  active_env_profile?: string;
+  low_conf_tracks?: number;
+  suppressed_events?: number;
+  cam_drift_level?: "ok" | "illumination" | "focus" | "position";
+  cam_drift_score?: number;
+  cam_drift_reason?: string;
+  cam_drift_baseline_ready?: boolean;
+  /** Modelo com COUNT_CLASS_IDS com mais de uma classe (ex. pessoa + veículo) */
+  vehicle_tracking_available?: boolean;
+  /** IDs em COUNT_CLASS_IDS (mesma ordem que o backend) */
+  yolo_count_class_ids?: number[];
+  /** Subconjunto de yolo_count_class_ids com inferência e caixas ativas */
+  track_active_class_ids?: number[];
+  /** id -> nome da classe no modelo (YOLO names) */
+  yolo_class_labels?: Record<string, string>;
+  /** Se false, YOLO não inclui a classe pessoa nas deteções */
+  track_people?: boolean;
+  /** Se false, YOLO não inclui classes de veículo (só efeito se o modelo tiver várias classes) */
+  track_vehicles?: boolean;
+}
+
+export interface AuditEvent {
+  id: number;
+  ts: number;
+  wall_ts: string;
+  session_id: string;
+  event_type: string;
+  track_id: number | null;
+  confidence: number | null;
+  x_norm: number | null;
+  y_norm: number | null;
+  metadata: Record<string, unknown> | null;
 }
 
 export interface ApiConfig {
@@ -63,6 +107,31 @@ export interface ApiConfig {
 
 export type ConnectionStatus = "connected" | "connecting" | "error";
 
+export interface FlowRecommendation {
+  id: string;
+  severity: "high" | "medium" | "low";
+  action: string;
+  detail: string;
+}
+
+export interface FlowInsightsPayload {
+  version: number;
+  method: string;
+  horizons_min: number[];
+  expected_crossings: { "15": number; "30": number };
+  expected_net_flow: { "15": number; "30": number };
+  projected_occupancy: { "15": number; "30": number };
+  rates_per_min: {
+    entries: number;
+    exits: number;
+    gross_passages: number;
+    net: number;
+  };
+  session_elapsed_min: number;
+  disclaimer_pt: string;
+  recommendations: FlowRecommendation[];
+}
+
 export interface HeatmapPayload {
   grid_w: number;
   grid_h: number;
@@ -70,6 +139,33 @@ export interface HeatmapPayload {
   total_events: number;
   /** Matriz [grid_h][grid_w] normalizada em [0, 1]; vazia quando sem dados */
   cells: number[][];
+}
+
+export interface HeatmapDiffPayload {
+  grid_w: number;
+  grid_h: number;
+  /** Diferença normalizada (period_norm − baseline_norm) em [-1, +1]; vazio quando sem dados */
+  delta: number[][];
+  /** Z-score normalizado em [0, 1]; vazio quando baseline < 3 slots */
+  anomaly: number[][];
+  period_events: number;
+  baseline_events: number;
+  period_label: string;
+  baseline_label: string;
+  has_anomaly_data: boolean;
+}
+
+export interface ReplaySlot {
+  ts: number;
+  label: string;         // "HH:MM"
+  cells: number[][];
+  total_events: number;
+}
+
+export interface HeatmapReplayPayload {
+  grid_w: number;
+  grid_h: number;
+  slots: ReplaySlot[];
 }
 
 export type HeatmapPeriod = "session" | "1h" | "today";
@@ -97,6 +193,21 @@ export interface HotspotPayload {
   zones?: HotspotZoneScore[];
 }
 
+export interface FlowVector {
+  r: number;   // row index (0-based)
+  c: number;   // col index (0-based)
+  vx: number;  // normalized direction x (−1..1)
+  vy: number;  // normalized direction y (−1..1)
+  mag: number; // relative magnitude (0..1)
+}
+
+export interface FlowVectorsPayload {
+  grid_w: number;
+  grid_h: number;
+  max_mag: number;
+  vectors: FlowVector[];
+}
+
 export interface ZoneRow {
   id: number;
   name: string;
@@ -120,4 +231,38 @@ export interface HistoricalHeatmapPayload extends HeatmapPayload {
   from_ts: number;
   to_ts: number;
   slots_merged: number;
+}
+
+export interface EnvProfile {
+  id: string;
+  label: string;
+  description: string;
+  icon: string;
+  loitering_seconds: number;
+  stationary_max_speed: number;
+  queue_saturation: number;
+  density_alert_threshold: number;
+  blur_thresh_low: number;
+  blur_thresh_critical: number;
+  bbox_small_thresh_px: number;
+  reid_radius_norm: number;
+  reid_timeout_s: number;
+  notes: string[];
+}
+
+export interface SuggestedLine {
+  available: boolean;
+  reason?: string;
+  line?: { x1: number; y1: number; x2: number; y2: number };
+  confidence?: number;
+  dominant_angle_deg?: number;
+}
+
+export interface SuggestedZone {
+  label: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  density: number;
 }

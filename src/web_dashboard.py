@@ -43,7 +43,13 @@ from flask_cors import CORS
 from ultralytics import YOLO
 
 from device_utils import resolve_device
-from stream_source_resolve import apply_opencv_ffmpeg_capture_env, resolve_stream_source
+from stream_source_resolve import (
+    apply_opencv_ffmpeg_capture_env,
+    is_skylinewebcams_webcam_page,
+    is_skyline_hls_url,
+    probe_skyline_hls_url,
+    resolve_stream_source,
+)
 from yolo_class_utils import resolve_yolo_classes_and_person_id, short_class_tag
 from age_classifier_agg import AgeAggregateStats, OptionalAgeClassifier
 from alert_car_color import CarColorClassifier, parse_target_colors
@@ -67,6 +73,14 @@ from heatmap_aggregator import SlotAggregator
 from hotspot_scorer import HotspotScorer, rasterize_norm_polygon
 from zones.zone_assigner import ZoneAssigner
 from zones.zone_store import ZoneStore, ensure_builtin_templates
+from queue_detector import QueueDetector
+from flow_vector_grid import FlowVectorGrid
+from env_profiles import PROFILES, get_profile, list_profiles as _list_env_profiles
+from roi_suggester import suggest_line as _suggest_line, suggest_zones as _suggest_zones
+from track_confidence import TrackConfidenceTracker
+from camera_drift import CameraDriftDetector
+from persistence.audit_log import AuditLog
+from person_tracker import PersonTracker
 
 import persistence.camera_calibration_store as cam_cal
 
@@ -355,15 +369,15 @@ class SharedState:
         # Presets: {"id", "label", "url"} — max 24; preenchido no arranque a partir do .env
         self.source_presets: list[dict[str, str]] = []
         # overlays no MJPEG (caixas/labels mantêm-se; só rastro e seta PCA)
-        self.show_trail_overlay: bool = True
-        self.show_heading_overlay: bool = True
-        self.show_roi_overlay: bool = True
+        self.show_trail_overlay: bool = False
+        self.show_heading_overlay: bool = False
+        self.show_roi_overlay: bool = False
         # Mapa de calor: só tem efeito se o processo foi iniciado sem --no-heatmap (WEB_HEATMAP=1)
         self.heatmap_available: bool = False
-        self.show_heatmap_overlay: bool = True
+        self.show_heatmap_overlay: bool = False
         # Sexo (classify): disponivel se --sex-model carregou; overlay ligavel na UI como o mapa de calor
         self.sex_overlay_available: bool = False
-        self.show_sex_overlay: bool = True
+        self.show_sex_overlay: bool = False
         # GridLive — payload serializado para /api/heatmap/live; atualizado a cada ~30 frames
         self.heatmap_live_payload: dict = {
             "grid_w": 32, "grid_h": 18, "max_val": 0.0, "total_events": 0, "cells": [],
@@ -375,6 +389,78 @@ class SharedState:
             "grid_w": 32, "grid_h": 18, "max_val": 0.0, "cells": [], "mode": "composite", "alpha": 0.6,
         }
         self.zones_reload_flag: bool = True
+        # Multi-classe YOLO (ex. pessoa + veículo): controlado na UI sem reiniciar processo
+        self.yolo_count_class_ids: list[int] = []
+        self.yolo_person_class_id: int = 0
+        self.yolo_class_names: dict[int, str] = {}
+        self.track_active_class_ids: list[int] = []
+        self.track_person_enabled: bool = True
+        self.track_vehicle_enabled: bool = False
+        self.track_classes_changed: bool = False
+        self.cam_confidence: str = "high"
+        self.cam_confidence_reasons: list[str] = []
+        self.queue_size: int = 0
+        self.queue_avg_wait_s: float = 0.0
+        self.queue_saturated: bool = False
+        self.queue_linearity: float = 0.0
+        self.flow_vectors_payload: dict = {
+            "grid_w": 16, "grid_h": 9, "max_mag": 0.0, "vectors": [],
+        }
+        self.reid_unique_persons: int = 0
+        self.reid_active_persons: int = 0
+        self.reid_revisited: int = 0
+        self.reid_avg_dwell_s: float = 0.0
+        # ── Mutable thresholds (may be updated via env profile without restart) ──
+        self.thr_loitering_seconds: float = loitering_threshold_sec
+        self.thr_stationary_max_speed: float = 2.2
+        self.thr_queue_saturation: int = 8
+        self.thr_density_alert: int = 0
+        self.thr_blur_low: float = 60.0
+        self.thr_blur_critical: float = 20.0
+        self.thr_bbox_small_px: float = 40.0
+        self.thr_reid_radius_norm: float = 0.18
+        self.thr_reid_timeout_s: float = 20.0
+        # Active env profile id ("" = none / custom)
+        self.active_env_profile: str = ""
+        # Latest frame dimensions (set by inference loop)
+        self.frame_w: int = 0
+        self.frame_h: int = 0
+        # ── Track confidence ─────────────────────────────────────────────────
+        self.low_conf_tracks: int = 0
+        self.suppressed_events: int = 0   # cumulative crossing events suppressed
+        # ── Camera drift ─────────────────────────────────────────────────────
+        self.cam_drift_level: str = "ok"   # "ok"|"illumination"|"focus"|"position"
+        self.cam_drift_score: float = 0.0  # 0-1 severity
+        self.cam_drift_reason: str = ""
+        self.cam_drift_baseline_ready: bool = False
+
+
+def _sync_track_flags_from_active(
+    shared: SharedState,
+    count_class_ids: list[int],
+    person_class_id: int,
+) -> None:
+    active = set(shared.track_active_class_ids)
+    shared.track_person_enabled = person_class_id in active
+    v_ids = [c for c in count_class_ids if c != person_class_id]
+    shared.track_vehicle_enabled = bool(v_ids) and any(c in active for c in v_ids)
+
+
+def _rebuild_active_from_flags(
+    shared: SharedState,
+    count_class_ids: list[int],
+    person_class_id: int,
+) -> None:
+    active: list[int] = []
+    if shared.track_person_enabled:
+        active.append(person_class_id)
+    if shared.track_vehicle_enabled:
+        for c in count_class_ids:
+            if c != person_class_id:
+                active.append(c)
+    if not active:
+        active = [person_class_id]
+    shared.track_active_class_ids = sorted(set(active))
 
 
 class GridLive:
@@ -695,8 +781,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--max-nonperson-area-frac",
         type=float,
-        default=0.55,
-        help="Carro/outras classes: limite de area do bbox (carros perto da camara sao grandes; 0.14 corta muitos)",
+        default=0.92,
+        help="Carro/outras classes: limite de area do bbox (veiculos em primeiro plano podem ocupar quase o ecra)",
     )
     p.add_argument(
         "--min-person-height-px",
@@ -781,6 +867,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=10.0,
         help="Segundos continuos parada para marcar permanencia prolongada.",
+    )
+    p.add_argument(
+        "--queue-saturation",
+        type=int,
+        default=8,
+        help="Tamanho de fila a partir do qual dispara alerta de saturação.",
     )
     p.add_argument(
         "--alert-cooldown",
@@ -982,6 +1074,39 @@ def foot_inside_polygon(
     return float(v) >= 0.0
 
 
+def _compute_cam_confidence(
+    fps: float,
+    blur_ema: float,
+    avg_bbox_h: float,
+    track_stability: float,
+    present_count: int,
+    *,
+    blur_thresh_low: float = 60.0,
+    blur_thresh_critical: float = 20.0,
+    bbox_small_thresh_px: float = 40.0,
+) -> tuple[str, list[str]]:
+    """Retorna (nível, motivos) com base nos sinais de qualidade disponíveis."""
+    reasons: list[str] = []
+    if fps > 0 and fps < 8:
+        reasons.append("fps_critical")
+    elif fps > 0 and fps < 15:
+        reasons.append("fps_low")
+    if blur_ema > 0 and blur_ema < blur_thresh_critical:
+        reasons.append("blur")
+    elif blur_ema > 0 and blur_ema < blur_thresh_low:
+        reasons.append("blur")
+    if avg_bbox_h > 0 and avg_bbox_h < bbox_small_thresh_px:
+        reasons.append("bbox_small")
+    if present_count > 2 and track_stability < 0.4:
+        reasons.append("tracking_unstable")
+
+    if "fps_critical" in reasons or len(reasons) >= 3:
+        return "low", reasons
+    if reasons:
+        return "medium", reasons
+    return "high", []
+
+
 def bbox_looks_like_person(
     xyxy: tuple[float, float, float, float],
     fw: int,
@@ -1020,7 +1145,7 @@ def bbox_non_person_sane(
     x1, y1, x2, y2 = xyxy
     w = max(0.0, float(x2 - x1))
     h = max(0.0, float(y2 - y1))
-    if h < max(12.0, float(min_h_px) * 0.35):
+    if h < max(8.0, float(min_h_px) * 0.28):
         return False
     if w * h > max_area_frac * float(fw * fh):
         return False
@@ -1056,6 +1181,25 @@ def filter_boxes_by_shape_multi(
             out_xy.append(box)
             out_cls.append(c)
     return out_ids, out_xy, out_cls
+
+
+def fallback_track_ids_from_detections(
+    xyxys: list[tuple[float, float, float, float]],
+    clss: list[int],
+    *,
+    cell_px: float = 44.0,
+) -> list[int]:
+    """Quando o ByteTrack nao devolve id (ou tensores 6-col), gera IDs estaveis por grelha + classe."""
+    out: list[int] = []
+    for i, (xy, c) in enumerate(zip(xyxys, clss)):
+        x1, y1, x2, y2 = xy
+        cx = (x1 + x2) / 2.0
+        cy = (y1 + y2) / 2.0
+        gx = int(cx // cell_px) & 0x1FF
+        gy = int(cy // cell_px) & 0x1FF
+        base = 5_200_000 + (int(c) & 0x1F) * 131_072 + gy * 512 + gx
+        out.append(base + i * 3)
+    return out
 
 
 def predict_trail_heading_pca(
@@ -1218,7 +1362,13 @@ def write_summary_csv(
         writer.writerow(row)
 
 
-def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: threading.Event) -> None:
+def inference_loop(
+    args: argparse.Namespace,
+    shared: SharedState,
+    stop_event: threading.Event,
+    audit_log: AuditLog,
+    drift_detector: CameraDriftDetector,
+) -> None:
     try:
         model = YOLO(args.model)
         count_class_ids, person_class_id = resolve_yolo_classes_and_person_id(
@@ -1263,6 +1413,23 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
             f"[web] Modo contagem={_mode} | linha (pixels): {_ld} | poligono: {_np} vertices. "
             "Linha: pes cruzam segmento. Poligono: entrada/saida pela area (UI /roi)."
         )
+        with shared.lock:
+            nm: dict[int, str] = {}
+            if isinstance(names, dict):
+                for _k, _v in names.items():
+                    try:
+                        nm[int(_k)] = str(_v)
+                    except (TypeError, ValueError):
+                        pass
+            shared.yolo_class_names = nm
+            shared.yolo_count_class_ids = list(count_class_ids)
+            shared.yolo_person_class_id = person_class_id
+            if len(count_class_ids) <= 1:
+                shared.track_vehicle_enabled = False
+                shared.track_person_enabled = True
+                shared.track_active_class_ids = list(count_class_ids)
+            else:
+                _rebuild_active_from_flags(shared, list(count_class_ids), person_class_id)
         if len(count_class_ids) > 1 and not args.agnostic_nms:
             print(
                 "[web] Dica: varias classes no mesmo modelo; se caixas se sobreporem entre classes, "
@@ -1284,8 +1451,6 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 _sen = bool(sex_clf and sex_clf.enabled)
                 shared.sex_classifier_enabled = _sen
                 shared.sex_overlay_available = _sen
-                if _sen:
-                    shared.show_sex_overlay = True
             if sex_clf and sex_clf.enabled:
                 print(
                     f"[web] Estatistica agregada por sexo na entrada (abstain>={args.sex_abstain}). "
@@ -1345,6 +1510,8 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
             )
 
         last_side_by_id: dict[int, float] = {}
+        # Ultima classe YOLO por track (persiste em frames de hold do overlay / filtro intermitente)
+        last_yolo_cls_by_tid: dict[int, int] = {}
         prev_inside_by_id: dict[int, bool] = {}
         prev_config_sig: str | None = None
         zone_entered_at_by_id: dict[int, float] = {}
@@ -1388,6 +1555,12 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
         )
         _hotspot_payload_counter = 0
         _last_hotspot_cam: str | None = None
+        queue_detector = QueueDetector()
+        flow_grid = FlowVectorGrid()
+        _flow_vec_counter: int = 0
+        person_tracker = PersonTracker()
+        _last_norm_pos_by_id: dict[int, tuple[float, float]] = {}
+        track_conf_tracker = TrackConfidenceTracker()
 
         tracker_yaml = resolve_tracker_yaml(args.tracker)
         box_overlay = TrackBoxOverlay(args.track_ema, args.track_hold_frames)
@@ -1413,6 +1586,7 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
             with shared.lock:
                 raw_src = shared.source_live
                 shared.source_changed = False
+                shared.track_classes_changed = False
 
             try:
                 stream_src = resolve_stream_source(str(raw_src))
@@ -1440,14 +1614,68 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
 
             apply_opencv_ffmpeg_capture_env(source, base_opts=_ffmpeg_capture_base)
 
+            if isinstance(source, str) and is_skyline_hls_url(source):
+                _ok_hls, _probe_err = probe_skyline_hls_url(source)
+                if not _ok_hls:
+                    _pe = (
+                        f"Skyline HLS inacessivel ({_probe_err}). O token ?a= nos URLs hd-auth expira; "
+                        "abra a pagina da camara, copie um m3u8 novo (F12 > Rede) ou use o URL .html no preset."
+                    )
+                    print(f"[web] {_pe}")
+                    with shared.lock:
+                        shared.last_error = f"{_pe} Fonte: {source[:120]}{'...' if len(source) > 120 else ''}"
+                    time.sleep(5.0)
+                    continue
+
+            _v_ids = [c for c in count_class_ids if c != person_class_id]
+            with shared.lock:
+                _allowed_ids = set(shared.yolo_count_class_ids)
+                _active_raw = list(shared.track_active_class_ids)
+            effective_class_ids = sorted({c for c in _active_raw if c in _allowed_ids})
+            if not effective_class_ids:
+                if _v_ids and person_class_id not in _active_raw:
+                    print(
+                        "[web] AVISO: nenhuma classe ativa valida; a usar classe pessoa no YOLO."
+                    )
+                effective_class_ids = [person_class_id]
+            seen: set[int] = set()
+            _uniq: list[int] = []
+            for _cid in effective_class_ids:
+                if _cid not in seen:
+                    seen.add(_cid)
+                    _uniq.append(_cid)
+            effective_class_ids = _uniq
+            _eff_set = set(effective_class_ids)
+            _tp = person_class_id in _eff_set
+            _tv = any(c in _eff_set for c in _v_ids)
+            print(
+                f"[web] YOLO classes={effective_class_ids} "
+                f"(track_active={_active_raw}, track_people={_tp}, track_vehicles={_tv})"
+            )
+
+            _infer_conf = float(args.conf)
+            _vehicles_only_stream = (
+                person_class_id not in _eff_set and bool(_v_ids) and any(c in _eff_set for c in _v_ids)
+            )
+            if _vehicles_only_stream:
+                try:
+                    _vmult = float(os.environ.get("YOLO_CONF_MULT_VEHICLE_ONLY", "0.55").strip())
+                except ValueError:
+                    _vmult = 0.55
+                _infer_conf = max(0.02, min(0.99, _infer_conf * _vmult))
+                print(
+                    f"[web] Modo so veiculos: conf={_infer_conf:.3f} "
+                    f"(base {args.conf:.3f} * YOLO_CONF_MULT_VEHICLE_ONLY={_vmult})"
+                )
+
             track_kw: dict = {
                 "source": source,
                 "stream": True,
-                "conf": args.conf,
+                "conf": _infer_conf,
                 "iou": args.iou,
                 "imgsz": args.imgsz,
                 "max_det": args.max_det,
-                "classes": count_class_ids,
+                "classes": effective_class_ids,
                 "tracker": tracker_yaml,
                 "persist": True,
                 "verbose": False,
@@ -1463,6 +1691,7 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 track_kw["agnostic_nms"] = True
 
             stream = model.track(**track_kw)
+            last_yolo_cls_by_tid.clear()
             sex_smoother: PerTrackSexSmoother | None = (
                 PerTrackSexSmoother.from_env() if sex_clf is not None and sex_clf.enabled else None
             )
@@ -1471,13 +1700,15 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
             show_heading_arrow = (not args.no_heading_arrow) and trail_max >= 2
             prev_frame_mono: float | None = None
             ema_infer_fps: float = 0.0
+            blur_ema: float = 0.0
             _frames_received = 0
+            _synthetic_id_warned = False
 
             for result in stream:
                 if stop_event.is_set():
                     break
                 with shared.lock:
-                    if shared.source_changed:
+                    if shared.source_changed or shared.track_classes_changed:
                         break
 
                 frame = result.orig_img
@@ -1486,6 +1717,13 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
 
                 _frames_received += 1
                 fh, fw = frame.shape[:2]
+                if shared.frame_w != fw or shared.frame_h != fh:
+                    with shared.lock:
+                        shared.frame_w = fw
+                        shared.frame_h = fh
+                _blur_gray = cv2.cvtColor(cv2.resize(frame, (160, 90)), cv2.COLOR_BGR2GRAY)
+                _blur_score = float(cv2.Laplacian(_blur_gray, cv2.CV_64F).var())
+                blur_ema = blur_ema * 0.9 + _blur_score * 0.1 if blur_ema > 0 else _blur_score
                 with shared.lock:
                     _hm_cam_id = shared.active_preset_id or "default"
                 if _hm_cam_id != _last_hotspot_cam:
@@ -1522,7 +1760,23 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                         )
                 prev_frame_mono = frame_ts
 
+                _v_ids_loop = [c for c in count_class_ids if c != person_class_id]
+                with shared.lock:
+                    _allowed_sf = set(shared.yolo_count_class_ids)
+                    _active_sf = {c for c in shared.track_active_class_ids if c in _allowed_sf}
+                _tp_sf = person_class_id in _active_sf
+                _tv_sf = any(c in _active_sf for c in _v_ids_loop)
+                _vehicles_only_mode = (not _tp_sf) and _tv_sf and len(_v_ids_loop) > 0
+                # Com so veiculos no YOLO, o filtro de forma para "nao-pessoa" cortava muitas caixas reais
+                _skip_nonperson_shape = _vehicles_only_mode
+                if (not _tp_sf) and _tv_sf and _v_ids_loop:
+                    _default_det_cls = int(_v_ids_loop[0])
+                else:
+                    _default_det_cls = int(person_class_id)
+
                 entry_boxes: list[tuple[int, tuple[float, float, float, float]]] = []
+                _bbox_h_samples: list[float] = []
+                _person_pos_norm: dict[int, tuple[float, float]] = {}
 
                 foot_points: list[tuple[float, float]] = []
                 current_present_ids: set[int] = set()
@@ -1541,7 +1795,9 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                         c = int(c_raw)
                         box = (float(x_min), float(y_min), float(x_max), float(y_max))
                         if not args.no_shape_filter:
-                            if c == person_class_id:
+                            if _skip_nonperson_shape:
+                                pass
+                            elif c == person_class_id:
                                 if not bbox_looks_like_person(
                                     box,
                                     fw,
@@ -1577,11 +1833,34 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 ids_list: list[int] | None = None
                 xys_raw: list[tuple[float, float, float, float]] | None = None
                 cls_by_tid: dict[int, int] = {}
-                if result.boxes is not None and len(result.boxes) > 0 and result.boxes.id is not None:
-                    ids_list = [int(t) for t in result.boxes.id.int().tolist()]
-                    xys_raw = [tuple(map(float, t)) for t in result.boxes.xyxy.tolist()]
-                    clss_raw = [int(t) for t in result.boxes.cls.int().tolist()]
-                    if not args.no_shape_filter:
+                conf_by_tid: dict[int, float] = {}
+                if result.boxes is not None and len(result.boxes) > 0:
+                    _boxes = result.boxes
+                    xys_raw = [tuple(map(float, t)) for t in _boxes.xyxy.tolist()]
+                    clss_raw = [int(t) for t in _boxes.cls.int().tolist()]
+                    confs_raw = (
+                        _boxes.conf.tolist()
+                        if _boxes.conf is not None
+                        else [1.0] * len(xys_raw)
+                    )
+                    if (
+                        getattr(_boxes, "is_track", False)
+                        and _boxes.id is not None
+                        and len(_boxes.id) == len(xys_raw)
+                    ):
+                        ids_list = [int(t) for t in _boxes.id.int().tolist()]
+                    else:
+                        ids_list = fallback_track_ids_from_detections(xys_raw, clss_raw)
+                        if not _synthetic_id_warned:
+                            print(
+                                "[web] AVISO: deteccoes sem IDs ByteTrack validos; "
+                                "overlay usa IDs por posicao (menos estavel que o tracker)."
+                            )
+                            _synthetic_id_warned = True
+                    if len(ids_list) != len(xys_raw):
+                        ids_list = fallback_track_ids_from_detections(xys_raw, clss_raw)
+                    conf_by_tid = {int(tid): float(c) for tid, c in zip(ids_list, confs_raw)}
+                    if not args.no_shape_filter and not _skip_nonperson_shape:
                         ids_list, xys_raw, clss_raw = filter_boxes_by_shape_multi(
                             ids_list,
                             xys_raw,
@@ -1596,6 +1875,8 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                             args.min_person_height_px,
                         )
                     cls_by_tid = {int(tid): int(c) for tid, c in zip(ids_list, clss_raw)}
+                    for _tid, _c in cls_by_tid.items():
+                        last_yolo_cls_by_tid[int(_tid)] = int(_c)
                     dt_by_tid: dict[int, float] = {}
                     for tid in ids_list:
                         it = int(tid)
@@ -1611,49 +1892,107 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                         if inside_for_presence:
                             current_present_ids.add(track_id)
                             zone_entered_at_by_id.setdefault(track_id, frame_ts)
-                        grid_live.update_track(int(track_id), foot_x / fw, foot_y / fh, frame_ts)
+                        # Track confidence update
+                        _det_conf = conf_by_tid.get(track_id, 1.0)
+                        track_conf_tracker.update(
+                            track_id, _det_conf,
+                            (x_min, y_min, x_max, y_max), frame_ts,
+                        )
+                        _track_reliable = track_conf_tracker.is_reliable(track_id)
+                        _cx_n, _cy_n = foot_x / fw, foot_y / fh
+                        grid_live.update_track(int(track_id), _cx_n, _cy_n, frame_ts)
+                        flow_grid.update_track(int(track_id), _cx_n, _cy_n)
                         dwell_grid.update_track(
                             int(track_id),
                             foot_x / float(fw),
                             foot_y / float(fh),
                             dt_by_tid.get(int(track_id), 0.0),
                         )
-                        _is_veh = cls_by_tid.get(track_id, person_class_id) != person_class_id
+                        _is_veh = cls_by_tid.get(track_id, _default_det_cls) != person_class_id
+                        _last_norm_pos_by_id[int(track_id)] = (_cx_n, _cy_n)
+                        if not _is_veh:
+                            _bbox_h_samples.append(y_max - y_min)
+                            if inside_for_presence:
+                                _person_pos_norm[int(track_id)] = (_cx_n, _cy_n)
+                                person_tracker.get_or_assign(int(track_id), _cx_n, _cy_n, frame_ts)
+                                person_tracker.update_dwell(
+                                    int(track_id), dt_by_tid.get(int(track_id), 0.0)
+                                )
                         if count_mode == "polygon" and len(poly_pts) >= 3:
                             inside = inside_for_presence
                             with shared.lock:
                                 prev_b = prev_inside_by_id.get(track_id)
                                 if prev_b is not None and not prev_b and inside:
-                                    shared.counter.entries += 1
-                                    if _is_veh:
-                                        shared.counter.vehicle_entries += 1
-                                    _bump_hourly(shared, "entry")
-                                    entry_boxes.append(
-                                        (track_id, (x_min, y_min, x_max, y_max))
-                                    )
+                                    if _track_reliable:
+                                        shared.counter.entries += 1
+                                        if _is_veh:
+                                            shared.counter.vehicle_entries += 1
+                                        _bump_hourly(shared, "entry")
+                                        entry_boxes.append(
+                                            (track_id, (x_min, y_min, x_max, y_max))
+                                        )
+                                        audit_log.log(
+                                            ts=frame_ts, session_id=shared.session_id,
+                                            event_type="entry", track_id=int(track_id),
+                                            confidence=track_conf_tracker.score_of(track_id),
+                                            x_norm=_cx_n, y_norm=_cy_n,
+                                            metadata={"mode": "polygon"},
+                                        )
+                                    else:
+                                        shared.suppressed_events += 1
                                 elif prev_b is not None and prev_b and not inside:
-                                    shared.counter.exits += 1
-                                    if _is_veh:
-                                        shared.counter.vehicle_exits += 1
-                                    _bump_hourly(shared, "exit")
+                                    if _track_reliable:
+                                        shared.counter.exits += 1
+                                        if _is_veh:
+                                            shared.counter.vehicle_exits += 1
+                                        _bump_hourly(shared, "exit")
+                                        audit_log.log(
+                                            ts=frame_ts, session_id=shared.session_id,
+                                            event_type="exit", track_id=int(track_id),
+                                            confidence=track_conf_tracker.score_of(track_id),
+                                            x_norm=_cx_n, y_norm=_cy_n,
+                                            metadata={"mode": "polygon"},
+                                        )
+                                    else:
+                                        shared.suppressed_events += 1
                             prev_inside_by_id[track_id] = inside
                         elif count_mode == "line":
                             side = side_of_line(foot_x, foot_y, x1, y1, x2, y2)
                             with shared.lock:
                                 prev = last_side_by_id.get(track_id)
                                 if prev is not None and prev < 0 <= side:
-                                    shared.counter.entries += 1
-                                    if _is_veh:
-                                        shared.counter.vehicle_entries += 1
-                                    _bump_hourly(shared, "entry")
-                                    entry_boxes.append(
-                                        (track_id, (x_min, y_min, x_max, y_max))
-                                    )
+                                    if _track_reliable:
+                                        shared.counter.entries += 1
+                                        if _is_veh:
+                                            shared.counter.vehicle_entries += 1
+                                        _bump_hourly(shared, "entry")
+                                        entry_boxes.append(
+                                            (track_id, (x_min, y_min, x_max, y_max))
+                                        )
+                                        audit_log.log(
+                                            ts=frame_ts, session_id=shared.session_id,
+                                            event_type="entry", track_id=int(track_id),
+                                            confidence=track_conf_tracker.score_of(track_id),
+                                            x_norm=_cx_n, y_norm=_cy_n,
+                                            metadata={"mode": "line"},
+                                        )
+                                    else:
+                                        shared.suppressed_events += 1
                                 elif prev is not None and prev > 0 >= side:
-                                    shared.counter.exits += 1
-                                    if _is_veh:
-                                        shared.counter.vehicle_exits += 1
-                                    _bump_hourly(shared, "exit")
+                                    if _track_reliable:
+                                        shared.counter.exits += 1
+                                        if _is_veh:
+                                            shared.counter.vehicle_exits += 1
+                                        _bump_hourly(shared, "exit")
+                                        audit_log.log(
+                                            ts=frame_ts, session_id=shared.session_id,
+                                            event_type="exit", track_id=int(track_id),
+                                            confidence=track_conf_tracker.score_of(track_id),
+                                            x_norm=_cx_n, y_norm=_cy_n,
+                                            metadata={"mode": "line"},
+                                        )
+                                    else:
+                                        shared.suppressed_events += 1
                             last_side_by_id[track_id] = side
 
                     if (
@@ -1695,10 +2034,12 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                             int(round((rx1 + rx2) / 2.0)),
                             int(round(float(ry2))),
                         )
+                flow_grid.decay()
                 for tid in list(last_side_by_id.keys()):
                     if tid not in active_ids:
                         del last_side_by_id[tid]
                         grid_live.evict_track(tid)
+                        flow_grid.evict_track(tid)
                 for tid in list(prev_inside_by_id.keys()):
                     if tid not in active_ids:
                         del prev_inside_by_id[tid]
@@ -1711,15 +2052,22 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 for tid in list(stationary_since_by_id.keys()):
                     if tid not in current_present_ids:
                         del stationary_since_by_id[tid]
+                person_tracker.expire_ghosts(frame_ts)
                 for tid in list(last_ts_by_id.keys()):
                     if tid not in active_ids:
                         last_ts_by_id.pop(tid, None)
+                        last_yolo_cls_by_tid.pop(tid, None)
                         zone_tracker.forget_track(tid)
+                        track_conf_tracker.evict(tid)
+                        _lp = _last_norm_pos_by_id.pop(tid, None)
+                        if _lp is not None:
+                            person_tracker.on_track_lost(tid, _lp[0], _lp[1], frame_ts)
 
                 with shared.lock:
                     show_trail_ui = shared.show_trail_overlay
                     show_heading_ui = shared.show_heading_overlay
                     show_roi_ui = shared.show_roi_overlay
+                    _active_classes = frozenset(shared.track_active_class_ids)
 
                 for track_id, (xa, ya, xb, yb), stale in draw_items:
                     if track_id in raw_foot_by_id:
@@ -1728,9 +2076,17 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                         fcx = int(round((xa + xb) / 2.0))
                         fcy = int(yb)
 
-                    det_cls = cls_by_tid.get(track_id, person_class_id)
+                    _cls_prev = last_yolo_cls_by_tid.get(track_id)
+                    if _cls_prev is None:
+                        _cls_prev = cls_by_tid.get(track_id, _default_det_cls)
+                    det_cls = int(_cls_prev)
                     cls_tag = short_class_tag(names, det_cls) if isinstance(names, dict) else "?"
-                    is_person = (det_cls == person_class_id)
+                    is_person = det_cls == person_class_id
+                    _vehicle_alert_eligible = (
+                        (not is_person)
+                        and det_cls in _active_classes
+                        and det_cls in count_class_ids
+                    )
 
                     # ── Estado de movimento (usa frame anterior) ──────────
                     is_loiter = track_id in _loitering_ids
@@ -1752,7 +2108,12 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                             else raw_sx
                         )
 
-                    if is_person and cap_detector is not None and cap_detector.enabled:
+                    if (
+                        is_person
+                        and person_class_id in _active_classes
+                        and cap_detector is not None
+                        and cap_detector.enabled
+                    ):
                         cap_res = cap_detector.classify(
                             frame,
                             (float(xa), float(ya), float(xb), float(yb)),
@@ -1765,7 +2126,11 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                                 label=f"Pessoa com bone (#{track_id}, {cap_res.prob*100:.0f}%)",
                                 detail={"prob": cap_res.prob},
                             )
-                    elif (not is_person) and shared.alert_car_color_clf is not None and shared.alert_car_color_clf.enabled:
+                    elif (
+                        _vehicle_alert_eligible
+                        and shared.alert_car_color_clf is not None
+                        and shared.alert_car_color_clf.enabled
+                    ):
                         col_res = shared.alert_car_color_clf.classify(
                             frame,
                             (float(xa), float(ya), float(xb), float(yb)),
@@ -1911,8 +2276,9 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                     sex_smoother.forget_stale(active_ids)
                 if cap_detector is not None:
                     cap_detector.forget_stale_tracks(active_ids)
-                if car_color_clf is not None:
-                    car_color_clf.forget_stale_tracks(active_ids)
+                _car_clf_live = shared.alert_car_color_clf
+                if _car_clf_live is not None:
+                    _car_clf_live.forget_stale_tracks(active_ids)
                 alert_mgr.forget_stale_tracks(active_ids)
 
                 moving_now = 0
@@ -1920,23 +2286,25 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 loitering_now = 0
                 dwell_values: list[float] = []
                 move_speed_samples: list[float] = []
+                _speed_by_id: dict[int, float | None] = {}
                 trail_eval_max = max(2, min(trail_max, 12))
                 for tid in current_present_ids:
                     entered_at = zone_entered_at_by_id.get(tid, frame_ts)
                     dwell_values.append(max(0.0, frame_ts - entered_at))
                     dq = foot_trail_by_id.get(tid)
                     speed = estimate_trail_speed(list(dq), max_points=trail_eval_max) if dq is not None else None
+                    _speed_by_id[tid] = speed
                     is_stationary = (
                         dq is not None
                         and len(dq) >= max(2, args.stationary_min_points)
                         and speed is not None
-                        and speed <= args.stationary_max_speed
+                        and speed <= shared.thr_stationary_max_speed
                     )
                     if is_stationary:
                         stationary_now += 1
                         _stationary_ids.add(tid)
                         stationary_since_by_id.setdefault(tid, frame_ts)
-                        if frame_ts - stationary_since_by_id[tid] >= args.loitering_seconds:
+                        if frame_ts - stationary_since_by_id[tid] >= shared.thr_loitering_seconds:
                             loitering_now += 1
                             _loitering_ids.add(tid)
                     else:
@@ -1952,6 +2320,20 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                     float(sum(move_speed_samples) / len(move_speed_samples)) if move_speed_samples else 0.0
                 )
                 avg_move_px_sec = avg_move_px_frame * ema_infer_fps if ema_infer_fps > 0 else 0.0
+                _established = sum(1 for d in dwell_values if d > 1.0)
+                _track_stability = _established / max(1, len(dwell_values)) if dwell_values else 1.0
+                avg_bbox_h = float(sum(_bbox_h_samples) / len(_bbox_h_samples)) if _bbox_h_samples else 0.0
+                cam_conf, cam_conf_reasons = _compute_cam_confidence(
+                    ema_infer_fps, blur_ema, avg_bbox_h, _track_stability, occupancy_now,
+                    blur_thresh_low=shared.thr_blur_low,
+                    blur_thresh_critical=shared.thr_blur_critical,
+                    bbox_small_thresh_px=shared.thr_bbox_small_px,
+                )
+                _q = queue_detector.detect(
+                    _person_pos_norm, _speed_by_id, zone_entered_at_by_id,
+                    frame_ts, saturation_threshold=shared.thr_queue_saturation,
+                )
+                _flow_vec_counter += 1
                 with shared.lock:
                     text = f"in={shared.counter.entries} out={shared.counter.exits} total={shared.counter.total}"
                     live_text = (
@@ -1967,6 +2349,38 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                     shared.avg_move_speed_px_per_frame = avg_move_px_frame
                     shared.avg_move_speed_px_per_sec = avg_move_px_sec
                     shared.infer_fps_ema = ema_infer_fps
+                    shared.cam_confidence = cam_conf
+                    shared.cam_confidence_reasons = cam_conf_reasons
+                    if _q is not None:
+                        shared.queue_size = _q.size
+                        shared.queue_avg_wait_s = _q.avg_wait_s
+                        shared.queue_saturated = _q.saturated
+                        shared.queue_linearity = _q.linearity
+                    else:
+                        shared.queue_size = 0
+                        shared.queue_avg_wait_s = 0.0
+                        shared.queue_saturated = False
+                        shared.queue_linearity = 0.0
+                    if _flow_vec_counter >= 30:
+                        _flow_vec_counter = 0
+                        shared.flow_vectors_payload = flow_grid.to_payload()
+                    _rs = person_tracker.session_stats(current_present_ids)
+                    shared.reid_unique_persons = _rs["unique_persons"]
+                    shared.reid_active_persons = _rs["active_persons"]
+                    shared.reid_revisited = _rs["revisited_persons"]
+                    shared.reid_avg_dwell_s = _rs["avg_total_dwell_s"]
+                    shared.low_conf_tracks = track_conf_tracker.low_confidence_count()
+                    _drift = drift_detector.update(frame)
+                    shared.cam_drift_level = _drift.level
+                    shared.cam_drift_score = _drift.score
+                    shared.cam_drift_reason = _drift.reason
+                    shared.cam_drift_baseline_ready = _drift.baseline_ready
+                    if _drift.level != "ok" and _drift.score > 0.5:
+                        audit_log.log(
+                            ts=frame_ts, session_id=shared.session_id,
+                            event_type="drift_detected",
+                            metadata={"level": _drift.level, "reason": _drift.reason, "score": round(_drift.score, 3)},
+                        )
                     _hm_sess_id = shared.session_id
                     _grid_live_counter += 1
                     _hotspot_payload_counter += 1
@@ -2065,7 +2479,24 @@ def inference_loop(args: argparse.Namespace, shared: SharedState, stop_event: th
                 with shared.lock:
                     _src_changed_now = shared.source_changed
                 if not _src_changed_now and _frames_received == 0:
-                    _err_msg = f"Falha ao abrir fonte: {raw_src!r}. Verifique a URL/câmera e tente novamente."
+                    if is_skylinewebcams_webcam_page(str(raw_src)):
+                        _err_msg = (
+                            "Falha ao ler o stream HLS (Skyline): a pagina .html foi resolvida para m3u8, "
+                            "mas nao chegou nenhum frame (token expirou, rede lenta ou FFmpeg bloqueado). "
+                            "Tente: copiar o URL .m3u8 atual das DevTools (Rede); definir YOLO_STREAM_BUFFER=1; "
+                            "ou aguardar — nova tentativa em 5 s. Pagina: "
+                            f"{raw_src!r}"
+                        )
+                    elif is_skyline_hls_url(str(raw_src)):
+                        _err_msg = (
+                            "Falha ao ler frames HLS Skyline (manifesto pode estar OK mas FFmpeg nao leu segmentos). "
+                            "Token ?a= expira; substitua o URL no .env/preset, ou use pagina .html. "
+                            f"Tente YOLO_STREAM_BUFFER=1. Fonte: {raw_src!r}"
+                        )
+                    else:
+                        _err_msg = (
+                            f"Falha ao abrir fonte: {raw_src!r}. Verifique a URL/câmera e tente novamente."
+                        )
                     print(f"[web] {_err_msg}")
                     with shared.lock:
                         shared.last_error = _err_msg
@@ -2279,10 +2710,41 @@ def build_stats_payload(shared: SharedState) -> dict:
             "hourly_exits": list(shared.hourly_exits),
             "peak_hour": peak_h,
             "peak_flow": peak_v,
+            "cam_confidence": shared.cam_confidence,
+            "cam_confidence_reasons": list(shared.cam_confidence_reasons),
+            "queue_size": shared.queue_size,
+            "queue_avg_wait_s": shared.queue_avg_wait_s,
+            "queue_saturated": shared.queue_saturated,
+            "reid_unique_persons": shared.reid_unique_persons,
+            "reid_active_persons": shared.reid_active_persons,
+            "reid_revisited": shared.reid_revisited,
+            "reid_avg_dwell_s": shared.reid_avg_dwell_s,
+            "active_env_profile": shared.active_env_profile,
+            "low_conf_tracks": shared.low_conf_tracks,
+            "suppressed_events": shared.suppressed_events,
+            "cam_drift_level": shared.cam_drift_level,
+            "cam_drift_score": shared.cam_drift_score,
+            "cam_drift_reason": shared.cam_drift_reason,
+            "cam_drift_baseline_ready": shared.cam_drift_baseline_ready,
+            "vehicle_tracking_available": len(shared.yolo_count_class_ids) > 1,
+            "yolo_count_class_ids": list(shared.yolo_count_class_ids),
+            "track_active_class_ids": list(shared.track_active_class_ids),
+            "yolo_class_labels": {
+                str(k): shared.yolo_class_names.get(k, f"class_{k}")
+                for k in shared.yolo_count_class_ids
+            },
+            "track_people": shared.track_person_enabled,
+            "track_vehicles": (
+                shared.track_vehicle_enabled if len(shared.yolo_count_class_ids) > 1 else False
+            ),
         }
 
 
-def create_app(shared: SharedState) -> Flask:
+def create_app(
+    shared: SharedState,
+    audit_log: AuditLog,
+    drift_detector: CameraDriftDetector,
+) -> Flask:
     app = Flask(__name__)
     CORS(app, resources={r"/api/*": {"origins": "*"}, r"/video_feed": {"origins": "*"}})
     env_file = Path(__file__).resolve().parent.parent / ".env"
@@ -2906,6 +3368,108 @@ def create_app(shared: SharedState) -> Flask:
     def stats() -> Response:
         return jsonify(build_stats_payload(shared))
 
+    @app.post("/api/tracking/mode")
+    def tracking_mode_post() -> Response:
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return jsonify({"error": "JSON invalido"}), 400
+
+        if "class_ids" in body:
+            raw = body.get("class_ids")
+            if not isinstance(raw, list) or not raw:
+                return jsonify({"error": "class_ids deve ser uma lista nao vazia"}), 400
+            try:
+                want = [int(x) for x in raw]
+            except (TypeError, ValueError):
+                return jsonify({"error": "class_ids deve conter inteiros"}), 400
+            with shared.lock:
+                allowed = set(shared.yolo_count_class_ids)
+                if not all(c in allowed for c in want):
+                    return jsonify(
+                        {"error": "class_ids contem ID nao permitido (use classes do COUNT_CLASS_IDS)"}
+                    ), 400
+                shared.track_active_class_ids = sorted(set(want))
+                _sync_track_flags_from_active(
+                    shared, list(shared.yolo_count_class_ids), int(shared.yolo_person_class_id)
+                )
+                shared.track_classes_changed = True
+                tp = shared.track_person_enabled
+                tv = shared.track_vehicle_enabled
+                active = list(shared.track_active_class_ids)
+        else:
+            legacy_only_v = "track_vehicles" in body and "track_people" not in body
+            has_field = legacy_only_v or "track_people" in body or "track_vehicles" in body
+            if not has_field:
+                return jsonify({"error": "Envie class_ids ou track_people e/ou track_vehicles"}), 400
+            with shared.lock:
+                multi = len(shared.yolo_count_class_ids) > 1
+                count_class_ids = list(shared.yolo_count_class_ids)
+                person_class_id = int(shared.yolo_person_class_id)
+                if legacy_only_v:
+                    want_v = bool(body.get("track_vehicles"))
+                    shared.track_person_enabled = True
+                    shared.track_vehicle_enabled = want_v if multi else False
+                else:
+                    if "track_people" in body:
+                        shared.track_person_enabled = bool(body.get("track_people"))
+                    if "track_vehicles" in body:
+                        if not multi and bool(body.get("track_vehicles")):
+                            return jsonify(
+                                {
+                                    "error": (
+                                        "O modelo so tem uma classe YOLO; nao ha veiculos para rastrear."
+                                    ),
+                                    "vehicle_tracking_available": False,
+                                }
+                            ), 400
+                        shared.track_vehicle_enabled = bool(body.get("track_vehicles")) if multi else False
+                _rebuild_active_from_flags(shared, count_class_ids, person_class_id)
+                if not shared.track_person_enabled and not shared.track_vehicle_enabled:
+                    return jsonify(
+                        {
+                            "error": "Ative pelo menos uma classe (pessoas e/ou veiculos).",
+                        }
+                    ), 400
+                shared.track_classes_changed = True
+                tp = shared.track_person_enabled
+                tv = shared.track_vehicle_enabled
+                active = list(shared.track_active_class_ids)
+        _persist_config_event(
+            shared,
+            "tracking_mode",
+            {"track_people": tp, "track_vehicles": tv, "track_active_class_ids": active},
+        )
+        return jsonify(
+            {
+                "ok": True,
+                "track_people": tp,
+                "track_vehicles": tv,
+                "track_active_class_ids": active,
+            }
+        )
+
+    @app.get("/api/insights/flow")
+    def flow_insights() -> Response:
+        from datetime import datetime as _dt
+
+        from flow_insights import compute_flow_insights_payload
+
+        with shared.lock:
+            payload = compute_flow_insights_payload(
+                hourly_entries=list(shared.hourly_entries),
+                hourly_exits=list(shared.hourly_exits),
+                entries=shared.counter.entries,
+                exits=shared.counter.exits,
+                occupancy_now=shared.occupancy_now,
+                queue_size=shared.queue_size,
+                queue_saturated=shared.queue_saturated,
+                queue_avg_wait_s=shared.queue_avg_wait_s,
+                loitering_now=shared.loitering_now,
+                started_at=shared.started_at,
+                now=_dt.now(),
+            )
+        return jsonify(payload)
+
     @app.get("/api/heatmap/live")
     def heatmap_live() -> Response:
         with shared.lock:
@@ -2944,6 +3508,181 @@ def create_app(shared: SharedState) -> Flask:
         payload["from_ts"] = int(from_ts)
         payload["to_ts"] = int(now)
         return jsonify(payload)
+
+    @app.get("/api/heatmap/diff")
+    def heatmap_diff() -> Response:
+        """Compara dois períodos.
+        ?period=1h&baseline=today  (padrão)
+        Suporta: period=[session|1h|today], baseline=[1h|today]
+        """
+        from datetime import datetime as _dt
+        period   = request.args.get("period",   "1h")
+        baseline = request.args.get("baseline", "today")
+        now = time.time()
+        day_start = float(_dt.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+
+        def _resolve_from(label: str) -> float:
+            if label == "1h":
+                return now - 3600
+            if label == "today":
+                return day_start
+            if label == "session":
+                with shared.lock:
+                    return shared.started_at.timestamp()
+            return now - 3600
+
+        period_from   = _resolve_from(period)
+        baseline_from = _resolve_from(baseline)
+
+        with shared.lock:
+            cam_id = shared.active_preset_id or "default"
+
+        payload = heatmap_store_api.query_diff(
+            site_id=cam_cal.site_id(),
+            camera_id=cam_id,
+            period_from=period_from,
+            period_to=now,
+            baseline_from=baseline_from,
+            baseline_to=now,
+        )
+        payload["period_label"]   = period
+        payload["baseline_label"] = baseline
+        return jsonify(payload)
+
+    @app.get("/api/heatmap/replay")
+    def heatmap_replay() -> Response:
+        """Retorna slots individuais para animação/replay.
+        ?period=today  (padrão) | session | 1h
+        ?max_slots=48
+        """
+        from datetime import datetime as _dt
+        period    = request.args.get("period", "today")
+        max_slots = min(96, max(1, int(request.args.get("max_slots", "48"))))
+        now = time.time()
+        day_start = float(_dt.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+
+        if period == "today":
+            from_ts = day_start
+        elif period == "1h":
+            from_ts = now - 3600
+        else:  # session
+            with shared.lock:
+                from_ts = shared.started_at.timestamp()
+
+        with shared.lock:
+            cam_id = shared.active_preset_id or "default"
+
+        raw_slots = heatmap_store_api.query_slots_raw(
+            site_id=cam_cal.site_id(),
+            camera_id=cam_id,
+            from_ts=from_ts,
+            to_ts=now,
+            max_slots=max_slots,
+        )
+
+        if not raw_slots:
+            return jsonify({"grid_w": 32, "grid_h": 18, "slots": []})
+
+        gw = raw_slots[0][1].shape[1]
+        gh = raw_slots[0][1].shape[0]
+        slots_out = []
+        for slot_ts, arr in raw_slots:
+            max_v = float(arr.max())
+            cells = (arr / max_v).tolist() if max_v > 1e-9 else []
+            label = _dt.fromtimestamp(slot_ts).strftime("%H:%M")
+            slots_out.append({
+                "ts": slot_ts,
+                "label": label,
+                "cells": cells,
+                "total_events": int(arr.sum()),
+            })
+
+        return jsonify({"grid_w": gw, "grid_h": gh, "slots": slots_out})
+
+    @app.get("/api/flow/vectors")
+    def flow_vectors() -> Response:
+        with shared.lock:
+            payload = shared.flow_vectors_payload
+        return jsonify(payload)
+
+    # ── Environment profiles ─────────────────────────────────────────────────
+
+    @app.get("/api/profiles")
+    def get_profiles() -> Response:
+        with shared.lock:
+            active = shared.active_env_profile
+        profiles = _list_env_profiles()
+        return jsonify({"profiles": profiles, "active": active})
+
+    @app.post("/api/profiles/<profile_id>/apply")
+    def apply_profile(profile_id: str) -> Response:
+        profile = get_profile(profile_id)
+        if profile is None:
+            return jsonify({"error": f"Profile '{profile_id}' not found"}), 404
+        with shared.lock:
+            shared.thr_loitering_seconds = profile.loitering_seconds
+            shared.loitering_threshold_sec = profile.loitering_seconds
+            shared.thr_stationary_max_speed = profile.stationary_max_speed
+            shared.thr_queue_saturation = profile.queue_saturation
+            shared.thr_density_alert = profile.density_alert_threshold
+            shared.thr_blur_low = profile.blur_thresh_low
+            shared.thr_blur_critical = profile.blur_thresh_critical
+            shared.thr_bbox_small_px = profile.bbox_small_thresh_px
+            shared.thr_reid_radius_norm = profile.reid_radius_norm
+            shared.thr_reid_timeout_s = profile.reid_timeout_s
+            shared.active_env_profile = profile_id
+        _persist_config_event(shared, "profile_applied", {"profile_id": profile_id})
+        return jsonify({"ok": True, "applied": profile_id, "profile": profile.to_dict()})
+
+    @app.post("/api/profiles/reset")
+    def reset_profile() -> Response:
+        with shared.lock:
+            shared.thr_loitering_seconds = 10.0
+            shared.loitering_threshold_sec = 10.0
+            shared.thr_stationary_max_speed = 2.2
+            shared.thr_queue_saturation = 8
+            shared.thr_density_alert = 0
+            shared.thr_blur_low = 60.0
+            shared.thr_blur_critical = 20.0
+            shared.thr_bbox_small_px = 40.0
+            shared.thr_reid_radius_norm = 0.18
+            shared.thr_reid_timeout_s = 20.0
+            shared.active_env_profile = ""
+        return jsonify({"ok": True, "active": ""})
+
+    # ── Assisted configuration ────────────────────────────────────────────────
+
+    @app.get("/api/suggest/line")
+    def suggest_line_endpoint() -> Response:
+        with shared.lock:
+            vectors_payload = shared.flow_vectors_payload
+            fw = shared.frame_w or 1920
+            fh = shared.frame_h or 1080
+        result = _suggest_line(vectors_payload, fw, fh)
+        if result is None:
+            return jsonify({"available": False, "reason": "Dados de fluxo insuficientes"}), 200
+        return jsonify({
+            "available": True,
+            "line": {
+                "x1": result.x1, "y1": result.y1,
+                "x2": result.x2, "y2": result.y2,
+            },
+            "confidence": result.confidence,
+            "dominant_angle_deg": result.dominant_angle_deg,
+        })
+
+    @app.get("/api/suggest/zones")
+    def suggest_zones_endpoint() -> Response:
+        max_zones = int(request.args.get("max_zones", 4))
+        with shared.lock:
+            heatmap_payload = shared.heatmap_live_payload
+        zones = _suggest_zones(heatmap_payload, max_zones=min(max_zones, 6))
+        return jsonify({
+            "zones": [
+                {"label": z.label, "x": z.x, "y": z.y, "w": z.w, "h": z.h, "density": z.density}
+                for z in zones
+            ]
+        })
 
     @app.get("/api/heatmap/grid_version")
     def heatmap_grid_version() -> Response:
@@ -3204,6 +3943,42 @@ def create_app(shared: SharedState) -> Flask:
             "server_beep": mgr.server_beep,
         })
 
+    # ── Audit log ────────────────────────────────────────────────────────────
+
+    @app.get("/api/audit-log")
+    def audit_log_endpoint() -> Response:
+        with shared.lock:
+            session_id = shared.session_id
+        event_type = request.args.get("type") or None
+        limit = min(int(request.args.get("limit", 200)), 1000)
+        since_ts = float(request.args.get("since", 0)) or None
+        all_sessions = request.args.get("all_sessions", "0") == "1"
+        rows = audit_log.query(
+            session_id=None if all_sessions else session_id,
+            event_type=event_type,
+            since_ts=since_ts,
+            limit=limit,
+        )
+        summary = audit_log.session_summary(session_id)
+        return jsonify({"events": rows, "summary": summary, "session_id": session_id})
+
+    # ── Camera drift ─────────────────────────────────────────────────────────
+
+    @app.get("/api/camera/drift")
+    def camera_drift_status() -> Response:
+        with shared.lock:
+            return jsonify({
+                "level": shared.cam_drift_level,
+                "score": shared.cam_drift_score,
+                "reason": shared.cam_drift_reason,
+                "baseline_ready": shared.cam_drift_baseline_ready,
+            })
+
+    @app.post("/api/camera/drift/reset")
+    def camera_drift_reset() -> Response:
+        drift_detector.reset_baseline()
+        return jsonify({"ok": True})
+
     @app.post("/api/export")
     def export_csv() -> Response:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -3324,9 +4099,9 @@ def main() -> None:
     )
     with shared.lock:
         shared.heatmap_available = not args.no_heatmap
-        shared.show_heatmap_overlay = True if not args.no_heatmap else False
+        shared.show_heatmap_overlay = False
         shared.sex_overlay_available = False
-        shared.show_sex_overlay = True
+        shared.show_sex_overlay = False
     presets = _load_source_presets_from_file()
     if not presets:
         presets = _load_source_presets_from_env()
@@ -3343,7 +4118,15 @@ def main() -> None:
         print(f"[web] Calibracao por camera (SQL): {exc}", flush=True)
     stop_event = threading.Event()
 
-    t = threading.Thread(target=inference_loop, args=(args, shared, stop_event), daemon=True)
+    audit_log = AuditLog()
+    drift_detector = CameraDriftDetector()
+    audit_log.log(ts=0.0, session_id=shared.session_id, event_type="session_start")
+
+    t = threading.Thread(
+        target=inference_loop,
+        args=(args, shared, stop_event, audit_log, drift_detector),
+        daemon=True,
+    )
     t.start()
 
     start_stats_emitter_thread(
@@ -3351,7 +4134,7 @@ def main() -> None:
         get_stats=lambda: build_stats_payload(shared),
     )
 
-    app = create_app(shared)
+    app = create_app(shared, audit_log, drift_detector)
     try:
         app.run(
             host=args.host,
