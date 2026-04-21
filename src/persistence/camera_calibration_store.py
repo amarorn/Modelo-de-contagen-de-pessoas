@@ -18,6 +18,76 @@ def site_id() -> str:
     return (s or "default")[:64]
 
 
+def _ring_from_dict_list(raw_ring: Any) -> list[tuple[int, int]]:
+    if not isinstance(raw_ring, list):
+        return []
+    out: list[tuple[int, int]] = []
+    for p in raw_ring:
+        if isinstance(p, dict) and "x" in p and "y" in p:
+            try:
+                out.append((int(p["x"]), int(p["y"])))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def _polygon_title_from_item(item: Any, fallback_index: int) -> str:
+    if isinstance(item, dict):
+        t = item.get("title") or item.get("name")
+        if isinstance(t, str) and t.strip():
+            return t.strip()[:64]
+    return f"Área {fallback_index + 1}"
+
+
+def parse_polygons_json(raw: Any) -> list[dict[str, Any]]:
+    """JSON em polygon_json: [{title, points:[{x,y},...]}, ...] ou legado [[...],...] ou [{x,y},...]."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(raw, list) or not raw:
+        return []
+    first = raw[0]
+    if isinstance(first, dict):
+        if "points" in first:
+            out: list[dict[str, Any]] = []
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                ring = _ring_from_dict_list(item.get("points"))
+                if len(ring) < 3:
+                    continue
+                title = _polygon_title_from_item(item, len(out))
+                out.append({"title": title, "points": ring})
+            return out
+        ring = _ring_from_dict_list(raw)
+        return [{"title": "Área 1", "points": ring}] if len(ring) >= 3 else []
+    out2: list[dict[str, Any]] = []
+    for item in raw:
+        ring = _ring_from_dict_list(item)
+        if len(ring) >= 3:
+            out2.append({"title": f"Área {len(out2) + 1}", "points": ring})
+    return out2
+
+
+def dump_polygons_json(polygons: list[dict[str, Any]]) -> str:
+    items: list[dict[str, Any]] = []
+    for i, e in enumerate(polygons):
+        if not isinstance(e, dict):
+            continue
+        pts = e.get("points") or []
+        if len(pts) < 3:
+            continue
+        title = _polygon_title_from_item(e, len(items))
+        items.append(
+            {"title": title, "points": [{"x": int(a), "y": int(b)} for a, b in pts]}
+        )
+    return json.dumps(items, ensure_ascii=False)
+
+
 def load(site_id_: str, preset_id: str) -> dict[str, Any] | None:
     if not preset_id:
         return None
@@ -39,21 +109,20 @@ def load(site_id_: str, preset_id: str) -> dict[str, Any] | None:
                 raw = json.loads(row.polygon_json or "[]")
             except json.JSONDecodeError:
                 raw = []
-            poly: list[tuple[int, int]] = []
-            if isinstance(raw, list):
-                for p in raw:
-                    if isinstance(p, dict) and "x" in p and "y" in p:
-                        poly.append((int(p["x"]), int(p["y"])))
+            polygons = parse_polygons_json(raw)
+            first_flat: list[tuple[int, int]] = (
+                list(polygons[0]["points"]) if polygons and isinstance(polygons[0], dict) else []
+            )
             mode = str(row.count_mode or "line").strip()
             if mode not in ("line", "polygon"):
                 mode = "line"
-            if mode == "polygon" and len(poly) < 3:
+            if mode == "polygon" and not polygons:
                 mode = "line"
-                poly = []
             return {
                 "count_mode": mode,
                 "line": (int(row.line_x1), int(row.line_y1), int(row.line_x2), int(row.line_y2)),
-                "polygon": poly,
+                "polygons": polygons,
+                "polygon": first_flat,
             }
     except Exception as exc:
         print(f"[camera_cal] load falhou preset={preset_id!r}: {exc}", flush=True)
@@ -66,7 +135,7 @@ def save(
     *,
     count_mode: str,
     line: tuple[int, int, int, int],
-    polygon: list[tuple[int, int]],
+    polygons: list[dict[str, Any]],
 ) -> None:
     if not preset_id:
         return
@@ -74,11 +143,15 @@ def save(
     if not pid:
         return
     mode = count_mode if count_mode in ("line", "polygon") else "line"
-    if mode == "polygon" and len(polygon) < 3:
+    entries = [
+        e
+        for e in polygons
+        if isinstance(e, dict) and len(e.get("points") or []) >= 3
+    ]
+    if mode == "polygon" and not entries:
         mode = "line"
-        polygon = []
     x1, y1, x2, y2 = (int(line[0]), int(line[1]), int(line[2]), int(line[3]))
-    poly_json = json.dumps([{"x": a, "y": b} for a, b in polygon], ensure_ascii=False)
+    poly_json = dump_polygons_json(entries) if entries else "[]"
     sid = site_id_[:64]
     try:
         fac = get_session_factory()

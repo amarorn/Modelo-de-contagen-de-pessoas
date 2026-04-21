@@ -30,6 +30,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 # Antes de cv2: FFmpeg/libav em streams HLS pode imprimir "non-existing SPS" (join a meio do GOP); nao e fatal.
 if os.environ.get("YOLO_WEB_VERBOSE", "").strip() != "1":
@@ -50,7 +51,11 @@ from stream_source_resolve import (
     probe_skyline_hls_url,
     resolve_stream_source,
 )
-from yolo_class_utils import resolve_yolo_classes_and_person_id, short_class_tag
+from yolo_class_utils import (
+    infer_model_nc,
+    resolve_yolo_classes_and_person_id,
+    short_class_tag,
+)
 from age_classifier_agg import AgeAggregateStats, OptionalAgeClassifier
 from alert_car_color import CarColorClassifier, parse_target_colors
 from alert_cap_detector import OptionalCapDetector
@@ -284,7 +289,8 @@ def _apply_default_calibration(shared: SharedState) -> None:
     with shared.lock:
         shared.count_mode = "line"
         shared.line_live = shared.line_default
-        shared.polygon_live = []
+        shared.polygons_live = []
+        shared.polygons_default = []
 
 
 def _load_calibration_for_preset(shared: SharedState, preset_id: str) -> None:
@@ -299,7 +305,18 @@ def _load_calibration_for_preset(shared: SharedState, preset_id: str) -> None:
     with shared.lock:
         shared.count_mode = data["count_mode"]
         shared.line_live = tuple(data["line"])
-        shared.polygon_live = list(data["polygon"])
+        raw_polys = data.get("polygons") or []
+        if isinstance(raw_polys, list) and raw_polys and isinstance(raw_polys[0], dict):
+            shared.polygons_live = copy_polygon_entries(raw_polys)
+        else:
+            shared.polygons_live = []
+        if not shared.polygons_live and data.get("polygon"):
+            legacy = list(data["polygon"])
+            if len(legacy) >= 3:
+                shared.polygons_live = [
+                    {"title": "Área 1", "points": [tuple(int(a), int(b)) for a, b in legacy]}
+                ]
+        shared.polygons_default = copy_polygon_entries(shared.polygons_live)
 
 
 def _save_calibration_for_preset(shared: SharedState, preset_id: str) -> None:
@@ -309,13 +326,13 @@ def _save_calibration_for_preset(shared: SharedState, preset_id: str) -> None:
     with shared.lock:
         mode = shared.count_mode
         line = shared.line_live
-        poly = list(shared.polygon_live)
+        polys = copy_polygon_entries(shared.polygons_live)
     cam_cal.save(
         cam_cal.site_id(),
         pid,
         count_mode=mode,
         line=tuple(int(x) for x in line),
-        polygon=poly,
+        polygons=polys,
     )
 
 
@@ -350,8 +367,8 @@ class SharedState:
         self.line_default = line_default
         self.line_live = line_default
         self.count_mode: str = "line"
-        self.polygon_default: list[tuple[int, int]] = []
-        self.polygon_live: list[tuple[int, int]] = []
+        self.polygons_default: list[dict[str, Any]] = []
+        self.polygons_live: list[dict[str, Any]] = []
         self.occupancy_now: int = 0
         self.moving_now: int = 0
         self.stationary_now: int = 0
@@ -400,6 +417,7 @@ class SharedState:
         self.yolo_count_class_ids: list[int] = []
         self.yolo_person_class_id: int = 0
         self.yolo_class_names: dict[int, str] = {}
+        self.model_nc: int = 0
         self.track_active_class_ids: list[int] = []
         self.track_person_enabled: bool = True
         self.track_vehicle_enabled: bool = False
@@ -1081,6 +1099,67 @@ def foot_inside_polygon(
     return float(v) >= 0.0
 
 
+def foot_inside_any_of_polygons(
+    fx: float, fy: float, polygons: list[list[tuple[int, int]]]
+) -> bool:
+    for pts in polygons:
+        if foot_inside_polygon(fx, fy, pts):
+            return True
+    return False
+
+
+def clamp_polygons_list(
+    polygons: list[list[tuple[int, int]]], fw: int, fh: int
+) -> list[list[tuple[int, int]]]:
+    out: list[list[tuple[int, int]]] = []
+    for ring in polygons:
+        if len(ring) < 3:
+            continue
+        out.append(clamp_polygon(list(ring), fw, fh))
+    return out
+
+
+def copy_polygon_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        pts = [(int(a), int(b)) for a, b in (e.get("points") or [])]
+        if len(pts) < 3:
+            continue
+        t = str(e.get("title") or "").strip() or f"Área {len(out) + 1}"
+        out.append({"title": t[:64], "points": pts})
+    return out
+
+
+def clamp_named_polygons(
+    entries: list[dict[str, Any]], fw: int, fh: int
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        pts = list(e.get("points") or ())
+        if len(pts) < 3:
+            continue
+        t = str(e.get("title") or "").strip() or f"Área {len(out) + 1}"
+        out.append({"title": t[:64], "points": clamp_polygon(list(pts), fw, fh)})
+    return out
+
+
+def polygon_entries_sig(entries: list[dict[str, Any]]) -> str:
+    ser: list[list[Any]] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        pts = e.get("points") or []
+        if len(pts) < 3:
+            continue
+        t = str(e.get("title") or "").strip() or "?"
+        ser.append([t, [[int(a), int(b)] for a, b in pts]])
+    return json.dumps(ser, separators=(",", ":"))
+
+
 def _compute_cam_confidence(
     fps: float,
     blur_ema: float,
@@ -1143,16 +1222,20 @@ def bbox_non_person_sane(
     fh: int,
     max_area_frac: float,
     min_h_px: int,
+    min_h_frac: float = 0.28,
 ) -> bool:
     """Heuristica leve para carro/outros: rejeita caixas minusculas ou que cobrem o ecra inteiro.
 
     `max_area_frac` deve ser alto para veiculos (ex. 0.5): carros em primeiro plano ocupam
     uma fraccao grande do frame; o mesmo limite usado para pessoas (ex. 0.14) descarta-nos.
+    `min_h_frac` (env YOLO_NONPERSON_MIN_H_FRAC): motas vistas de cima podem ter bbox baixa;
+    valor menor aceita mais (ex. 0.18).
     """
     x1, y1, x2, y2 = xyxy
     w = max(0.0, float(x2 - x1))
     h = max(0.0, float(y2 - y1))
-    if h < max(8.0, float(min_h_px) * 0.28):
+    _mf = max(0.08, min(0.45, float(min_h_frac)))
+    if h < max(5.0, float(min_h_px) * _mf):
         return False
     if w * h > max_area_frac * float(fw * fh):
         return False
@@ -1171,6 +1254,7 @@ def filter_boxes_by_shape_multi(
     max_person_area_frac: float,
     max_nonperson_area_frac: float,
     min_h_px: int,
+    nonperson_min_h_frac: float = 0.28,
 ) -> tuple[list[int], list[tuple[float, float, float, float]], list[int]]:
     out_ids: list[int] = []
     out_xy: list[tuple[float, float, float, float]] = []
@@ -1182,7 +1266,9 @@ def filter_boxes_by_shape_multi(
                 box, fw, fh, min_ar, max_ar, max_person_area_frac, min_h_px
             )
         else:
-            ok = bbox_non_person_sane(box, fw, fh, max_nonperson_area_frac, min_h_px)
+            ok = bbox_non_person_sane(
+                box, fw, fh, max_nonperson_area_frac, min_h_px, min_h_frac=nonperson_min_h_frac
+            )
         if ok:
             out_ids.append(tid)
             out_xy.append(box)
@@ -1404,8 +1490,12 @@ def inference_loop(
             and resolved_device != "mps"
             and torch.cuda.is_available()
         )
+        _nc_model = infer_model_nc(model)
+        with shared.lock:
+            shared.model_nc = int(_nc_model)
         print(
             f"[web] classes inferencia ids={count_class_ids} ({cls_label}) | "
+            f"model_nc={_nc_model} | "
             f"classe pessoa (sexo/idade) id={person_class_id} | "
             f"conf={args.conf} imgsz={args.imgsz} max_det={args.max_det} "
             f"augment={args.augment} agnostic_nms={args.agnostic_nms} | "
@@ -1415,10 +1505,12 @@ def inference_loop(
         with shared.lock:
             _ld = shared.line_live
             _mode = shared.count_mode
-            _np = len(shared.polygon_live)
+            _np = sum(len(e.get("points") or ()) for e in shared.polygons_live)
+        with shared.lock:
+            _n_poly = len(shared.polygons_live)
         print(
-            f"[web] Modo contagem={_mode} | linha (pixels): {_ld} | poligono: {_np} vertices. "
-            "Linha: pes cruzam segmento. Poligono: entrada/saida pela area (UI /roi)."
+            f"[web] Modo contagem={_mode} | linha (pixels): {_ld} | poligonos: {_n_poly} ({_np} vertices). "
+            "Linha: pes cruzam segmento. Poligono: entrada/saida pela uniao das areas (UI /roi)."
         )
         with shared.lock:
             nm: dict[int, str] = {}
@@ -1654,7 +1746,9 @@ def inference_loop(
                 if _cid not in seen:
                     seen.add(_cid)
                     _uniq.append(_cid)
-            effective_class_ids = _uniq
+            # So as classes ativas na UI (_uniq), nao a uniao de todos os veiculos em COUNT_CLASS_IDS.
+            # A expansao antiga fazia aparecer carros com «so moto» marcado (YOLO_TRACK_NO_CLASSES_ARG).
+            effective_class_ids = sorted(set(_uniq))
             _eff_set = set(effective_class_ids)
             _tp = person_class_id in _eff_set
             _tv = any(c in _eff_set for c in _v_ids)
@@ -1662,6 +1756,22 @@ def inference_loop(
                 f"[web] YOLO classes={effective_class_ids} "
                 f"(track_active={_active_raw}, track_people={_tp}, track_vehicles={_tv})"
             )
+
+            _omit_track_classes_kw = os.environ.get("YOLO_TRACK_NO_CLASSES_ARG", "0").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+            _strict_ui_classes_fz = frozenset(_uniq)
+            if _omit_track_classes_kw:
+                _eff_cls_fz = _strict_ui_classes_fz
+                print(
+                    "[web] YOLO_TRACK_NO_CLASSES_ARG=1: inferencia sem argumento classes=; "
+                    f"filtro local por classes ativas na UI={sorted(_eff_cls_fz)}."
+                )
+            else:
+                _eff_cls_fz = _strict_ui_classes_fz
 
             _infer_conf = float(args.conf)
             _vehicles_only_stream = (
@@ -1685,7 +1795,6 @@ def inference_loop(
                 "iou": args.iou,
                 "imgsz": args.imgsz,
                 "max_det": args.max_det,
-                "classes": effective_class_ids,
                 "tracker": tracker_yaml,
                 "persist": True,
                 "verbose": False,
@@ -1693,6 +1802,8 @@ def inference_loop(
                 "vid_stride": max(1, args.vid_stride),
                 "stream_buffer": args.stream_buffer,
             }
+            if not _omit_track_classes_kw:
+                track_kw["classes"] = effective_class_ids
             if use_half:
                 track_kw["half"] = True
             if args.augment:
@@ -1701,6 +1812,11 @@ def inference_loop(
                 track_kw["agnostic_nms"] = True
 
             stream = model.track(**track_kw)
+            try:
+                _np_h_frac = float(os.environ.get("YOLO_NONPERSON_MIN_H_FRAC", "0.20").strip() or "0.20")
+            except ValueError:
+                _np_h_frac = 0.20
+            _np_h_frac = max(0.08, min(0.45, _np_h_frac))
             last_yolo_cls_by_tid.clear()
             sex_smoother: PerTrackSexSmoother | None = (
                 PerTrackSexSmoother.from_env() if sex_clf is not None and sex_clf.enabled else None
@@ -1747,9 +1863,9 @@ def inference_loop(
                 with shared.lock:
                     raw_line = shared.line_live
                     count_mode = shared.count_mode
-                    poly_raw = list(shared.polygon_live)
+                    pe_sig = copy_polygon_entries(shared.polygons_live)
                     show_sex_ui = bool(shared.show_sex_overlay and shared.sex_overlay_available)
-                cfg_sig = f"{count_mode}|{raw_line}|{poly_raw}"
+                cfg_sig = f"{count_mode}|{raw_line}|{polygon_entries_sig(pe_sig)}"
                 if prev_config_sig is not None and cfg_sig != prev_config_sig:
                     last_side_by_id.clear()
                     prev_inside_by_id.clear()
@@ -1759,7 +1875,9 @@ def inference_loop(
                 prev_config_sig = cfg_sig
 
                 x1, y1, x2, y2 = clamp_line(*raw_line, fw, fh)
-                poly_pts = clamp_polygon(poly_raw, fw, fh) if len(poly_raw) >= 3 else []
+                named_clamped = clamp_named_polygons(pe_sig, fw, fh)
+                poly_pts_list = [e["points"] for e in named_clamped]
+                poly_titles = [str(e.get("title") or "") for e in named_clamped]
                 frame_ts = time.monotonic()
                 if prev_frame_mono is not None:
                     dt = frame_ts - prev_frame_mono
@@ -1780,7 +1898,8 @@ def inference_loop(
                 # Com so veiculos no YOLO, o filtro de forma para "nao-pessoa" cortava muitas caixas reais
                 _skip_nonperson_shape = _vehicles_only_mode
                 if (not _tp_sf) and _tv_sf and _v_ids_loop:
-                    _default_det_cls = int(_v_ids_loop[0])
+                    _veh_active = sorted(c for c in _active_sf if c != person_class_id)
+                    _default_det_cls = int(_veh_active[0]) if _veh_active else int(_v_ids_loop[0])
                 else:
                     _default_det_cls = int(person_class_id)
 
@@ -1803,6 +1922,8 @@ def inference_loop(
                     )
                     for (x_min, y_min, x_max, y_max), c_raw in zip(xys, clss_hm):
                         c = int(c_raw)
+                        if c not in _eff_cls_fz:
+                            continue
                         box = (float(x_min), float(y_min), float(x_max), float(y_max))
                         if not args.no_shape_filter:
                             if _skip_nonperson_shape:
@@ -1824,12 +1945,13 @@ def inference_loop(
                                 fh,
                                 args.max_nonperson_area_frac,
                                 args.min_person_height_px,
+                                _np_h_frac,
                             ):
                                 continue
                         foot_x = (x_min + x_max) / 2.0
                         foot_y = float(y_max)
-                        if count_mode == "polygon" and len(poly_pts) >= 3:
-                            if not foot_inside_polygon(foot_x, foot_y, poly_pts):
+                        if count_mode == "polygon" and poly_pts_list:
+                            if not foot_inside_any_of_polygons(foot_x, foot_y, poly_pts_list):
                                 continue
                         foot_points.append((foot_x, foot_y))
 
@@ -1853,12 +1975,23 @@ def inference_loop(
                         if _boxes.conf is not None
                         else [1.0] * len(xys_raw)
                     )
+                    ids_pre: list[int] | None = None
                     if (
                         getattr(_boxes, "is_track", False)
                         and _boxes.id is not None
                         and len(_boxes.id) == len(xys_raw)
                     ):
-                        ids_list = [int(t) for t in _boxes.id.int().tolist()]
+                        ids_pre = [int(t) for t in _boxes.id.int().tolist()]
+                    if _omit_track_classes_kw:
+                        _keep_ix = [i for i, c in enumerate(clss_raw) if c in _eff_cls_fz]
+                        if len(_keep_ix) != len(clss_raw):
+                            xys_raw = [xys_raw[i] for i in _keep_ix]
+                            clss_raw = [clss_raw[i] for i in _keep_ix]
+                            confs_raw = [confs_raw[i] for i in _keep_ix]
+                            if ids_pre is not None:
+                                ids_pre = [ids_pre[i] for i in _keep_ix]
+                    if ids_pre is not None:
+                        ids_list = ids_pre
                     else:
                         ids_list = fallback_track_ids_from_detections(xys_raw, clss_raw)
                         if not _synthetic_id_warned:
@@ -1883,6 +2016,7 @@ def inference_loop(
                             args.max_box_area_frac,
                             args.max_nonperson_area_frac,
                             args.min_person_height_px,
+                            _np_h_frac,
                         )
                     cls_by_tid = {int(tid): int(c) for tid, c in zip(ids_list, clss_raw)}
                     for _tid, _c in cls_by_tid.items():
@@ -1897,8 +2031,10 @@ def inference_loop(
                         foot_x = (x_min + x_max) / 2.0
                         foot_y = float(y_max)
                         inside_for_presence = True
-                        if count_mode == "polygon" and len(poly_pts) >= 3:
-                            inside_for_presence = foot_inside_polygon(foot_x, foot_y, poly_pts)
+                        if count_mode == "polygon" and poly_pts_list:
+                            inside_for_presence = foot_inside_any_of_polygons(
+                                foot_x, foot_y, poly_pts_list
+                            )
                         if inside_for_presence:
                             current_present_ids.add(track_id)
                             zone_entered_at_by_id.setdefault(track_id, frame_ts)
@@ -1933,7 +2069,7 @@ def inference_loop(
                                 person_tracker.update_dwell(
                                     int(track_id), dt_by_tid.get(int(track_id), 0.0)
                                 )
-                        if count_mode == "polygon" and len(poly_pts) >= 3:
+                        if count_mode == "polygon" and poly_pts_list:
                             inside = inside_for_presence
                             with shared.lock:
                                 prev_b = prev_inside_by_id.get(track_id)
@@ -2498,20 +2634,56 @@ def inference_loop(
                             peak_occupancy=int(row["peak_occupancy"]),
                         )
                     vehicle_zone_tracker.flush_stats()  # reset session slot; no DB persistence yet
-                if count_mode == "polygon" and len(poly_pts) >= 3:
+                if count_mode == "polygon" and poly_pts_list:
                     if show_roi_ui:
-                        arr = np.array(poly_pts, dtype=np.int32).reshape(-1, 1, 2)
-                        shadow_poly = tuple(int(c * 0.25) for c in _C_AMBER)
-                        cv2.polylines(frame, [arr], isClosed=True, color=shadow_poly, thickness=5, lineType=cv2.LINE_AA)  # type: ignore[arg-type]
-                        cv2.polylines(frame, [arr], isClosed=True, color=_C_AMBER, thickness=2, lineType=cv2.LINE_AA)
-                        for pt in poly_pts:
-                            cv2.circle(frame, pt, 5, _C_BLACK, -1, lineType=cv2.LINE_AA)
-                            cv2.circle(frame, pt, 3, _C_AMBER,  -1, lineType=cv2.LINE_AA)
+                        for ri, ring in enumerate(poly_pts_list):
+                            bd_color = _C_AMBER if ri % 2 == 0 else _C_CYAN
+                            shadow_poly = tuple(int(c * 0.25) for c in bd_color)
+                            arr = np.array(ring, dtype=np.int32).reshape(-1, 1, 2)
+                            cv2.polylines(
+                                frame, [arr], isClosed=True, color=shadow_poly, thickness=5, lineType=cv2.LINE_AA
+                            )  # type: ignore[arg-type]
+                            cv2.polylines(
+                                frame, [arr], isClosed=True, color=bd_color, thickness=2, lineType=cv2.LINE_AA
+                            )
+                            for pt in ring:
+                                cv2.circle(frame, pt, 5, _C_BLACK, -1, lineType=cv2.LINE_AA)
+                                cv2.circle(frame, pt, 3, bd_color, -1, lineType=cv2.LINE_AA)
+                            label = (
+                                (poly_titles[ri].strip() if ri < len(poly_titles) else "")
+                                or f"Área {ri + 1}"
+                            )[:48]
+                            cx = int(sum(int(p[0]) for p in ring) / max(len(ring), 1))
+                            cy = int(sum(int(p[1]) for p in ring) / max(len(ring), 1))
+                            (tw, th), _ = cv2.getTextSize(
+                                label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2
+                            )
+                            tx, ty = max(4, cx - tw // 2), max(th + 4, cy + th // 2)
+                            cv2.putText(
+                                frame,
+                                label,
+                                (tx, ty),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.55,
+                                _C_BLACK,
+                                3,
+                                lineType=cv2.LINE_AA,
+                            )
+                            cv2.putText(
+                                frame,
+                                label,
+                                (tx, ty),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.55,
+                                bd_color,
+                                2,
+                                lineType=cv2.LINE_AA,
+                            )
                     _overlay_text(frame, text, live_text, fw, fh)
                 elif count_mode == "polygon":
                     cv2.putText(
                         frame,
-                        "Defina poligono em /roi (min. 3 pontos)",
+                        "Defina poligono(s) em /roi (min. 3 pontos por area)",
                         (20, 36),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.65,
@@ -2788,6 +2960,7 @@ def build_stats_payload(shared: SharedState) -> dict:
             "cam_drift_reason": shared.cam_drift_reason,
             "cam_drift_baseline_ready": shared.cam_drift_baseline_ready,
             "vehicle_tracking_available": len(shared.yolo_count_class_ids) > 1,
+            "model_nc": int(shared.model_nc),
             "yolo_count_class_ids": list(shared.yolo_count_class_ids),
             "yolo_person_class_id": int(shared.yolo_person_class_id),
             "track_active_class_ids": list(shared.track_active_class_ids),
@@ -3110,8 +3283,26 @@ def create_app(
             mode = shared.count_mode
             x1, y1, x2, y2 = shared.line_live
             d1, d2, d3, d4 = shared.line_default
-            poly = [{"x": a, "y": b} for a, b in shared.polygon_live]
-            pdef = [{"x": a, "y": b} for a, b in shared.polygon_default]
+            plive = copy_polygon_entries(shared.polygons_live)
+            pdef_l = copy_polygon_entries(shared.polygons_default)
+            poly0 = plive[0]["points"] if plive else []
+            poly = [{"x": a, "y": b} for a, b in poly0]
+            pdef0 = pdef_l[0]["points"] if pdef_l else []
+            pdef = [{"x": a, "y": b} for a, b in pdef0]
+            polys_out = [
+                {
+                    "title": str(e.get("title") or ""),
+                    "points": [{"x": int(a), "y": int(b)} for a, b in e["points"]],
+                }
+                for e in plive
+            ]
+            polys_def_out = [
+                {
+                    "title": str(e.get("title") or ""),
+                    "points": [{"x": int(a), "y": int(b)} for a, b in e["points"]],
+                }
+                for e in pdef_l
+            ]
             show_trail = shared.show_trail_overlay
             show_heading = shared.show_heading_overlay
             hm_ok = shared.heatmap_available
@@ -3126,7 +3317,9 @@ def create_app(
                 "line": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
                 "default_line": {"x1": d1, "y1": d2, "x2": d3, "y2": d4},
                 "polygon": poly,
+                "polygons": polys_out,
                 "default_polygon": pdef,
+                "default_polygons": polys_def_out,
                 "show_trail": show_trail,
                 "show_heading": show_heading,
                 "heatmap_available": hm_ok,
@@ -3184,13 +3377,23 @@ def create_app(
             mode = shared.count_mode
             x1, y1, x2, y2 = shared.line_live
             d1, d2, d3, d4 = shared.line_default
-            poly = [{"x": a, "y": b} for a, b in shared.polygon_live]
+            plive = copy_polygon_entries(shared.polygons_live)
+            poly0 = plive[0]["points"] if plive else []
+            poly = [{"x": a, "y": b} for a, b in poly0]
+            polys_out = [
+                {
+                    "title": str(e.get("title") or ""),
+                    "points": [{"x": int(a), "y": int(b)} for a, b in e["points"]],
+                }
+                for e in plive
+            ]
         return jsonify(
             {
                 "mode": mode,
                 "line": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
                 "default": {"x1": d1, "y1": d2, "x2": d3, "y2": d4},
                 "polygon": poly,
+                "polygons": polys_out,
             }
         )
 
@@ -3249,28 +3452,68 @@ def create_app(
     @app.post("/api/polygon")
     def post_polygon() -> Response:
         data = request.get_json(silent=True) or {}
-        raw = data.get("points")
-        if not isinstance(raw, list) or len(raw) < 3:
-            return jsonify({"error": "Precisa de lista points com pelo menos 3 vertices"}), 400
-        if len(raw) > 32:
-            return jsonify({"error": "No maximo 32 vertices"}), 400
-        pts: list[tuple[int, int]] = []
-        try:
-            for p in raw:
-                pts.append((int(p["x"]), int(p["y"])))
-        except (KeyError, TypeError, ValueError):
-            return jsonify({"error": "Cada ponto precisa x e y inteiros"}), 400
+        max_rings = 16
+        max_vertices = 64
+
+        def _one_ring(raw: object) -> list[tuple[int, int]] | None:
+            if not isinstance(raw, list) or len(raw) < 3:
+                return None
+            pts: list[tuple[int, int]] = []
+            try:
+                for p in raw[:max_vertices]:
+                    if not isinstance(p, dict):
+                        return None
+                    pts.append((int(p["x"]), int(p["y"])))
+            except (KeyError, TypeError, ValueError):
+                return None
+            return pts
+
+        entries_out: list[dict[str, Any]] = []
+        if isinstance(data.get("polygons"), list):
+            for raw_item in data["polygons"][:max_rings]:
+                if isinstance(raw_item, dict) and isinstance(raw_item.get("points"), list):
+                    ring = _one_ring(raw_item["points"])
+                    if ring is not None:
+                        t = raw_item.get("title") or raw_item.get("name")
+                        title = (
+                            str(t).strip()[:64]
+                            if isinstance(t, str) and str(t).strip()
+                            else f"Área {len(entries_out) + 1}"
+                        )
+                        entries_out.append({"title": title, "points": ring})
+                else:
+                    ring = _one_ring(raw_item)
+                    if ring is not None:
+                        entries_out.append({"title": f"Área {len(entries_out) + 1}", "points": ring})
+            if not entries_out:
+                return jsonify(
+                    {"error": "Lista polygons: cada poligono precisa de pelo menos 3 vertices (x,y)"}
+                ), 400
+        else:
+            raw = data.get("points")
+            if not isinstance(raw, list) or len(raw) < 3:
+                return jsonify({"error": "Precisa de lista points com pelo menos 3 vertices"}), 400
+            if len(raw) > max_vertices:
+                return jsonify({"error": f"No maximo {max_vertices} vertices por poligono"}), 400
+            ring = _one_ring(raw)
+            if ring is None:
+                return jsonify({"error": "Cada ponto precisa x e y inteiros"}), 400
+            entries_out = [{"title": "Área 1", "points": ring}]
+
         reset_counters = bool(data.get("reset_counters", False))
         with shared.lock:
-            shared.polygon_live = pts
+            shared.polygons_live = copy_polygon_entries(entries_out)
+            shared.polygons_default = copy_polygon_entries(entries_out)
             shared.count_mode = "polygon"
             if reset_counters:
                 reset_entry_exit_counters(shared)
+        n_v = sum(len(e["points"]) for e in entries_out)
         _persist_config_event(
             shared,
             "polygon",
             {
-                "vertices": len(pts),
+                "polygons": len(entries_out),
+                "vertices": n_v,
                 "reset_counters": reset_counters,
                 "preset_id": str(shared.active_preset_id or "").strip(),
             },
@@ -3278,21 +3521,33 @@ def create_app(
         with shared.lock:
             ap = str(shared.active_preset_id or "").strip()
         _save_calibration_for_preset(shared, ap)
-        return jsonify(
-            {"ok": True, "polygon": [{"x": a, "y": b} for a, b in pts], "mode": "polygon"}
-        )
+        polys_json = [
+            {"title": str(e.get("title") or ""), "points": [{"x": a, "y": b} for a, b in e["points"]]}
+            for e in entries_out
+        ]
+        poly0 = polys_json[0]["points"] if polys_json else []
+        return jsonify({"ok": True, "polygon": poly0, "polygons": polys_json, "mode": "polygon"})
 
     @app.post("/api/polygon/reset")
     def reset_polygon() -> Response:
         data = request.get_json(silent=True) or {}
         reset_counters = bool(data.get("reset_counters", False))
         with shared.lock:
-            shared.polygon_live = list(shared.polygon_default)
+            shared.polygons_live = copy_polygon_entries(shared.polygons_default)
             shared.count_mode = "line"
             if reset_counters:
                 reset_entry_exit_counters(shared)
         with shared.lock:
-            poly = [{"x": a, "y": b} for a, b in shared.polygon_live]
+            plive = copy_polygon_entries(shared.polygons_live)
+            poly0 = plive[0]["points"] if plive else []
+            poly = [{"x": a, "y": b} for a, b in poly0]
+            polys_out = [
+                {
+                    "title": str(e.get("title") or ""),
+                    "points": [{"x": int(a), "y": int(b)} for a, b in e["points"]],
+                }
+                for e in plive
+            ]
         _persist_config_event(
             shared,
             "polygon_reset",
@@ -3301,7 +3556,7 @@ def create_app(
         with shared.lock:
             ap = str(shared.active_preset_id or "").strip()
         _save_calibration_for_preset(shared, ap)
-        return jsonify({"ok": True, "polygon": poly, "mode": "line"})
+        return jsonify({"ok": True, "polygon": poly, "polygons": polys_out, "mode": "line"})
 
     @app.post("/api/mode")
     def post_mode() -> Response:
@@ -3311,10 +3566,10 @@ def create_app(
             return jsonify({"error": "mode deve ser 'line' ou 'polygon'"}), 400
         reset_counters = bool(data.get("reset_counters", False))
         with shared.lock:
-            poly_len = len(shared.polygon_live)
-        if m == "polygon" and poly_len < 3:
+            poly_ok = any(len(e.get("points") or ()) >= 3 for e in shared.polygons_live)
+        if m == "polygon" and not poly_ok:
             return jsonify(
-                {"error": "Poligono incompleto: use POST /api/polygon com minimo 3 pontos"}
+                {"error": "Poligono incompleto: use POST /api/polygon com minimo 3 pontos por area"}
             ), 400
         with shared.lock:
             shared.count_mode = m

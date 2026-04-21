@@ -84,9 +84,12 @@ export function TrackingModeToggle({
   return (
     <div
       style={{
-        display: "inline-flex",
-        alignItems: "center",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "stretch",
         gap: 6,
+        minWidth: 0,
+        maxWidth: "100%",
         opacity: pending ? 0.65 : 1,
       }}
       title="Escolha quais classes do COUNT_CLASS_IDS inferir (uma ou várias). Pelo menos uma deve ficar ativa."
@@ -98,23 +101,26 @@ export function TrackingModeToggle({
           color: "var(--text-muted)",
           textTransform: "uppercase",
           letterSpacing: "0.04em",
+          flexShrink: 0,
         }}
       >
         Rastreio
       </span>
       <div
         style={{
-          display: "inline-flex",
+          display: "flex",
+          flexWrap: "wrap",
           alignItems: "center",
-          gap: 0,
+          gap: 5,
+          padding: 5,
           border: "1px solid var(--border)",
           borderRadius: "var(--radius-sm)",
-          overflow: "hidden",
+          background: "rgba(0,0,0,0.12)",
         }}
       >
-        {ids.map((classId, idx) => {
+        {ids.map((classId) => {
           const raw = yoloClassLabels[String(classId)] ?? `classe ${classId}`;
-          const label = raw.length > 14 ? `${raw.slice(0, 14)}…` : raw;
+          const label = raw.length > 12 ? `${raw.slice(0, 12)}…` : raw;
           const on = trackActiveClassIds.includes(classId);
           return (
             <button
@@ -123,14 +129,14 @@ export function TrackingModeToggle({
               disabled={pending}
               onClick={() => toggleClass(classId)}
               style={{
-                padding: "6px 10px",
+                padding: "5px 8px",
                 fontFamily: "var(--font-display)",
-                fontSize: 10,
+                fontSize: 9,
                 fontWeight: 700,
-                letterSpacing: "0.06em",
+                letterSpacing: "0.05em",
                 textTransform: "uppercase",
-                border: "none",
-                borderLeft: idx > 0 ? "1px solid var(--border)" : "none",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-sm)",
                 cursor: pending ? "wait" : "pointer",
                 background: on ? "var(--amber-dim)" : "transparent",
                 color: on ? "var(--amber)" : "var(--text-muted)",

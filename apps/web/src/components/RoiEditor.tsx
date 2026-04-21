@@ -8,7 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
-import type { ApiConfig } from "../types/api";
+import type { ApiConfig, CountPolygonSpec } from "../types/api";
 import {
   IconRuler, IconPolygon, IconX, IconCheck,
   IconRotateCcw, IconTrash, IconAlertTriangle,
@@ -24,6 +24,39 @@ interface Props {
 
 type DrawMode = "line" | "polygon";
 type Point = { x: number; y: number };
+type PolygonRing = { title: string; points: Point[] };
+
+function polygonRingsFromConfig(config: ApiConfig): PolygonRing[] {
+  const polys = config.polygons;
+  if (polys && polys.length > 0) {
+    const p0 = polys[0] as unknown;
+    if (
+      p0 &&
+      typeof p0 === "object" &&
+      "points" in p0 &&
+      Array.isArray((p0 as { points: unknown }).points)
+    ) {
+      return (polys as CountPolygonSpec[]).map((spec, i) => ({
+        title:
+          (typeof spec.title === "string" && spec.title.trim()) || `Área ${i + 1}`,
+        points: spec.points.map((p) => ({ x: p.x, y: p.y })),
+      }));
+    }
+    return (polys as { x: number; y: number }[][]).map((ring, i) => ({
+      title: `Área ${i + 1}`,
+      points: ring.map((p) => ({ x: p.x, y: p.y })),
+    }));
+  }
+  if (config.polygon && config.polygon.length >= 3) {
+    return [
+      {
+        title: "Área 1",
+        points: config.polygon.map((p) => ({ x: p.x, y: p.y })),
+      },
+    ];
+  }
+  return [];
+}
 
 const CYAN  = "#00D4FF";
 const AMBER = "#F59E0B";
@@ -41,6 +74,8 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
     active: boolean;
     mode: DrawMode;
     index: number;
+    /** Poligono: -1 = rascunho (polyDraft), >=0 indice em polyRings */
+    ring: number;
     point: Point;
     didMove: boolean;
   } | null>(null);
@@ -50,7 +85,9 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
 
   const [mode, setMode]             = useState<DrawMode>(config?.mode ?? "line");
   const [linePoints, setLinePoints] = useState<Point[]>([]);
-  const [polyPoints, setPolyPoints] = useState<Point[]>([]);
+  /** Poligonos fechados em edicao; o rascunho actual e polyDraft (pontos do proximo poligono). */
+  const [polyRings, setPolyRings]   = useState<PolygonRing[]>([]);
+  const [polyDraft, setPolyDraft]   = useState<Point[]>([]);
   const [imgSize, setImgSize]       = useState({ w: 1, h: 1 });
   const [saving, setSaving]         = useState(false);
   const [msg, setMsg]               = useState<{ text: string; ok: boolean } | null>(null);
@@ -62,6 +99,19 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
     const img = imgRef.current;
     if (img) setImgSize({ w: img.naturalWidth, h: img.naturalHeight });
   }, []);
+
+  useEffect(() => {
+    if (!config) return;
+    setMode(config.mode ?? "line");
+    if (config.line) {
+      setLinePoints([
+        { x: config.line.x1, y: config.line.y1 },
+        { x: config.line.x2, y: config.line.y2 },
+      ]);
+    }
+    setPolyRings(polygonRingsFromConfig(config));
+    setPolyDraft([]);
+  }, [config]);
 
   /* ── Coordinate conversion ──────────────────────────── */
   const toFrameCoords = useCallback(
@@ -106,9 +156,16 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
     const effLine = drag?.active && drag.mode === "line"
       ? linePoints.map((p, i) => i === drag.index ? drag.point : p)
       : linePoints;
-    const effPoly = drag?.active && drag.mode === "polygon"
-      ? polyPoints.map((p, i) => i === drag.index ? drag.point : p)
-      : polyPoints;
+    const effDraft = drag?.active && drag.mode === "polygon" && drag.ring === -1
+      ? polyDraft.map((p, i) => (i === drag.index ? drag.point : p))
+      : polyDraft;
+    const effRings = polyRings.map((pr, ri) => ({
+      title: pr.title,
+      points:
+        drag?.active && drag.mode === "polygon" && drag.ring === ri
+          ? pr.points.map((p, i) => (i === drag.index ? drag.point : p))
+          : pr.points,
+    }));
 
     /* -- LINE MODE -- */
     if (mode === "line") {
@@ -223,105 +280,111 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
       }
     }
 
-    /* -- POLYGON MODE -- */
-    if (mode === "polygon" && effPoly.length > 0) {
-      const pts = effPoly.map((p) => toCanvasCoords(p.x, p.y));
-
-      // Ghost segment to cursor
-      if (cursor && !drag?.active) {
-        const last = pts[pts.length - 1];
+    /* -- POLYGON MODE (varios poligonos + rascunho) -- */
+    if (mode === "polygon") {
+      const drawRing = (
+        ring: Point[],
+        colorIdx: number,
+        closed: boolean,
+        hoverBase: number,
+        dragRing: number,
+        ringTitle?: string,
+      ) => {
+        if (ring.length === 0) return;
+        const pts = ring.map((p) => toCanvasCoords(p.x, p.y));
+        const stroke = colorIdx % 2 === 0 ? AMBER : CYAN;
+        const glow = colorIdx % 2 === 0 ? "rgba(245,158,11,0.18)" : "rgba(0,212,255,0.16)";
         ctx.save();
-        ctx.strokeStyle = "rgba(245,158,11,0.28)";
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([5, 5]);
-        ctx.lineCap = "round";
         ctx.beginPath();
-        ctx.moveTo(last.x, last.y);
-        ctx.lineTo(cursor.cx, cursor.cy);
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+        if (closed && ring.length >= 3) ctx.closePath();
+        ctx.strokeStyle = glow;
+        ctx.lineWidth = 7;
+        ctx.lineJoin = "round";
+        ctx.setLineDash(!closed && ring.length < 3 ? [6, 4] : []);
         ctx.stroke();
-        if (pts.length >= 3) {
-          ctx.strokeStyle = "rgba(245,158,11,0.12)";
-          ctx.beginPath();
-          ctx.moveTo(pts[0].x, pts[0].y);
-          ctx.lineTo(cursor.cx, cursor.cy);
-          ctx.stroke();
-        }
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = 2;
+        ctx.stroke();
         ctx.setLineDash([]);
-        ctx.restore();
-      }
-
-      ctx.save();
-      ctx.beginPath();
-      ctx.moveTo(pts[0].x, pts[0].y);
-      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-      if (effPoly.length >= 3) ctx.closePath();
-
-      ctx.strokeStyle = "rgba(245,158,11,0.18)";
-      ctx.lineWidth = 7;
-      ctx.lineJoin = "round";
-      ctx.setLineDash(effPoly.length < 3 ? [6, 4] : []);
-      ctx.stroke();
-      ctx.strokeStyle = AMBER;
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      ctx.setLineDash([]);
-      if (effPoly.length >= 3) {
-        ctx.fillStyle = "rgba(245,158,11,0.07)";
-        ctx.fill();
-      }
-
-      // Vertex markers
-      for (let i = 0; i < pts.length; i++) {
-        const p = pts[i];
-        const isFirst = i === 0;
-        const isHovered = hovered === i;
-        const isDragging = drag?.active && drag.mode === "polygon" && drag.index === i;
-        const color = isFirst ? GREEN : AMBER;
-
-        // Outer ring
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, isHovered || isDragging ? 14 : 10, 0, Math.PI * 2);
-        ctx.strokeStyle = isDragging
-          ? (isFirst ? "rgba(16,185,129,0.55)" : "rgba(245,158,11,0.55)")
-          : isHovered
-          ? (isFirst ? "rgba(16,185,129,0.40)" : "rgba(245,158,11,0.40)")
-          : isFirst
-          ? "rgba(16,185,129,0.2)"
-          : "rgba(245,158,11,0.2)";
-        ctx.lineWidth = isDragging ? 1.5 : 1;
-        ctx.stroke();
-
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(0,0,0,0.85)";
-        ctx.fill();
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
-        ctx.fillStyle = color;
-        ctx.fill();
-        ctx.fillStyle = "#fff";
-        ctx.font = "bold 9px monospace";
-        ctx.fillText(String(i + 1), p.x + 10, p.y - 8);
-
-        // Ícone de arrastar quando hovado
-        if (isHovered && !drag?.active) {
+        if (closed && ring.length >= 3) {
+          ctx.fillStyle = colorIdx % 2 === 0 ? "rgba(245,158,11,0.07)" : "rgba(0,212,255,0.06)";
+          ctx.fill();
+        }
+        for (let i = 0; i < pts.length; i++) {
+          const p = pts[i];
+          const hid = hoverBase + i;
+          const isHovered = hovered === hid;
+          const isDragging =
+            drag?.active && drag.mode === "polygon" && drag.ring === dragRing && drag.index === i;
+          const isFirst = i === 0;
+          const color = isFirst ? GREEN : stroke;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, isHovered || isDragging ? 14 : 10, 0, Math.PI * 2);
+          ctx.strokeStyle = isDragging || isHovered ? stroke : `${stroke}33`;
+          ctx.lineWidth = isDragging ? 1.5 : 1;
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(0,0,0,0.85)";
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+          ctx.fillStyle = color;
+          ctx.fill();
+          ctx.fillStyle = "#fff";
+          ctx.font = "bold 9px monospace";
+          ctx.fillText(`${colorIdx + 1}.${i + 1}`, p.x + 10, p.y - 8);
+        }
+        if (closed && ring.length >= 3 && ringTitle) {
+          const cfx = ring.reduce((s, p) => s + p.x, 0) / ring.length;
+          const cfy = ring.reduce((s, p) => s + p.y, 0) / ring.length;
+          const c = toCanvasCoords(cfx, cfy);
+          const label = ringTitle.slice(0, 28);
           ctx.save();
-          ctx.strokeStyle = isFirst ? "rgba(16,185,129,0.55)" : "rgba(245,158,11,0.55)";
-          ctx.lineWidth = 1;
-          const r = 5;
-          for (const [ax, ay, bx, by] of [
-            [p.x, p.y - r - 3, p.x, p.y + r + 3],
-            [p.x - r - 3, p.y, p.x + r + 3, p.y],
-          ] as [number, number, number, number][]) {
-            ctx.beginPath();
-            ctx.moveTo(ax, ay);
-            ctx.lineTo(bx, by);
-            ctx.stroke();
-          }
+          ctx.font = "bold 11px var(--font-display), ui-sans-serif, system-ui, sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.strokeStyle = "rgba(0,0,0,0.82)";
+          ctx.lineWidth = 4;
+          ctx.strokeText(label, c.x, c.y);
+          ctx.fillStyle = stroke;
+          ctx.fillText(label, c.x, c.y);
           ctx.restore();
         }
+        ctx.restore();
+      };
+
+      effRings.forEach((pr, ri) =>
+        drawRing(pr.points, ri, true, ri * 10_000, ri, pr.title),
+      );
+
+      if (effDraft.length > 0) {
+        if (cursor && !drag?.active) {
+          const pts = effDraft.map((p) => toCanvasCoords(p.x, p.y));
+          const last = pts[pts.length - 1];
+          ctx.save();
+          ctx.strokeStyle = "rgba(245,158,11,0.28)";
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([5, 5]);
+          ctx.lineCap = "round";
+          ctx.beginPath();
+          ctx.moveTo(last.x, last.y);
+          ctx.lineTo(cursor.cx, cursor.cy);
+          ctx.stroke();
+          if (effDraft.length >= 3) {
+            ctx.strokeStyle = "rgba(245,158,11,0.12)";
+            ctx.beginPath();
+            ctx.moveTo(pts[0].x, pts[0].y);
+            ctx.lineTo(cursor.cx, cursor.cy);
+            ctx.stroke();
+          }
+          ctx.setLineDash([]);
+          ctx.restore();
+        }
+        drawRing(effDraft, effRings.length, false, 900_000, -1);
       }
-      ctx.restore();
     }
 
     /* -- CURSOR CROSSHAIR -- */
@@ -355,7 +418,7 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
       }
       ctx.restore();
     }
-  }, [mode, linePoints, polyPoints, toCanvasCoords]);
+  }, [mode, linePoints, polyRings, polyDraft, toCanvasCoords]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -378,14 +441,27 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
   /* ── Helpers ────────────────────────────────────────── */
   const findNearestPoint = useCallback(
     (cx: number, cy: number): number | null => {
-      const pts = mode === "line" ? linePoints : polyPoints;
-      for (let i = pts.length - 1; i >= 0; i--) {
-        const cp = toCanvasCoords(pts[i].x, pts[i].y);
-        if (Math.hypot(cx - cp.x, cy - cp.y) <= HIT_RADIUS) return i;
+      if (mode === "line") {
+        for (let i = linePoints.length - 1; i >= 0; i--) {
+          const cp = toCanvasCoords(linePoints[i].x, linePoints[i].y);
+          if (Math.hypot(cx - cp.x, cy - cp.y) <= HIT_RADIUS) return i;
+        }
+        return null;
+      }
+      for (let i = polyDraft.length - 1; i >= 0; i--) {
+        const cp = toCanvasCoords(polyDraft[i].x, polyDraft[i].y);
+        if (Math.hypot(cx - cp.x, cy - cp.y) <= HIT_RADIUS) return 900_000 + i;
+      }
+      for (let ri = polyRings.length - 1; ri >= 0; ri--) {
+        const ring = polyRings[ri].points;
+        for (let i = ring.length - 1; i >= 0; i--) {
+          const cp = toCanvasCoords(ring[i].x, ring[i].y);
+          if (Math.hypot(cx - cp.x, cy - cp.y) <= HIT_RADIUS) return ri * 10_000 + i;
+        }
       }
       return null;
     },
-    [mode, linePoints, polyPoints, toCanvasCoords],
+    [mode, linePoints, polyRings, polyDraft, toCanvasCoords],
   );
 
   /* ── Mouse handlers ─────────────────────────────────── */
@@ -398,19 +474,40 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
       const cy = e.clientY - rect.top;
       const idx = findNearestPoint(cx, cy);
       if (idx !== null) {
-        const pts = mode === "line" ? linePoints : polyPoints;
-        dragRef.current = {
-          active: true,
-          mode,
-          index: idx,
-          point: { ...pts[idx] },
-          didMove: false,
-        };
+        if (mode === "line") {
+          dragRef.current = {
+            active: true,
+            mode: "line",
+            ring: 0,
+            index: idx,
+            point: { ...linePoints[idx] },
+            didMove: false,
+          };
+        } else {
+          let ring = -1;
+          let ptIndex = 0;
+          if (idx >= 900_000) {
+            ring = -1;
+            ptIndex = idx - 900_000;
+          } else {
+            ring = Math.floor(idx / 10_000);
+            ptIndex = idx % 10_000;
+          }
+          const pts = ring === -1 ? polyDraft : polyRings[ring].points;
+          dragRef.current = {
+            active: true,
+            mode: "polygon",
+            ring,
+            index: ptIndex,
+            point: { ...pts[ptIndex] },
+            didMove: false,
+          };
+        }
       } else {
         dragRef.current = null;
       }
     },
-    [findNearestPoint, mode, linePoints, polyPoints],
+    [findNearestPoint, mode, linePoints, polyRings, polyDraft],
   );
 
   const handleMouseUp = useCallback(
@@ -425,11 +522,26 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
             return copy;
           });
         } else {
-          setPolyPoints((prev) => {
-            const copy = [...prev];
-            copy[drag.index] = drag.point;
-            return copy;
-          });
+          if (drag.ring === -1) {
+            setPolyDraft((prev) => {
+              const copy = [...prev];
+              copy[drag.index] = drag.point;
+              return copy;
+            });
+          } else {
+            setPolyRings((prev) =>
+              prev.map((pr, i) =>
+                i === drag.ring
+                  ? {
+                      ...pr,
+                      points: pr.points.map((p, j) =>
+                        j === drag.index ? drag.point : p,
+                      ),
+                    }
+                  : pr,
+              ),
+            );
+          }
         }
         setMsg(null);
       }
@@ -508,7 +620,7 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
           return [frame];
         });
       } else {
-        setPolyPoints((prev) => [...prev, frame]);
+        setPolyDraft((prev) => [...prev, frame]);
       }
     },
     [mode, toFrameCoords, findNearestPoint],
@@ -518,7 +630,7 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       if (mode === "polygon") {
         e.preventDefault();
-        setPolyPoints((prev) => (prev.length > 1 ? prev.slice(0, -1) : prev));
+        setPolyDraft((prev) => (prev.length > 1 ? prev.slice(0, -1) : prev));
       }
     },
     [mode],
@@ -527,15 +639,32 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
   /* ── Actions ────────────────────────────────────────── */
   const resetPoints = useCallback(() => {
     setLinePoints([]);
-    setPolyPoints([]);
+    setPolyRings([]);
+    setPolyDraft([]);
     setMsg(null);
   }, []);
 
   const undoLast = useCallback(() => {
     if (mode === "line") setLinePoints((p) => p.slice(0, -1));
-    else setPolyPoints((p) => p.slice(0, -1));
+    else setPolyDraft((d) => (d.length > 0 ? d.slice(0, -1) : d));
     setMsg(null);
   }, [mode]);
+
+  const commitNewRing = useCallback(() => {
+    if (polyDraft.length < 3) {
+      setMsg({ text: "Rascunho: mínimo 3 vértices para fechar este polígono.", ok: false });
+      return;
+    }
+    setPolyRings((rings) => [
+      ...rings,
+      {
+        title: `Área ${rings.length + 1}`,
+        points: polyDraft.map((p) => ({ ...p })),
+      },
+    ]);
+    setPolyDraft([]);
+    setMsg(null);
+  }, [polyDraft]);
 
   const apply = useCallback(async () => {
     setSaving(true);
@@ -555,14 +684,27 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
         if (!res.ok) throw new Error(await res.text());
         setMsg({ text: "Linha aplicada com sucesso!", ok: true });
       } else {
-        if (polyPoints.length < 3) {
-          setMsg({ text: "Clique em pelo menos 3 pontos para o polígono.", ok: false });
+        const specs: CountPolygonSpec[] = polyRings.map((r, i) => ({
+          title: (r.title.trim() || `Área ${i + 1}`).slice(0, 64),
+          points: r.points.map((p) => ({ ...p })),
+        }));
+        if (polyDraft.length >= 3) {
+          specs.push({
+            title: `Área ${specs.length + 1}`,
+            points: polyDraft.map((p) => ({ ...p })),
+          });
+        }
+        if (!specs.some((s) => s.points.length >= 3)) {
+          setMsg({
+            text: "Defina pelo menos um polígono fechado (3+ vértices) no rascunho ou feche um e abra outro.",
+            ok: false,
+          });
           return;
         }
         const res = await fetch(`${apiBase}/api/polygon`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ points: polyPoints, reset_counters: true }),
+          body: JSON.stringify({ polygons: specs, reset_counters: true }),
         });
         if (!res.ok) throw new Error(await res.text());
         await fetch(`${apiBase}/api/mode`, {
@@ -578,7 +720,7 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
     } finally {
       setSaving(false);
     }
-  }, [mode, linePoints, polyPoints, apiBase, onApplied]);
+  }, [mode, linePoints, polyRings, polyDraft, apiBase, onApplied]);
 
   /* ── Keyboard shortcuts ─────────────────────────────── */
   const applyRef  = useRef(apply);
@@ -601,8 +743,14 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
   }, [onClose]);
 
   /* ── Derived state ──────────────────────────────────── */
-  const points   = mode === "line" ? linePoints : polyPoints;
-  const canApply = mode === "line" ? linePoints.length === 2 : polyPoints.length >= 3;
+  const polyVertCount =
+    polyRings.reduce((n, r) => n + r.points.length, 0) + polyDraft.length;
+  const hasGeometry =
+    mode === "line" ? linePoints.length > 0 : polyVertCount > 0;
+  const canApply =
+    mode === "line"
+      ? linePoints.length === 2
+      : polyRings.some((r) => r.points.length >= 3) || polyDraft.length >= 3;
 
   const accent    = mode === "line" ? "var(--cyan)"        : "var(--amber)";
   const accentDim = mode === "line" ? "var(--cyan-dim)"    : "var(--amber-dim)";
@@ -614,9 +762,11 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
       if (linePoints.length === 1) return "Clique para definir o ponto final (B)";
       return "Linha pronta · arraste os pontos para reposicionar · pressione Aplicar";
     }
-    if (polyPoints.length === 0) return "Clique para adicionar o primeiro vértice";
-    if (polyPoints.length < 3)   return `Mais ${3 - polyPoints.length} vértice${3 - polyPoints.length !== 1 ? "s" : ""} para fechar`;
-    return "Arraste vértices para ajustar · duplo-clique para remover o último · pressione Aplicar";
+    if (polyRings.length === 0 && polyDraft.length === 0) return "Clique para o 1.º vértice do 1.º polígono";
+    if (polyDraft.length > 0 && polyDraft.length < 3) {
+      return `Rascunho: mais ${3 - polyDraft.length} vértice${3 - polyDraft.length !== 1 ? "s" : ""} · «Novo polígono» fecha o actual`;
+    }
+    return "«Novo polígono» fecha o rascunho (≥3 pts) e inicia outro · arraste vértices · duplo-clique remove último no rascunho · Aplicar";
   })();
 
   /* ── Render ─────────────────────────────────────────── */
@@ -700,7 +850,7 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
             </div>
 
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              {points.length > 0 && (
+              {hasGeometry && (
                 <div style={{
                   padding: "2px 10px",
                   background: accentDim,
@@ -713,7 +863,7 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
                 }}>
                   {mode === "line"
                     ? `${linePoints.length} / 2`
-                    : `${polyPoints.length} vértice${polyPoints.length !== 1 ? "s" : ""}`}
+                    : `${polyRings.length} políg. · ${polyVertCount} vért.`}
                 </div>
               )}
               <button
@@ -800,16 +950,48 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
                   />
                 )}
                 {mode === "polygon" && (
-                  <SuggestZonesButton
-                    apiBase={apiBase}
-                    frameW={imgSize.w}
-                    frameH={imgSize.h}
-                    onSuggested={(zones) => {
-                      if (zones.length > 0) {
-                        setPolyPoints(zones[0].polygon.map(([x, y]) => ({ x, y })));
-                      }
-                    }}
-                  />
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => commitNewRing()}
+                      title="Fecha o rascunho actual (≥3 pontos) e inicia outro polígono"
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 5,
+                        padding: "5px 11px",
+                        borderRadius: 6,
+                        border: "1px solid var(--border-accent)",
+                        background: "var(--amber-dim)",
+                        color: "var(--amber)",
+                        fontFamily: "var(--font-display)",
+                        fontSize: 9,
+                        fontWeight: 700,
+                        letterSpacing: "0.06em",
+                        textTransform: "uppercase",
+                        cursor: "pointer",
+                      }}
+                    >
+                      Novo polígono
+                    </button>
+                    <SuggestZonesButton
+                      apiBase={apiBase}
+                      frameW={imgSize.w}
+                      frameH={imgSize.h}
+                      onSuggested={(zones) => {
+                        if (zones.length > 0) {
+                          setPolyRings(
+                            zones.map((z, zi) => ({
+                              title:
+                                (z.label && z.label.trim()) || `Zona ${zi + 1}`,
+                              points: z.polygon.map(([x, y]) => ({ x, y })),
+                            })),
+                          );
+                          setPolyDraft([]);
+                        }
+                      }}
+                    />
+                  </>
                 )}
               </div>
 
@@ -863,7 +1045,7 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
                 )}
 
                 {/* Drag hint */}
-                {points.length > 0 && (
+                {hasGeometry && (
                   <div style={{
                     position: "absolute", bottom: 10, right: 10,
                     fontFamily: "var(--font-mono)", fontSize: 9,
@@ -875,7 +1057,8 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
                 )}
 
                 {/* Empty state hint */}
-                {points.length === 0 && (
+                {(mode === "line" ? linePoints.length === 0
+                  : polyDraft.length === 0 && polyRings.length === 0) && (
                   <div style={{
                     position: "absolute", inset: 0,
                     display: "flex", alignItems: "center", justifyContent: "center",
@@ -927,10 +1110,11 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
                   <span style={{
                     fontFamily: "var(--font-mono)",
                     fontSize: 9, fontWeight: 700,
-                    color: points.length > 0 ? accent : "var(--text-muted)",
+                    color: hasGeometry ? accent : "var(--text-muted)",
                     transition: "color 0.2s",
                   }}>
-                    {points.length}{mode === "line" ? " / 2" : ""}
+                    {mode === "line" ? linePoints.length : polyVertCount}
+                    {mode === "line" ? " / 2" : ""}
                   </span>
                 </div>
 
@@ -1005,20 +1189,87 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
                   </>
                 )}
 
-                {/* POLYGON: dynamic vertex list */}
+                {/* POLYGON: rascunho actual (lista); poligonos fechados no canvas */}
                 {mode === "polygon" && (
                   <>
-                    {polyPoints.length === 0 ? (
+                    <div style={{
+                      fontFamily: "var(--font-mono)", fontSize: 10,
+                      color: "var(--text-muted)", marginBottom: 8, lineHeight: 1.5,
+                    }}>
+                      {polyRings.length > 0
+                        ? `${polyRings.length} área(s) fechada(s). `
+                        : ""}
+                      Edite o rascunho abaixo; «Novo polígono» fecha o rascunho (mín. 3 pontos).
+                    </div>
+                    {polyRings.map((pr, ri) => (
+                      <div
+                        key={`ring-title-${ri}`}
+                        className="roi-row"
+                        style={{
+                          marginBottom: 8,
+                          padding: "8px 9px",
+                          background: "var(--bg-surface)",
+                          border: "1px solid var(--border)",
+                          borderRadius: 6,
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 6,
+                        }}
+                      >
+                        <span style={{
+                          fontFamily: "var(--font-display)",
+                          fontSize: 8,
+                          fontWeight: 700,
+                          letterSpacing: "0.12em",
+                          textTransform: "uppercase",
+                          color: "var(--text-muted)",
+                        }}>
+                          Título · polígono {ri + 1}
+                        </span>
+                        <input
+                          type="text"
+                          value={pr.title}
+                          maxLength={64}
+                          onChange={(e) =>
+                            setPolyRings((prev) =>
+                              prev.map((p, i) =>
+                                i === ri ? { ...p, title: e.target.value } : p,
+                              ),
+                            )
+                          }
+                          placeholder={`Área ${ri + 1}`}
+                          style={{
+                            width: "100%",
+                            boxSizing: "border-box",
+                            padding: "6px 8px",
+                            borderRadius: 4,
+                            border: "1px solid var(--border-accent)",
+                            background: "var(--bg-elevated)",
+                            color: "var(--text-primary)",
+                            fontFamily: "var(--font-mono)",
+                            fontSize: 11,
+                          }}
+                        />
+                        <span style={{
+                          fontFamily: "var(--font-mono)",
+                          fontSize: 9,
+                          color: "var(--text-muted)",
+                        }}>
+                          {pr.points.length} vértice{pr.points.length !== 1 ? "s" : ""}
+                        </span>
+                      </div>
+                    ))}
+                    {polyDraft.length === 0 ? (
                       <div style={{
                         padding: "14px 10px", textAlign: "center",
                         border: "1px dashed var(--border)", borderRadius: 6,
                         fontFamily: "var(--font-mono)", fontSize: 10,
                         color: "var(--text-muted)", opacity: 0.45,
                       }}>
-                        Nenhum vértice
+                        Rascunho sem vértices — clique no vídeo
                       </div>
                     ) : (
-                      polyPoints.map((p, i) => (
+                      polyDraft.map((p, i) => (
                         <div
                           key={i}
                           className="roi-row"
@@ -1052,7 +1303,7 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
                             </div>
                           </div>
                           <button
-                            onClick={() => setPolyPoints((ps) => ps.filter((_, idx) => idx !== i))}
+                            onClick={() => setPolyDraft((ps) => ps.filter((_, idx) => idx !== i))}
                             title="Remover vértice"
                             style={{
                               background: "none", border: "none",
@@ -1152,18 +1403,18 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
             <div style={{ display: "flex", gap: 6 }}>
               <button
                 onClick={undoLast}
-                disabled={points.length === 0}
+                disabled={!hasGeometry}
                 title="Desfazer (Z)"
                 style={{
                   display: "flex", alignItems: "center", gap: 5,
                   padding: "6px 12px",
                   background: "var(--bg-surface)",
-                  color: points.length === 0 ? "var(--text-muted)" : "var(--text-secondary)",
+                  color: !hasGeometry ? "var(--text-muted)" : "var(--text-secondary)",
                   border: "1px solid var(--border)",
-                  borderRadius: 6, cursor: points.length === 0 ? "not-allowed" : "pointer",
+                  borderRadius: 6, cursor: !hasGeometry ? "not-allowed" : "pointer",
                   fontFamily: "var(--font-display)", fontSize: 10, fontWeight: 700,
                   letterSpacing: "0.08em", textTransform: "uppercase",
-                  opacity: points.length === 0 ? 0.38 : 1,
+                  opacity: !hasGeometry ? 0.38 : 1,
                   transition: "all 0.15s",
                 }}
               >
@@ -1171,18 +1422,18 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
               </button>
               <button
                 onClick={resetPoints}
-                disabled={points.length === 0}
+                disabled={!hasGeometry}
                 title="Limpar (C)"
                 style={{
                   display: "flex", alignItems: "center", gap: 5,
                   padding: "6px 12px",
                   background: "var(--bg-surface)",
-                  color: points.length === 0 ? "var(--text-muted)" : "var(--text-secondary)",
+                  color: !hasGeometry ? "var(--text-muted)" : "var(--text-secondary)",
                   border: "1px solid var(--border)",
-                  borderRadius: 6, cursor: points.length === 0 ? "not-allowed" : "pointer",
+                  borderRadius: 6, cursor: !hasGeometry ? "not-allowed" : "pointer",
                   fontFamily: "var(--font-display)", fontSize: 10, fontWeight: 700,
                   letterSpacing: "0.08em", textTransform: "uppercase",
-                  opacity: points.length === 0 ? 0.38 : 1,
+                  opacity: !hasGeometry ? 0.38 : 1,
                   transition: "all 0.15s",
                 }}
               >

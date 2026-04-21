@@ -94,7 +94,17 @@ export default function App() {
                   flexShrink: 0,
                 }}
               >
-                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <div
+                  style={{
+                    display: "flex",
+                    gap: 8,
+                    alignItems: "flex-start",
+                    flexWrap: "wrap",
+                    minWidth: 0,
+                    maxWidth: "100%",
+                    flex: "0 1 auto",
+                  }}
+                >
                   <TrackingModeToggle
                     apiBase={API_BASE}
                     vehicleTrackingAvailable={stats.vehicle_tracking_available ?? false}
@@ -389,6 +399,7 @@ export default function App() {
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
+          gap: 12,
           background: "var(--bg-surface)",
           flexShrink: 0,
           boxShadow: "0 -1px 0 rgba(255,149,0,0.07)",
@@ -401,14 +412,39 @@ export default function App() {
           letterSpacing: "0.18em",
           textTransform: "uppercase",
           color: "var(--text-muted)",
+          flexShrink: 0,
         }}>
           VisionCount · Atualização a cada 2s
+        </span>
+        <span
+          title={
+            (stats.model_nc ?? 0) > 0
+              ? `YOLO nc=${stats.model_nc} · COUNT_CLASS_IDS [${(stats.yolo_count_class_ids ?? []).join(", ")}] · deteção ativa [${(stats.track_active_class_ids ?? []).join(", ")}]`
+              : ""
+          }
+          style={{
+            flex: 1,
+            minWidth: 0,
+            textAlign: "center",
+            fontFamily: "var(--font-mono)",
+            fontSize: 10,
+            color: "var(--text-muted)",
+            letterSpacing: "0.04em",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {(stats.model_nc ?? 0) > 0
+            ? `YOLO nc=${stats.model_nc} · contagem [${(stats.yolo_count_class_ids ?? []).join(", ")}] · deteção ativa [${(stats.track_active_class_ids ?? []).join(", ")}]`
+            : "—"}
         </span>
         <span style={{
           fontFamily: "var(--font-mono)",
           fontSize: 10,
           color: "var(--text-muted)",
           letterSpacing: "0.04em",
+          flexShrink: 0,
         }}>
           {new Date().toLocaleTimeString("pt-BR")}
         </span>

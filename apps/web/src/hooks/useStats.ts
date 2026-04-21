@@ -55,6 +55,7 @@ const EMPTY_STATS: Stats = {
   cam_drift_reason: "",
   cam_drift_baseline_ready: false,
   vehicle_tracking_available: false,
+  model_nc: 0,
   yolo_count_class_ids: [],
   yolo_person_class_id: 0,
   track_active_class_ids: [],

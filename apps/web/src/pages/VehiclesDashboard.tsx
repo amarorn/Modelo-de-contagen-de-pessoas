@@ -560,6 +560,9 @@ export function VehiclesDashboard({ apiBase }: Props) {
                 <>
                   <p style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)", margin: "0 0 10px", lineHeight: 1.5 }}>
                     Selecione quais classes o modelo rastreia. Pelo menos uma deve ficar ativa.
+                    Com veículos ligados, o servidor pede ao YOLO todas as classes de veículo definidas em{" "}
+                    <code style={{ fontSize: 9 }}>COUNT_CLASS_IDS</code> (ex. moto se o ID estiver na lista).
+                    Se o modelo não tiver classe «moto», é preciso treinar ou trocar o <code style={{ fontSize: 9 }}>.pt</code>.
                   </p>
                   <TrackingModeToggle
                     apiBase={apiBase}

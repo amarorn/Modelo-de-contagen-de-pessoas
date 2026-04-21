@@ -64,6 +64,8 @@ export interface Stats {
   cam_drift_baseline_ready?: boolean;
   /** Modelo com COUNT_CLASS_IDS com mais de uma classe (ex. pessoa + veículo) */
   vehicle_tracking_available?: boolean;
+  /** Numero de classes no head YOLO do modelo carregado (nc); util para validar IDs */
+  model_nc?: number;
   /** IDs em COUNT_CLASS_IDS (mesma ordem que o backend) */
   yolo_count_class_ids?: number[];
   /** ID YOLO da classe «pessoa» (PERSON_CLASS_ID); outras classes em COUNT_CLASS_IDS contam como veículo/outros */
@@ -95,10 +97,20 @@ export interface AuditEvent {
   metadata: Record<string, unknown> | null;
 }
 
+/** Poligono de contagem com titulo (persistido no preset) */
+export interface CountPolygonSpec {
+  title: string;
+  points: { x: number; y: number }[];
+}
+
 export interface ApiConfig {
   mode: "line" | "polygon";
   line: { x1: number; y1: number; x2: number; y2: number } | null;
+  /** Primeiro poligono (compativel com clientes antigos) */
   polygon: { x: number; y: number }[] | null;
+  /** Todos os poligonos de contagem (uniao); cada item tem titulo e pontos */
+  polygons?: CountPolygonSpec[];
+  default_polygons?: CountPolygonSpec[];
   /** Rastro dos pés (linha) sobre o vídeo */
   show_trail?: boolean;
   /** Seta de direção estimada (PCA) sobre o vídeo */
