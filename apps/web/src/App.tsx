@@ -19,6 +19,7 @@ import { SettingsDashboard } from "./components/SettingsDashboard";
 import { AlertsLayer } from "./components/AlertToast";
 import { HeatmapCard } from "./components/HeatmapCard";
 import { ZonesPage } from "./pages/Zones";
+import { VehiclesDashboard } from "./pages/VehiclesDashboard";
 import { ProfileSelector } from "./components/ProfileSelector";
 import { AuditLogPanel } from "./components/AuditLogPanel";
 import { FlowInsightsCard } from "./components/FlowInsightsCard";
@@ -36,7 +37,7 @@ export default function App() {
   const config = useConfig();
   const [roiOpen, setRoiOpen]       = useState(false);
   const [sourceOpen, setSourceOpen] = useState(false);
-  const [view, setView]             = useState<"live" | "settings" | "zones">("live");
+  const [view, setView]             = useState<"live" | "settings" | "zones" | "vehicles">("live");
 
   return (
     <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
@@ -50,13 +51,15 @@ export default function App() {
         camDriftReason={stats.cam_drift_reason ?? ""}
         camDriftBaselineReady={stats.cam_drift_baseline_ready ?? false}
         onOpenSettings={view === "live" ? () => setView("settings") : undefined}
-        onBackToLive={view === "settings" || view === "zones" ? () => setView("live") : undefined}
+        onBackToLive={view === "settings" || view === "zones" || view === "vehicles" ? () => setView("live") : undefined}
       />
 
       {view === "zones" ? (
         <ZonesPage apiBase={API_BASE} onBack={() => setView("live")} />
       ) : view === "settings" ? (
         <SettingsDashboard apiBase={API_BASE} onBack={() => setView("live")} />
+      ) : view === "vehicles" ? (
+        <VehiclesDashboard apiBase={API_BASE} onBack={() => setView("live")} />
       ) : (
         <main
           style={{
@@ -197,15 +200,24 @@ export default function App() {
                 colorDim="var(--amber-dim)"
                 subtitle={`pico: ${stats.peak_flow} às ${String(stats.peak_hour).padStart(2, "0")}h`}
               />
-              <StatCard
-                variant="counter"
-                label="Veículos"
-                value={stats.vehicle_total ?? 0}
-                icon={<IconCar size={14} />}
-                color="#F97316"
-                colorDim="rgba(249,115,22,0.12)"
-                subtitle={`↑${stats.vehicle_entries ?? 0} ↓${stats.vehicle_exits ?? 0}`}
-              />
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={() => setView("vehicles")}
+                onKeyDown={e => e.key === "Enter" && setView("vehicles")}
+                style={{ cursor: "pointer" }}
+                title="Abrir dashboard de veículos"
+              >
+                <StatCard
+                  variant="counter"
+                  label="Veículos"
+                  value={stats.vehicle_total ?? 0}
+                  icon={<IconCar size={14} />}
+                  color="#F97316"
+                  colorDim="rgba(249,115,22,0.12)"
+                  subtitle={`↑${stats.vehicle_entries ?? 0} ↓${stats.vehicle_exits ?? 0} · clique para detalhes`}
+                />
+              </div>
               {stats.reid_unique_persons > 0 && (
                 <StatCard
                   variant="counter"

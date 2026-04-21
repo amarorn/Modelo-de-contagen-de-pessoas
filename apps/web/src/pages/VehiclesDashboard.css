@@ -1,0 +1,314 @@
+/* ── VehiclesDashboard ───────────────────────────────────────── */
+
+.vd-page {
+  flex: 1;
+  padding: 18px clamp(14px, 2.5vw, 32px) 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Header */
+.vd-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.vd-back-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 7px 13px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+  flex-shrink: 0;
+}
+.vd-back-btn:hover {
+  border-color: #F97316;
+  color: #F97316;
+}
+
+.vd-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-primary);
+}
+
+.vd-title-icon {
+  color: #F97316;
+  display: flex;
+  align-items: center;
+}
+
+.vd-header-sep {
+  flex: 1;
+}
+
+.vd-live-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid currentColor;
+  opacity: 0.9;
+}
+.vd-live-connected  { color: #2EB87A; }
+.vd-live-connecting { color: #F0A500; }
+.vd-live-error      { color: #E04E4E; }
+
+.vd-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.vd-live-connected .vd-live-dot {
+  animation: vd-pulse 2s ease-in-out infinite;
+}
+@keyframes vd-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.25; }
+}
+
+/* ── KPI row ─────────────────────────────────────────────────── */
+.vd-kpi-row {
+  display: grid;
+  grid-template-columns: 1.6fr 1fr 1fr 1fr;
+  gap: 12px;
+}
+
+.vd-kpi-card {
+  position: relative;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-top: 2px solid var(--kpi-color, #F97316);
+  border-radius: var(--radius);
+  padding: 16px 20px 18px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  transition: background 0.15s;
+}
+.vd-kpi-card:hover {
+  background: var(--bg-elevated);
+}
+
+.vd-kpi-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.vd-kpi-label {
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.vd-kpi-icon-wrap {
+  display: flex;
+  align-items: center;
+  opacity: 0.7;
+}
+
+.vd-kpi-value {
+  font-size: 46px;
+  font-weight: 600;
+  letter-spacing: -0.04em;
+  line-height: 1;
+}
+.vd-kpi-large .vd-kpi-value {
+  font-size: 58px;
+}
+
+.vd-kpi-sub {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.vd-kpi-glow {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* ── Chart card ──────────────────────────────────────────────── */
+.vd-chart-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+}
+
+.vd-section-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.vd-section-title {
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.vd-section-meta {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.5;
+}
+
+.vd-sparkline-svg {
+  width: 100%;
+  height: 180px;
+  display: block;
+}
+
+.vd-sparkline-empty {
+  height: 180px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  opacity: 0.5;
+}
+
+.vd-live-dot {
+  filter: drop-shadow(0 0 5px #F97316);
+  animation: vd-pulse 2s ease-in-out infinite;
+}
+
+.vd-pulse-ring {
+  animation: vd-ring 2s ease-out infinite;
+  transform-origin: center;
+}
+@keyframes vd-ring {
+  0%   { r: 6;  opacity: 0.5; }
+  100% { r: 14; opacity: 0; }
+}
+
+/* ── Bottom row ──────────────────────────────────────────────── */
+.vd-bottom-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.vd-stats-card,
+.vd-tracking-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+}
+
+.vd-stats-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.vd-stat-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border);
+}
+.vd-stat-row:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.vd-stat-row:first-child {
+  padding-top: 0;
+}
+
+.vd-stat-label {
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.vd-stat-value {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+/* Tracking card */
+.vd-tracking-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.vd-tracking-hint {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.65;
+  margin: 0;
+}
+
+.vd-unavail-msg {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.65;
+  margin: 0;
+  opacity: 0.7;
+}
+
+/* ── Responsive ──────────────────────────────────────────────── */
+@media (max-width: 960px) {
+  .vd-kpi-row {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+@media (max-width: 640px) {
+  .vd-kpi-row {
+    grid-template-columns: 1fr;
+  }
+  .vd-bottom-row {
+    grid-template-columns: 1fr;
+  }
+}
