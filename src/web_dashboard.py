@@ -1056,6 +1056,107 @@ def _draw_heading_arrow(
     cv2.circle(frame, p1, 3, color,    -1, cv2.LINE_AA)
 
 
+def _draw_label_pill(
+    frame: np.ndarray,
+    text: str,
+    center: tuple[int, int],
+    color: tuple[int, int, int],
+    fw: int, fh: int,
+    scale: float = 0.44,
+    thickness: int = 1,
+) -> None:
+    """Desenha label em pilula (fundo preto + borda colorida + texto branco)."""
+    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+    pad_x, pad_y = 7, 4
+    cx, cy = center
+    x0 = max(2, cx - tw // 2 - pad_x)
+    y0 = max(2, cy - th // 2 - pad_y)
+    x1 = min(fw - 3, x0 + tw + pad_x * 2)
+    y1 = min(fh - 3, y0 + th + pad_y * 2)
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x0, y0), (x1, y1), (0, 0, 0), -1, cv2.LINE_AA)
+    cv2.addWeighted(overlay, 0.78, frame, 0.22, 0, frame)
+    cv2.rectangle(frame, (x0, y0), (x1, y1), color, 1, cv2.LINE_AA)
+    tx = x0 + pad_x
+    ty = y0 + pad_y + th - 1
+    cv2.putText(frame, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX,
+                scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+    cv2.putText(frame, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX,
+                scale, _C_WHITE, thickness, cv2.LINE_AA)
+
+
+def _draw_flow_direction_arrow(
+    frame: np.ndarray,
+    tail: tuple[int, int],
+    head: tuple[int, int],
+    color: tuple[int, int, int],
+    fw: int, fh: int,
+    inverted: bool = False,
+) -> None:
+    """Seta estilizada de fluxo dentro da zona.
+
+    A cauda e' onde as pessoas entram na zona (tag ENTRADA); a ponta e' onde
+    saem (tag SAIDA). Se 'inverted' as tags sao trocadas.
+
+    Visual: shaft com glow (preto) + cor + highlight branco fino; ponta em
+    triangulo preenchido com contorno escuro; cauda com ponto duplo.
+    """
+    sx, sy = tail
+    ex, ey = head
+    dx = float(ex - sx)
+    dy = float(ey - sy)
+    length = (dx * dx + dy * dy) ** 0.5
+    if length < 6.0:
+        return
+    ux, uy = dx / length, dy / length
+    nx, ny = -uy, ux
+    head_len = max(14.0, min(34.0, length * 0.42))
+    head_half_w = head_len * 0.58
+    shaft_end_x = ex - ux * head_len
+    shaft_end_y = ey - uy * head_len
+    s0 = (int(round(sx)), int(round(sy)))
+    se = (int(round(shaft_end_x)), int(round(shaft_end_y)))
+    cv2.line(frame, s0, se, (0, 0, 0), 10, cv2.LINE_AA)
+    cv2.line(frame, s0, se, color, 6, cv2.LINE_AA)
+    cv2.line(frame, s0, se, _C_WHITE, 1, cv2.LINE_AA)
+    tip = (int(round(ex)), int(round(ey)))
+    pL = (int(round(shaft_end_x + nx * head_half_w)),
+          int(round(shaft_end_y + ny * head_half_w)))
+    pR = (int(round(shaft_end_x - nx * head_half_w)),
+          int(round(shaft_end_y - ny * head_half_w)))
+    tri = np.array([tip, pL, pR], dtype=np.int32)
+    tri_outer = np.array([
+        (int(round(ex + ux * 2)), int(round(ey + uy * 2))),
+        (int(round(shaft_end_x + nx * (head_half_w + 2))),
+         int(round(shaft_end_y + ny * (head_half_w + 2)))),
+        (int(round(shaft_end_x - nx * (head_half_w + 2))),
+         int(round(shaft_end_y - ny * (head_half_w + 2)))),
+    ], dtype=np.int32)
+    cv2.fillPoly(frame, [tri_outer], (0, 0, 0), lineType=cv2.LINE_AA)
+    cv2.fillPoly(frame, [tri], color, lineType=cv2.LINE_AA)
+    # Brilho interno do triangulo: linha fina do centro ate o tip
+    mid_base_x = (pL[0] + pR[0]) / 2.0
+    mid_base_y = (pL[1] + pR[1]) / 2.0
+    cv2.line(
+        frame,
+        (int(round(mid_base_x)), int(round(mid_base_y))),
+        tip,
+        _C_WHITE,
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.circle(frame, s0, 9, (0, 0, 0), -1, cv2.LINE_AA)
+    cv2.circle(frame, s0, 6, color, -1, cv2.LINE_AA)
+    cv2.circle(frame, s0, 3, _C_WHITE, -1, cv2.LINE_AA)
+    tail_label = "SAIDA" if inverted else "ENTRADA"
+    head_label = "ENTRADA" if inverted else "SAIDA"
+    off = 22
+    tail_lbl_pos = (int(round(sx + nx * off)), int(round(sy + ny * off)))
+    head_lbl_pos = (int(round(ex - nx * off)), int(round(ey - ny * off)))
+    _draw_label_pill(frame, tail_label, tail_lbl_pos, color, fw, fh)
+    _draw_label_pill(frame, head_label, head_lbl_pos, color, fw, fh)
+
+
 def _overlay_text(
     frame: np.ndarray,
     text: str,
@@ -2847,24 +2948,39 @@ def inference_loop(
                                 2,
                                 lineType=cv2.LINE_AA,
                             )
-                            # Seta de direcao: mostra o fluxo medio de pessoas
-                            # dentro da zona. A cauda da seta indica "direcao de
-                            # entrada" (de onde vem) e a ponta "direcao de saida".
+                            # Seta estilizada de fluxo dentro da zona:
+                            # cauda = ENTRADA (por onde as pessoas entram);
+                            # ponta = SAIDA (por onde as pessoas saem).
                             if ri < len(poly_heading_ema):
                                 _hx, _hy = poly_heading_ema[ri]
                                 _hmag = (_hx * _hx + _hy * _hy) ** 0.5
                                 if _hmag > 0.35:
-                                    _scale = 60.0 / max(1e-6, _hmag)
-                                    _ex = int(round(cx + _hx * _scale))
-                                    _ey = int(round(cy + _hy * _scale))
-                                    _sx = int(round(cx - _hx * _scale * 0.55))
-                                    _sy = int(round(cy - _hy * _scale * 0.55))
+                                    # Comprimento proporcional ao menor raio da zona.
+                                    _xs = [int(p[0]) for p in ring]
+                                    _ys = [int(p[1]) for p in ring]
+                                    _zw = max(1, max(_xs) - min(_xs))
+                                    _zh = max(1, max(_ys) - min(_ys))
+                                    _max_len = min(_zw, _zh) * 0.42
+                                    _arr_len = max(40.0, min(110.0, _max_len))
+                                    _scale = _arr_len / max(1e-6, _hmag)
+                                    _ex = int(round(cx + _hx * _scale * 0.55))
+                                    _ey = int(round(cy + _hy * _scale * 0.55))
+                                    _sx = int(round(cx - _hx * _scale * 0.45))
+                                    _sy = int(round(cy - _hy * _scale * 0.45))
                                     _sx = max(2, min(fw - 3, _sx))
                                     _sy = max(2, min(fh - 3, _sy))
                                     _ex = max(2, min(fw - 3, _ex))
                                     _ey = max(2, min(fh - 3, _ey))
-                                    _draw_heading_arrow(
-                                        frame, (_sx, _sy), (_ex, _ey), bd_color
+                                    _inv = bool(
+                                        named_clamped[ri].get("inverted", False)
+                                    ) if ri < len(named_clamped) else False
+                                    _draw_flow_direction_arrow(
+                                        frame,
+                                        (_sx, _sy),
+                                        (_ex, _ey),
+                                        bd_color,
+                                        fw, fh,
+                                        inverted=_inv,
                                     )
                     _overlay_text(frame, text, live_text, fw, fh)
                 elif count_mode == "polygon":
