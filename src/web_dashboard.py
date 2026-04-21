@@ -382,6 +382,9 @@ class SharedState:
         self.heatmap_live_payload: dict = {
             "grid_w": 32, "grid_h": 18, "max_val": 0.0, "total_events": 0, "cells": [],
         }
+        self.vehicle_heatmap_live_payload: dict = {
+            "grid_w": 32, "grid_h": 18, "max_val": 0.0, "total_events": 0, "cells": [],
+        }
         self.dwell_live_payload: dict = {
             "grid_w": 32, "grid_h": 18, "max_val": 0.0, "total_dwell_s": 0.0, "cells": [],
         }
@@ -1531,6 +1534,7 @@ def inference_loop(
             )
 
         grid_live = GridLive()
+        vehicle_grid_live = GridLive()
         _grid_live_counter: int = 0
         heatmap_store = HeatmapStore()
         slot_aggregator = SlotAggregator(grid_h=GridLive.GRID_H, grid_w=GridLive.GRID_W)
@@ -1909,6 +1913,8 @@ def inference_loop(
                             dt_by_tid.get(int(track_id), 0.0),
                         )
                         _is_veh = cls_by_tid.get(track_id, _default_det_cls) != person_class_id
+                        if _is_veh:
+                            vehicle_grid_live.update_track(int(track_id), _cx_n, _cy_n, frame_ts)
                         _last_norm_pos_by_id[int(track_id)] = (_cx_n, _cy_n)
                         if not _is_veh:
                             _bbox_h_samples.append(y_max - y_min)
@@ -2039,6 +2045,7 @@ def inference_loop(
                     if tid not in active_ids:
                         del last_side_by_id[tid]
                         grid_live.evict_track(tid)
+                        vehicle_grid_live.evict_track(tid)
                         flow_grid.evict_track(tid)
                 for tid in list(prev_inside_by_id.keys()):
                     if tid not in active_ids:
@@ -2387,6 +2394,7 @@ def inference_loop(
                     if _grid_live_counter >= 30:
                         _grid_live_counter = 0
                         shared.heatmap_live_payload = grid_live.to_payload()
+                        shared.vehicle_heatmap_live_payload = vehicle_grid_live.to_payload()
                         _hm_cam_id = shared.active_preset_id or "default"
                         _hm_sess_id = shared.session_id
                     if _hotspot_payload_counter >= 30:
@@ -3474,6 +3482,12 @@ def create_app(
     def heatmap_live() -> Response:
         with shared.lock:
             payload = shared.heatmap_live_payload
+        return jsonify(payload)
+
+    @app.get("/api/heatmap/vehicles/live")
+    def heatmap_vehicles_live() -> Response:
+        with shared.lock:
+            payload = shared.vehicle_heatmap_live_payload
         return jsonify(payload)
 
     @app.get("/api/heatmap/historical")

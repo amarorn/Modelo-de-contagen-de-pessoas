@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { HeatmapCanvas } from "./HeatmapCanvas";
 import { useHeatmap } from "../hooks/useHeatmap";
+import { useVehicleHeatmap } from "../hooks/useVehicleHeatmap";
 
 interface SourcePreset {
   id: string;
@@ -25,10 +26,13 @@ export function LiveFeed({ apiBase, hero = false }: Props) {
   const [activePresetId, setActivePresetId] = useState<string>("");
   const [switching, setSwitching]       = useState(false);
 
-  const [showHeatmap, setShowHeatmap]       = useState(false);
-  const [heatmapOpacity, setHeatmapOpacity] = useState(0.6);
+  const [showHeatmap, setShowHeatmap]             = useState(false);
+  const [heatmapOpacity, setHeatmapOpacity]       = useState(0.6);
+  const [showVehicleHeatmap, setShowVehicleHeatmap] = useState(false);
+  const [vehicleHeatmapOpacity, setVehicleHeatmapOpacity] = useState(0.6);
 
   const heatmapPayload = useHeatmap(apiBase, showHeatmap);
+  const vehicleHeatmapPayload = useVehicleHeatmap(apiBase, showVehicleHeatmap);
 
   const imgRef       = useRef<HTMLImageElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -299,6 +303,55 @@ export function LiveFeed({ apiBase, hero = false }: Props) {
             />
           )}
 
+          {/* ── Vehicle heatmap toggle ── */}
+          <button
+            onClick={() => setShowVehicleHeatmap((v) => !v)}
+            title={showVehicleHeatmap ? "Ocultar heatmap de veículos" : "Mostrar heatmap de veículos"}
+            style={{
+              background: showVehicleHeatmap ? "rgba(249,115,22,0.15)" : "var(--bg-surface)",
+              border: `1px solid ${showVehicleHeatmap ? "#F97316" : "var(--border)"}`,
+              borderRadius: "var(--radius-sm)",
+              cursor: "pointer",
+              padding: "4px 8px",
+              color: showVehicleHeatmap ? "#F97316" : "var(--text-muted)",
+              fontFamily: "var(--font-display)",
+              fontSize: 10,
+              fontWeight: 700,
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+              transition: "background 0.15s, border-color 0.15s, color 0.15s",
+            }}
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M19 17H5a2 2 0 0 1-2-2V9l2-4h10l2 4"/>
+              <path d="M5 13h14"/>
+              <circle cx="7.5" cy="17" r="1.5"/>
+              <circle cx="16.5" cy="17" r="1.5"/>
+            </svg>
+            Veíc
+          </button>
+
+          {/* ── Vehicle opacity slider ── */}
+          {showVehicleHeatmap && (
+            <input
+              type="range"
+              min={0.1}
+              max={1}
+              step={0.05}
+              value={vehicleHeatmapOpacity}
+              onChange={(e) => setVehicleHeatmapOpacity(Number(e.target.value))}
+              title={`Opacidade veículos: ${Math.round(vehicleHeatmapOpacity * 100)}%`}
+              style={{
+                width: 56,
+                accentColor: "#F97316",
+                cursor: "pointer",
+              }}
+            />
+          )}
+
           {/* ── LIVE badge ── */}
           <div className="badge badge-red" style={{ fontSize: 10, padding: "2px 7px" }}>
             <span
@@ -430,9 +483,14 @@ export function LiveFeed({ apiBase, hero = false }: Props) {
           />
         )}
 
-        {/* Heatmap canvas overlay */}
+        {/* Heatmap canvas overlay — pessoas */}
         {showHeatmap && !loading && !error && (
           <HeatmapCanvas payload={heatmapPayload} opacity={heatmapOpacity} />
+        )}
+
+        {/* Heatmap canvas overlay — veículos */}
+        {showVehicleHeatmap && !loading && !error && (
+          <HeatmapCanvas payload={vehicleHeatmapPayload} opacity={vehicleHeatmapOpacity} />
         )}
 
         {/* Corner bracket decorations */}
