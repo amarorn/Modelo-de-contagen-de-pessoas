@@ -246,7 +246,8 @@ export function VehiclesDashboard({ apiBase, onBack }: Props) {
     };
     historyRef.current = [...historyRef.current, point].slice(-HISTORY_MAX);
     setHistory([...historyRef.current]);
-  }, [stats.vehicle_total, stats.vehicle_entries, stats.vehicle_exits]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stats]); // stats é um novo objeto a cada polling (2s)
 
   const sessionMax = history.length > 0 ? Math.max(...history.map(h => h.total)) : 0;
   const sessionMin =
