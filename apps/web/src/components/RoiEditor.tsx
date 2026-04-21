@@ -42,7 +42,7 @@ function polygonRingsFromConfig(config: ApiConfig): PolygonRing[] {
         points: spec.points.map((p) => ({ x: p.x, y: p.y })),
       }));
     }
-    return (polys as { x: number; y: number }[][]).map((ring, i) => ({
+    return (polys as unknown as { x: number; y: number }[][]).map((ring, i) => ({
       title: `Área ${i + 1}`,
       points: ring.map((p) => ({ x: p.x, y: p.y })),
     }));

@@ -25,6 +25,7 @@ import { AuditLogPanel } from "./components/AuditLogPanel";
 import { FlowInsightsCard } from "./components/FlowInsightsCard";
 import { TrackingModeToggle } from "./components/TrackingModeToggle";
 import { useFlowInsights } from "./hooks/useFlowInsights";
+import { PolygonMetricsStrip } from "./components/PolygonMetricsStrip";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
@@ -121,6 +122,9 @@ export default function App() {
                   activeProfile={stats.active_env_profile}
                 />
               </div>
+
+              {/* Per-polygon live metrics strip (only visible in polygon mode) */}
+              <PolygonMetricsStrip polygonStats={stats.polygon_stats ?? []} />
             </div>
 
             {/* Right column: KPI counters */}

@@ -82,6 +82,15 @@ export interface Stats {
    * Modo «Todos os veículos»: contagem global (entradas/saídas, velocidade média) sem alertas por cor.
    */
   all_vehicles_mode?: boolean;
+  polygon_stats?: PolygonStat[];
+}
+
+export interface PolygonStat {
+  title: string;
+  entries: number;
+  exits: number;
+  occupancy_now: number;
+  avg_dwell_s: number;
 }
 
 export interface AuditEvent {

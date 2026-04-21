@@ -406,6 +406,8 @@ class SharedState:
             "grid_w": 32, "grid_h": 18, "max_val": 0.0, "total_events": 0, "cells": [],
         }
         self.vehicle_zone_live_payload: dict = {"zones": []}
+        # Per-polygon live stats (assembled each inference frame; polygon mode only)
+        self.polygon_live_stats: list[dict[str, Any]] = []
         self.dwell_live_payload: dict = {
             "grid_w": 32, "grid_h": 18, "max_val": 0.0, "total_dwell_s": 0.0, "cells": [],
         }
@@ -1612,6 +1614,10 @@ def inference_loop(
         # Ultima classe YOLO por track (persiste em frames de hold do overlay / filtro intermitente)
         last_yolo_cls_by_tid: dict[int, int] = {}
         prev_inside_by_id: dict[int, bool] = {}
+        prev_inside_per_poly_by_id: dict[int, list[bool | None]] = {}
+        zone_entered_per_poly_by_id: dict[int, list[float | None]] = {}
+        poly_session_entries: list[int] = []
+        poly_session_exits: list[int] = []
         prev_config_sig: str | None = None
         zone_entered_at_by_id: dict[int, float] = {}
         stationary_since_by_id: dict[int, float] = {}
@@ -1869,6 +1875,8 @@ def inference_loop(
                 if prev_config_sig is not None and cfg_sig != prev_config_sig:
                     last_side_by_id.clear()
                     prev_inside_by_id.clear()
+                    prev_inside_per_poly_by_id.clear()
+                    zone_entered_per_poly_by_id.clear()
                     foot_trail_by_id.clear()
                     zone_entered_at_by_id.clear()
                     stationary_since_by_id.clear()
@@ -1878,6 +1886,10 @@ def inference_loop(
                 named_clamped = clamp_named_polygons(pe_sig, fw, fh)
                 poly_pts_list = [e["points"] for e in named_clamped]
                 poly_titles = [str(e.get("title") or "") for e in named_clamped]
+                n_poly = len(poly_pts_list)
+                if len(poly_session_entries) != n_poly:
+                    poly_session_entries = [0] * n_poly
+                    poly_session_exits = [0] * n_poly
                 frame_ts = time.monotonic()
                 if prev_frame_mono is not None:
                     dt = frame_ts - prev_frame_mono
@@ -2107,6 +2119,28 @@ def inference_loop(
                                     else:
                                         shared.suppressed_events += 1
                             prev_inside_by_id[track_id] = inside
+                            # Per-polygon individual tracking (entries/exits per zone)
+                            if poly_pts_list:
+                                cur_poly = [foot_inside_polygon(foot_x, foot_y, pts) for pts in poly_pts_list]
+                                prev_poly = prev_inside_per_poly_by_id.get(track_id)
+                                if prev_poly is None or len(prev_poly) != len(poly_pts_list):
+                                    prev_poly = [None] * len(poly_pts_list)
+                                for pi, inside_pi in enumerate(cur_poly):
+                                    pp = prev_poly[pi]
+                                    if _track_reliable and pp is not None:
+                                        if not pp and inside_pi:
+                                            if pi < len(poly_session_entries):
+                                                poly_session_entries[pi] += 1
+                                            ept = zone_entered_per_poly_by_id.setdefault(
+                                                track_id, [None] * len(poly_pts_list)
+                                            )
+                                            if len(ept) < len(poly_pts_list):
+                                                ept.extend([None] * (len(poly_pts_list) - len(ept)))
+                                            ept[pi] = frame_ts
+                                        elif pp and not inside_pi:
+                                            if pi < len(poly_session_exits):
+                                                poly_session_exits[pi] += 1
+                                prev_inside_per_poly_by_id[track_id] = cur_poly
                         elif count_mode == "line":
                             side = side_of_line(foot_x, foot_y, x1, y1, x2, y2)
                             with shared.lock:
@@ -2206,6 +2240,10 @@ def inference_loop(
                 for tid in list(prev_inside_by_id.keys()):
                     if tid not in active_ids:
                         del prev_inside_by_id[tid]
+                for tid in list(prev_inside_per_poly_by_id.keys()):
+                    if tid not in active_ids:
+                        del prev_inside_per_poly_by_id[tid]
+                        zone_entered_per_poly_by_id.pop(tid, None)
                 for tid in list(foot_trail_by_id.keys()):
                     if tid not in active_ids:
                         del foot_trail_by_id[tid]
@@ -2540,6 +2578,34 @@ def inference_loop(
                     shared.avg_move_speed_px_per_sec = avg_move_px_sec
                     shared.vehicle_avg_speed_px_per_sec = vehicle_avg_speed_px_sec
                     shared.vehicle_zone_live_payload = {"zones": vehicle_zone_tracker.get_snapshot()}
+                    # Per-polygon live stats
+                    if count_mode == "polygon" and poly_pts_list and named_clamped:
+                        _poly_occ = [0] * len(poly_pts_list)
+                        _poly_dwell_sums = [0.0] * len(poly_pts_list)
+                        _poly_dwell_cnts = [0] * len(poly_pts_list)
+                        for _tid in current_present_ids:
+                            _pstate = prev_inside_per_poly_by_id.get(_tid, [])
+                            _ept = zone_entered_per_poly_by_id.get(_tid, [])
+                            for _pi in range(len(poly_pts_list)):
+                                if _pi < len(_pstate) and _pstate[_pi]:
+                                    _poly_occ[_pi] += 1
+                                    if _pi < len(_ept) and _ept[_pi] is not None:
+                                        _poly_dwell_sums[_pi] += max(0.0, frame_ts - _ept[_pi])
+                                        _poly_dwell_cnts[_pi] += 1
+                        _live_stats: list[dict[str, Any]] = []
+                        for _pi, _e in enumerate(named_clamped):
+                            _title = str(_e.get("title") or "").strip() or f"Área {_pi + 1}"
+                            _avg_d = _poly_dwell_sums[_pi] / _poly_dwell_cnts[_pi] if _poly_dwell_cnts[_pi] > 0 else 0.0
+                            _live_stats.append({
+                                "title": _title,
+                                "entries": poly_session_entries[_pi] if _pi < len(poly_session_entries) else 0,
+                                "exits": poly_session_exits[_pi] if _pi < len(poly_session_exits) else 0,
+                                "occupancy_now": _poly_occ[_pi],
+                                "avg_dwell_s": round(_avg_d, 1),
+                            })
+                        shared.polygon_live_stats = _live_stats
+                    else:
+                        shared.polygon_live_stats = []
                     shared.infer_fps_ema = ema_infer_fps
                     shared.cam_confidence = cam_conf
                     shared.cam_confidence_reasons = cam_conf_reasons
@@ -2973,6 +3039,7 @@ def build_stats_payload(shared: SharedState) -> dict:
                 shared.track_vehicle_enabled if len(shared.yolo_count_class_ids) > 1 else False
             ),
             "all_vehicles_mode": shared.all_vehicles_mode,
+            "polygon_stats": list(shared.polygon_live_stats),
         }
 
 
