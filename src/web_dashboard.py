@@ -20,6 +20,7 @@ import argparse
 import csv
 import json
 import logging
+import math
 import uuid
 from collections import deque
 import os
@@ -1635,6 +1636,10 @@ def inference_loop(
         zone_entered_per_poly_by_id: dict[int, list[float | None]] = {}
         poly_session_entries: list[int] = []
         poly_session_exits: list[int] = []
+        # Vetor de direcao medio (EMA) por poligono, em px/frame.
+        # Usado para desenhar uma seta de fluxo dentro da zona.
+        poly_heading_ema: list[tuple[float, float]] = []
+        prev_foot_px_by_id: dict[int, tuple[int, int]] = {}
         prev_config_sig: str | None = None
         zone_entered_at_by_id: dict[int, float] = {}
         stationary_since_by_id: dict[int, float] = {}
@@ -1907,6 +1912,8 @@ def inference_loop(
                 if len(poly_session_entries) != n_poly:
                     poly_session_entries = [0] * n_poly
                     poly_session_exits = [0] * n_poly
+                if len(poly_heading_ema) != n_poly:
+                    poly_heading_ema = [(0.0, 0.0)] * n_poly
                 with shared.lock:
                     _do_reset = bool(shared.counters_reset_flag)
                     if _do_reset:
@@ -1914,9 +1921,11 @@ def inference_loop(
                 if _do_reset:
                     poly_session_entries = [0] * n_poly
                     poly_session_exits = [0] * n_poly
+                    poly_heading_ema = [(0.0, 0.0)] * n_poly
                     prev_inside_by_id.clear()
                     prev_inside_per_poly_by_id.clear()
                     zone_entered_per_poly_by_id.clear()
+                    prev_foot_px_by_id.clear()
                     last_side_by_id.clear()
                 frame_ts = time.monotonic()
                 if prev_frame_mono is not None:
@@ -2176,7 +2185,32 @@ def inference_loop(
                                         elif _is_exit:
                                             if pi < len(poly_session_exits):
                                                 poly_session_exits[pi] += 1
+                                # Atualiza EMA de direcao por poligono: vetor de
+                                # deslocamento dos pes (px/frame) entre o frame
+                                # anterior e o atual, so para tracks confiaveis
+                                # que estao dentro do poligono.
+                                _prev_foot = prev_foot_px_by_id.get(track_id)
+                                if (
+                                    _track_reliable
+                                    and _prev_foot is not None
+                                    and not is_new_track
+                                ):
+                                    _vx = float(foot_x) - float(_prev_foot[0])
+                                    _vy = float(foot_y) - float(_prev_foot[1])
+                                    _speed = (_vx * _vx + _vy * _vy) ** 0.5
+                                    # Ignora ruido muito pequeno (pessoa parada).
+                                    if _speed > 1.2:
+                                        _alpha = 0.08
+                                        for pi, inside_pi in enumerate(cur_poly):
+                                            if inside_pi and pi < len(poly_heading_ema):
+                                                _hx, _hy = poly_heading_ema[pi]
+                                                _nx = (1 - _alpha) * _hx + _alpha * _vx
+                                                _ny = (1 - _alpha) * _hy + _alpha * _vy
+                                                poly_heading_ema[pi] = (_nx, _ny)
                                 prev_inside_per_poly_by_id[track_id] = cur_poly
+                                prev_foot_px_by_id[track_id] = (
+                                    int(round(foot_x)), int(round(foot_y))
+                                )
                         elif count_mode == "line":
                             side = side_of_line(foot_x, foot_y, x1, y1, x2, y2)
                             with shared.lock:
@@ -2288,6 +2322,9 @@ def inference_loop(
                     if tid not in active_ids:
                         del prev_inside_per_poly_by_id[tid]
                         zone_entered_per_poly_by_id.pop(tid, None)
+                for tid in list(prev_foot_px_by_id.keys()):
+                    if tid not in active_ids:
+                        del prev_foot_px_by_id[tid]
                 for tid in list(foot_trail_by_id.keys()):
                     if tid not in active_ids:
                         del foot_trail_by_id[tid]
@@ -2640,6 +2677,17 @@ def inference_loop(
                         for _pi, _e in enumerate(named_clamped):
                             _title = str(_e.get("title") or "").strip() or f"Área {_pi + 1}"
                             _avg_d = _poly_dwell_sums[_pi] / _poly_dwell_cnts[_pi] if _poly_dwell_cnts[_pi] > 0 else 0.0
+                            _hdx, _hdy = (
+                                poly_heading_ema[_pi]
+                                if _pi < len(poly_heading_ema)
+                                else (0.0, 0.0)
+                            )
+                            _hmag = (_hdx * _hdx + _hdy * _hdy) ** 0.5
+                            _hdeg = (
+                                (math.degrees(math.atan2(_hdy, _hdx)) + 360.0) % 360.0
+                                if _hmag > 0.35
+                                else None
+                            )
                             _live_stats.append({
                                 "title": _title,
                                 "entries": poly_session_entries[_pi] if _pi < len(poly_session_entries) else 0,
@@ -2647,6 +2695,10 @@ def inference_loop(
                                 "occupancy_now": _poly_occ[_pi],
                                 "avg_dwell_s": round(_avg_d, 1),
                                 "inverted": bool(_e.get("inverted", False)),
+                                "heading_deg": (
+                                    round(_hdeg, 1) if _hdeg is not None else None
+                                ),
+                                "heading_speed_px_frame": round(_hmag, 2),
                             })
                         shared.polygon_live_stats = _live_stats
                     else:
@@ -2795,6 +2847,25 @@ def inference_loop(
                                 2,
                                 lineType=cv2.LINE_AA,
                             )
+                            # Seta de direcao: mostra o fluxo medio de pessoas
+                            # dentro da zona. A cauda da seta indica "direcao de
+                            # entrada" (de onde vem) e a ponta "direcao de saida".
+                            if ri < len(poly_heading_ema):
+                                _hx, _hy = poly_heading_ema[ri]
+                                _hmag = (_hx * _hx + _hy * _hy) ** 0.5
+                                if _hmag > 0.35:
+                                    _scale = 60.0 / max(1e-6, _hmag)
+                                    _ex = int(round(cx + _hx * _scale))
+                                    _ey = int(round(cy + _hy * _scale))
+                                    _sx = int(round(cx - _hx * _scale * 0.55))
+                                    _sy = int(round(cy - _hy * _scale * 0.55))
+                                    _sx = max(2, min(fw - 3, _sx))
+                                    _sy = max(2, min(fh - 3, _sy))
+                                    _ex = max(2, min(fw - 3, _ex))
+                                    _ey = max(2, min(fh - 3, _ey))
+                                    _draw_heading_arrow(
+                                        frame, (_sx, _sy), (_ex, _ey), bd_color
+                                    )
                     _overlay_text(frame, text, live_text, fw, fh)
                 elif count_mode == "polygon":
                     cv2.putText(
