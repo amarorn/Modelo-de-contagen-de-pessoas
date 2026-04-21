@@ -2141,11 +2141,14 @@ def inference_loop(
                             if poly_pts_list:
                                 cur_poly = [foot_inside_polygon(foot_x, foot_y, pts) for pts in poly_pts_list]
                                 prev_poly = prev_inside_per_poly_by_id.get(track_id)
-                                if prev_poly is None or len(prev_poly) != len(poly_pts_list):
-                                    prev_poly = [None] * len(poly_pts_list)
+                                is_new_track = prev_poly is None or len(prev_poly) != len(poly_pts_list)
+                                if is_new_track:
+                                    # New track: bootstrap as [False,...] so an immediate
+                                    # inside position correctly fires as an entry.
+                                    prev_poly = [False] * len(poly_pts_list)
                                 for pi, inside_pi in enumerate(cur_poly):
                                     pp = prev_poly[pi]
-                                    if _track_reliable and pp is not None:
+                                    if _track_reliable:
                                         if not pp and inside_pi:
                                             if pi < len(poly_session_entries):
                                                 poly_session_entries[pi] += 1

@@ -4,16 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="1feb0f89-e6ce-46be-bc83-677d520dd1d5" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/Modelo de contagen de pessoas .iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/Modelo de contagen de pessoas .iml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/material_theme_project_new.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/material_theme_project_new.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/apps/web/node_modules/.tmp/tsconfig.app.tsbuildinfo" beforeDir="false" afterPath="$PROJECT_DIR$/apps/web/node_modules/.tmp/tsconfig.app.tsbuildinfo" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/apps/web/src/App.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/apps/web/src/App.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/apps/web/src/components/RoiEditor.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/apps/web/src/components/RoiEditor.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/apps/web/src/types/api.ts" beforeDir="false" afterPath="$PROJECT_DIR$/apps/web/src/types/api.ts" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/web_dashboard.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/web_dashboard.py" afterDir="false" />
-    </list>
+    <list default="true" id="1feb0f89-e6ce-46be-bc83-677d520dd1d5" name="Changes" comment="" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -74,10 +65,10 @@
 }</component>
   <component name="RecapSpentCounter">
     <option name="endsOfQuotaMs" value="1777741207317" />
-    <option name="spentUsd" value="0.004442" />
+    <option name="spentUsd" value="0.0253575" />
   </component>
   <component name="RecapUselessUpdatesCounter">
-    <option name="suspendCountdown" value="9" />
+    <option name="suspendCountdown" value="8" />
   </component>
   <component name="SharedIndexes">
     <attachedChunks>
