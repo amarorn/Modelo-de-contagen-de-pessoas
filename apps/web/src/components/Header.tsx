@@ -1,6 +1,7 @@
 import React from "react";
 import type { ConnectionStatus } from "../types/api";
 import { CameraDriftBadge } from "./CameraDriftBadge";
+import { IconTarget, IconVideo, IconPolygon } from "./Icons";
 
 export type AppView = "pessoas" | "veiculos" | "zonas" | "configuracoes";
 
@@ -9,6 +10,9 @@ interface Props {
   apiBase: string;
   view: AppView;
   onChangeView: (v: AppView) => void;
+  onOpenRoi: () => void;
+  onOpenSource: () => void;
+  onOpenZones: () => void;
   confidence?: "high" | "medium" | "low";
   confidenceReasons?: string[];
   camDriftLevel?: "ok" | "illumination" | "focus" | "position";
@@ -76,6 +80,9 @@ export function Header({
   apiBase,
   view,
   onChangeView,
+  onOpenRoi,
+  onOpenSource,
+  onOpenZones,
   confidence,
   confidenceReasons,
   camDriftLevel = "ok",
@@ -147,47 +154,63 @@ export function Header({
         </div>
       </header>
 
-      {/* ── Nav tab bar ─────────────────────────────────────────── */}
+      {/* ── Nav tab bar + ações comuns (ROI, fonte, zonas) ─────── */}
       <nav style={styles.nav}>
         <div style={styles.navInner}>
-          {NAV_ITEMS.map((item) => {
-            const active = view === item.key;
-            return (
-              <button
-                key={item.key}
-                onClick={() => onChangeView(item.key)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  padding: "0 14px",
-                  height: "100%",
-                  background: "none",
-                  border: "none",
-                  borderBottom: `2px solid ${active ? "var(--amber)" : "transparent"}`,
-                  color: active ? "var(--amber)" : "var(--text-muted)",
-                  fontFamily: "var(--font-display)",
-                  fontSize: 11,
-                  fontWeight: 700,
-                  letterSpacing: "0.10em",
-                  textTransform: "uppercase",
-                  cursor: "pointer",
-                  transition: "color 0.15s, border-color 0.15s",
-                  position: "relative",
-                  flexShrink: 0,
-                }}
-                onMouseEnter={(e) => {
-                  if (!active) (e.currentTarget as HTMLElement).style.color = "var(--text-secondary)";
-                }}
-                onMouseLeave={(e) => {
-                  if (!active) (e.currentTarget as HTMLElement).style.color = "var(--text-muted)";
-                }}
-              >
-                <span style={{ opacity: active ? 1 : 0.6 }}>{item.icon}</span>
-                {item.label}
-              </button>
-            );
-          })}
+          <div style={styles.navTabs}>
+            {NAV_ITEMS.map((item) => {
+              const active = view === item.key;
+              return (
+                <button
+                  key={item.key}
+                  onClick={() => onChangeView(item.key)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "0 14px",
+                    height: "100%",
+                    background: "none",
+                    border: "none",
+                    borderBottom: `2px solid ${active ? "var(--amber)" : "transparent"}`,
+                    color: active ? "var(--amber)" : "var(--text-muted)",
+                    fontFamily: "var(--font-display)",
+                    fontSize: 11,
+                    fontWeight: 700,
+                    letterSpacing: "0.10em",
+                    textTransform: "uppercase",
+                    cursor: "pointer",
+                    transition: "color 0.15s, border-color 0.15s",
+                    position: "relative",
+                    flexShrink: 0,
+                  }}
+                  onMouseEnter={(e) => {
+                    if (!active) (e.currentTarget as HTMLElement).style.color = "var(--text-secondary)";
+                  }}
+                  onMouseLeave={(e) => {
+                    if (!active) (e.currentTarget as HTMLElement).style.color = "var(--text-muted)";
+                  }}
+                >
+                  <span style={{ opacity: active ? 1 : 0.6 }}>{item.icon}</span>
+                  {item.label}
+                </button>
+              );
+            })}
+          </div>
+          <div style={styles.navQuickActions} aria-label="Ações comuns">
+            <button type="button" className="action-btn action-btn-nav" onClick={onOpenRoi} title="Linha e polígono de contagem">
+              <IconTarget size={13} />
+              Configurar ROI
+            </button>
+            <button type="button" className="action-btn action-btn-nav" onClick={onOpenSource} title="URL ou preset de câmara">
+              <IconVideo size={13} />
+              Fonte de Vídeo
+            </button>
+            <button type="button" className="action-btn action-btn-nav" onClick={onOpenZones} title="Zonas semânticas e mapa de calor">
+              <IconPolygon size={13} />
+              Zonas e hotspots
+            </button>
+          </div>
         </div>
       </nav>
     </div>
@@ -221,14 +244,32 @@ const styles = {
   nav: {
     background: "var(--bg-surface)",
     borderBottom: "1px solid var(--border)",
-    height: 36,
+    minHeight: 36,
   },
   navInner: {
     display: "flex",
     alignItems: "stretch",
-    height: "100%",
-    padding: "0 12px",
-    gap: 0,
+    justifyContent: "space-between",
+    flexWrap: "wrap",
+    rowGap: 6,
+    columnGap: 8,
+    minHeight: 36,
+    padding: "4px 12px",
+    boxSizing: "border-box" as const,
+  },
+  navTabs: {
+    display: "flex",
+    alignItems: "stretch",
+    flex: "1 1 auto",
+    minWidth: 0,
+    overflowX: "auto" as const,
+  },
+  navQuickActions: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    flexShrink: 0,
+    paddingLeft: 4,
   },
   leftGroup: {
     display: "flex",

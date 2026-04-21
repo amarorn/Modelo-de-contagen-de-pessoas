@@ -2,12 +2,16 @@ import { useCallback, useEffect, useState } from "react";
 
 interface Props {
   apiBase: string;
+  /** default: textos para pedestres; vehicles: rótulos para veículos e sem toggle Sexo (F/M). */
+  variant?: "default" | "vehicles";
 }
 
 /**
- * Liga/desliga overlays no servidor: rastro dos pés, seta (PCA), sexo (F/M) e mapa de calor.
+ * Liga/desliga overlays no servidor: rastro, seta (PCA), sexo (F/M), mapa de calor e ROI.
+ * O MJPEG é único; estes interruptores são os mesmos da vista Pessoas.
  */
-export function DisplayOverlayToggles({ apiBase }: Props) {
+export function DisplayOverlayToggles({ apiBase, variant = "default" }: Props) {
+  const isVeh = variant === "vehicles";
   const [trail, setTrail] = useState(false);
   const [heading, setHeading] = useState(false);
   const [heatmap, setHeatmap] = useState(false);
@@ -110,10 +114,17 @@ export function DisplayOverlayToggles({ apiBase }: Props) {
       }}
     >
       <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", width: "100%" }}>
-        Visualização no vídeo
+        {isVeh ? "Visualização no vídeo (veículos)" : "Visualização no vídeo"}
       </span>
+      {isVeh && (
+        <span style={{ fontSize: 10, color: "var(--text-muted)", width: "100%", lineHeight: 1.45, marginTop: -4 }}>
+          Mesmo fluxo MJPEG que na vista Pessoas: rastro e seta usam o centro base da caixa (veículo ou pessoa).
+        </span>
+      )}
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>Rastro dos pés</span>
+        <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+          {isVeh ? "Rastro do veículo" : "Rastro dos pés"}
+        </span>
         <button
           type="button"
           disabled={pending || !!err}
@@ -140,7 +151,9 @@ export function DisplayOverlayToggles({ apiBase }: Props) {
         </button>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>Seta de direção (PCA)</span>
+        <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+          {isVeh ? "Direção do veículo (PCA)" : "Seta de direção (PCA)"}
+        </span>
         <button
           type="button"
           disabled={pending || !!err}
@@ -166,6 +179,7 @@ export function DisplayOverlayToggles({ apiBase }: Props) {
           {heading ? "Ligado" : "Desligado"}
         </button>
       </div>
+      {!isVeh && (
       <div
         style={{
           display: "flex",
@@ -209,6 +223,7 @@ export function DisplayOverlayToggles({ apiBase }: Props) {
           {!sexOk ? "Indisponível" : sexOn ? "Ligado" : "Desligado"}
         </button>
       </div>
+      )}
       <div
         style={{
           display: "flex",
@@ -219,11 +234,15 @@ export function DisplayOverlayToggles({ apiBase }: Props) {
         }}
         title={
           heatmapOk
-            ? "Sobrepor mapa de calor agregado (pés) no vídeo"
+            ? isVeh
+              ? "Heatmap no MJPEG (pés + tráfego agregado). Para camada só de veículos (laranja), use o botão «Veíc» sobre o vídeo."
+              : "Sobrepor mapa de calor agregado (pés) no vídeo"
             : "Indisponível: o servidor foi iniciado com WEB_HEATMAP=0 (--no-heatmap). Reinicie com WEB_HEATMAP=1."
         }
       >
-        <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>Mapa de calor</span>
+        <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+          {isVeh ? "Mapa de calor (tráfego)" : "Mapa de calor"}
+        </span>
         <button
           type="button"
           disabled={pending || !!err || !heatmapOk}
@@ -254,7 +273,9 @@ export function DisplayOverlayToggles({ apiBase }: Props) {
         </button>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>Marcações ROI</span>
+        <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+          {isVeh ? "Linha / polígono (ROI)" : "Marcações ROI"}
+        </span>
         <button
           type="button"
           disabled={pending || !!err}

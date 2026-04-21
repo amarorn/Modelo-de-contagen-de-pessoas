@@ -76,6 +76,10 @@ export interface Stats {
   track_people?: boolean;
   /** Se false, YOLO não inclui classes de veículo (só efeito se o modelo tiver várias classes) */
   track_vehicles?: boolean;
+  /**
+   * Modo «Todos os veículos»: contagem global (entradas/saídas, velocidade média) sem alertas por cor.
+   */
+  all_vehicles_mode?: boolean;
 }
 
 export interface AuditEvent {

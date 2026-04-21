@@ -341,6 +341,8 @@ class SharedState:
         self.alert_cap_threshold: float = 0.55
         self.alert_car_min_score: float = 0.08
         self.alert_server_beep: bool = False
+        # UI «Todos os veículos»: conta todas as passagens sem alertas por cor de carro
+        self.all_vehicles_mode: bool = False
         self.started_at = datetime.now()
         self.last_frame_jpeg: bytes | None = None
         self.last_error: str | None = None
@@ -1920,7 +1922,6 @@ def inference_loop(
                             foot_y / float(fh),
                             dt_by_tid.get(int(track_id), 0.0),
                         )
-                        _is_veh = cls_by_tid.get(track_id, _default_det_cls) != person_class_id
                         if _is_veh:
                             vehicle_grid_live.update_track(int(track_id), _cx_n, _cy_n, frame_ts)
                         _last_norm_pos_by_id[int(track_id)] = (_cx_n, _cy_n)
@@ -2095,6 +2096,7 @@ def inference_loop(
                     show_heading_ui = shared.show_heading_overlay
                     show_roi_ui = shared.show_roi_overlay
                     _active_classes = frozenset(shared.track_active_class_ids)
+                    _all_vehicles_mode = shared.all_vehicles_mode
 
                 for track_id, (xa, ya, xb, yb), stale in draw_items:
                     if track_id in raw_foot_by_id:
@@ -2155,6 +2157,7 @@ def inference_loop(
                             )
                     elif (
                         _vehicle_alert_eligible
+                        and not _all_vehicles_mode
                         and shared.alert_car_color_clf is not None
                         and shared.alert_car_color_clf.enabled
                     ):
@@ -2348,14 +2351,22 @@ def inference_loop(
                 )
                 avg_move_px_sec = avg_move_px_frame * ema_infer_fps if ema_infer_fps > 0 else 0.0
 
-                # Velocidade média dos veículos (apenas tracks com cls != person)
+                # Velocidade média dos veículos (cls != person): usa tracks activos no overlay,
+                # nao so current_present_ids (poligono pode excluir carros na estrada).
+                # Limiar minimo em px/frame (default 0.12): o antigo > thr_stationary (2.2) excluia trafego lento.
+                try:
+                    _veh_move_min = float(
+                        os.environ.get("YOLO_VEHICLE_SPEED_MIN_PX_FRAME", "0.12").strip() or "0.12"
+                    )
+                except ValueError:
+                    _veh_move_min = 0.12
                 _veh_speed_samples: list[float] = []
-                for _vtid in current_present_ids:
+                for _vtid in active_ids:
                     if last_yolo_cls_by_tid.get(_vtid, person_class_id) == person_class_id:
                         continue
                     _vdq = foot_trail_by_id.get(_vtid)
                     _vspd = estimate_trail_speed(list(_vdq), max_points=trail_eval_max) if _vdq is not None else None
-                    if _vspd is not None and _vspd > shared.thr_stationary_max_speed:
+                    if _vspd is not None and _vspd >= _veh_move_min and _vspd <= 240.0:
                         _veh_speed_samples.append(_vspd)
                 vehicle_avg_speed_px_sec = (
                     float(sum(_veh_speed_samples) / len(_veh_speed_samples)) * ema_infer_fps
@@ -2392,6 +2403,7 @@ def inference_loop(
                     shared.avg_move_speed_px_per_frame = avg_move_px_frame
                     shared.avg_move_speed_px_per_sec = avg_move_px_sec
                     shared.vehicle_avg_speed_px_per_sec = vehicle_avg_speed_px_sec
+                    shared.vehicle_zone_live_payload = {"zones": vehicle_zone_tracker.get_snapshot()}
                     shared.infer_fps_ema = ema_infer_fps
                     shared.cam_confidence = cam_conf
                     shared.cam_confidence_reasons = cam_conf_reasons
@@ -2432,7 +2444,6 @@ def inference_loop(
                         _grid_live_counter = 0
                         shared.heatmap_live_payload = grid_live.to_payload()
                         shared.vehicle_heatmap_live_payload = vehicle_grid_live.to_payload()
-                        shared.vehicle_zone_live_payload = {"zones": vehicle_zone_tracker.get_snapshot()}
                         _hm_cam_id = shared.active_preset_id or "default"
                         _hm_sess_id = shared.session_id
                     if _hotspot_payload_counter >= 30:
@@ -2788,6 +2799,7 @@ def build_stats_payload(shared: SharedState) -> dict:
             "track_vehicles": (
                 shared.track_vehicle_enabled if len(shared.yolo_count_class_ids) > 1 else False
             ),
+            "all_vehicles_mode": shared.all_vehicles_mode,
         }
 
 
@@ -3948,14 +3960,19 @@ def create_app(
             since = 0
         mgr = shared.alert_manager
         if mgr is None:
+            with shared.lock:
+                _avm = shared.all_vehicles_mode
             return jsonify({
                 "alerts": [],
                 "latest_seq": 0,
                 "cap_enabled": False,
                 "car_colors": [],
                 "cooldown_seconds": 0.0,
+                "all_vehicles_mode": _avm,
             })
         events = [ev.to_dict() for ev in mgr.since(since)]
+        with shared.lock:
+            _avm = shared.all_vehicles_mode
         return jsonify({
             "alerts": events,
             "latest_seq": mgr.latest_seq(),
@@ -3966,6 +3983,7 @@ def create_app(
             "car_min_score": shared.alert_car_min_score,
             "cooldown_seconds": mgr.cooldown_seconds,
             "server_beep": mgr.server_beep,
+            "all_vehicles_mode": _avm,
         })
 
     @app.post("/api/alerts/config")
@@ -3992,6 +4010,9 @@ def create_app(
             shared.alert_cap_detector.set_threshold(th)
             with shared.lock:
                 shared.alert_cap_threshold = th
+        if "all_vehicles_mode" in body:
+            with shared.lock:
+                shared.all_vehicles_mode = bool(body["all_vehicles_mode"])
         if "car_colors" in body:
             new_colors = parse_target_colors(",".join(body["car_colors"]))
             min_score = float(body.get("car_min_score", shared.alert_car_min_score))
@@ -4013,6 +4034,8 @@ def create_app(
             with shared.lock:
                 shared.alert_car_min_score = min_score
 
+        with shared.lock:
+            _avm = shared.all_vehicles_mode
         return jsonify({
             "cap_enabled": shared.alert_cap_enabled,
             "cap_available": shared.alert_cap_detector is not None,
@@ -4021,6 +4044,7 @@ def create_app(
             "car_min_score": shared.alert_car_min_score,
             "cooldown_seconds": mgr.cooldown_seconds,
             "server_beep": mgr.server_beep,
+            "all_vehicles_mode": _avm,
         })
 
     # ── Audit log ────────────────────────────────────────────────────────────

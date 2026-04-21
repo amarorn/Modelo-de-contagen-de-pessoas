@@ -61,6 +61,7 @@ const EMPTY_STATS: Stats = {
   yolo_class_labels: {},
   track_people: true,
   track_vehicles: false,
+  all_vehicles_mode: false,
 };
 
 export function useStats() {

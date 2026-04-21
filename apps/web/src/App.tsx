@@ -3,7 +3,7 @@ import { useStats } from "./hooks/useStats";
 import { useConfig } from "./hooks/useConfig";
 import {
   IconArrowUp, IconArrowDown, IconUsers, IconArrowsUpDown,
-  IconTarget, IconVideo, IconCar, IconQueue, IconPerson,
+  IconCar, IconQueue, IconPerson,
 } from "./components/Icons";
 import { Header, type AppView } from "./components/Header";
 import { StatCard } from "./components/StatCard";
@@ -46,6 +46,9 @@ export default function App() {
         apiBase={API_BASE}
         view={view}
         onChangeView={setView}
+        onOpenRoi={() => setRoiOpen(true)}
+        onOpenSource={() => setSourceOpen(true)}
+        onOpenZones={() => setView("zonas")}
         confidence={stats.cam_confidence}
         confidenceReasons={stats.cam_confidence_reasons}
         camDriftLevel={stats.cam_drift_level ?? "ok"}
@@ -98,21 +101,6 @@ export default function App() {
                     yoloCountClassIds={stats.yolo_count_class_ids ?? []}
                     yoloClassLabels={stats.yolo_class_labels ?? {}}
                     trackActiveClassIds={stats.track_active_class_ids ?? []}
-                  />
-                  <ActionButton
-                    icon={<IconTarget size={13} />}
-                    label="Configurar ROI"
-                    onClick={() => setRoiOpen(true)}
-                  />
-                  <ActionButton
-                    icon={<IconVideo size={13} />}
-                    label="Fonte de Vídeo"
-                    onClick={() => setSourceOpen(true)}
-                  />
-                  <ActionButton
-                    icon={<IconTarget size={13} />}
-                    label="Zonas e hotspots"
-                    onClick={() => setView("zonas")}
                   />
                 </div>
                 <div style={{ flex: "1 1 240px", minWidth: 0 }}>
@@ -379,10 +367,10 @@ export default function App() {
       )}
 
       {/* ── Modals ──────────────────────────────────────────────── */}
-      {view === "pessoas" && sourceOpen && (
+      {(view === "pessoas" || view === "veiculos") && sourceOpen && (
         <SourceEditor apiBase={API_BASE} onClose={() => setSourceOpen(false)} />
       )}
-      {view === "pessoas" && roiOpen && (
+      {(view === "pessoas" || view === "veiculos") && roiOpen && (
         <RoiEditor
           apiBase={API_BASE}
           config={config}
@@ -430,20 +418,6 @@ export default function App() {
 }
 
 /* ── Helper components ────────────────────────────────────────── */
-
-function ActionButton({
-  icon, label, onClick,
-}: { icon: React.ReactNode; label: string; onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      className="action-btn"
-    >
-      {icon}
-      {label}
-    </button>
-  );
-}
 
 function DataRow({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (

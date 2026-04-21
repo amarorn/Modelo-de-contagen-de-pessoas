@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useStats } from "../hooks/useStats";
 import { useVehicleZones } from "../hooks/useVehicleZones";
 import { LiveFeed } from "../components/LiveFeed";
-import { SourceEditor } from "../components/SourceEditor";
 import { TrackingModeToggle } from "../components/TrackingModeToggle";
+import { DisplayOverlayToggles } from "../components/DisplayOverlayToggles";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
@@ -69,13 +69,13 @@ function useAlertConfig() {
       .catch(() => {});
   }, []);
 
-  const save = async () => {
+  const save = async (allVehiclesMode: boolean) => {
     setSaving(true);
     try {
       await fetch(`${API_BASE}/api/alerts/config`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(cfg),
+        body: JSON.stringify({ ...cfg, all_vehicles_mode: allVehiclesMode }),
       });
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -280,8 +280,8 @@ export function VehiclesDashboard({ apiBase }: Props) {
   const { stats, status } = useStats();
   const historyRef = useRef<DataPoint[]>([]);
   const [history, setHistory] = useState<DataPoint[]>([]);
-  const [sourceOpen, setSourceOpen] = useState(false);
   const { cfg, setCfg, saving, saved, save } = useAlertConfig();
+  const [allVehiclesPending, setAllVehiclesPending] = useState(false);
   const vehicleZones = useVehicleZones(apiBase, true);
 
   const [sessionAlertCount, setSessionAlertCount] = useState<number>(() => {
@@ -308,6 +308,25 @@ export function VehiclesDashboard({ apiBase }: Props) {
     const active = stats.track_active_class_ids ?? [];
     return active.some((id) => id !== personClassId);
   }, [stats.track_active_class_ids, personClassId]);
+
+  const allVehiclesMode = stats.all_vehicles_mode ?? false;
+
+  const setAllVehiclesMode = async (next: boolean) => {
+    setAllVehiclesPending(true);
+    try {
+      const r = await fetch(`${apiBase}/api/alerts/config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ all_vehicles_mode: next }),
+      });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        console.warn("all_vehicles_mode", j?.error ?? r.status);
+      }
+    } finally {
+      setAllVehiclesPending(false);
+    }
+  };
 
   const balance = (stats.vehicle_entries ?? 0) - (stats.vehicle_exits ?? 0);
   const ratePerMin = (() => {
@@ -389,7 +408,7 @@ export function VehiclesDashboard({ apiBase }: Props) {
             {status === "connected" && (stats.infer_fps_ema ?? 0) < 0.05 ? (
               <div style={{ marginTop: stats.error ? 8 : 0 }}>
                 <strong style={{ color: "var(--amber)" }}>Sem vídeo na inferência (0 FPS).</strong> Os contadores de veículos só sobem quando há stream estável e objetos cruzam a linha ou o polígono (ROI).
-                Confirme a fonte em «Fonte de Vídeo», <code style={{ fontSize: 10 }}>YOLO_STREAM_BUFFER=1</code> e URL HLS válida; alinhe <code style={{ fontSize: 10 }}>VITE_API_BASE</code> / <code style={{ fontSize: 10 }}>WEB_PORT</code> com a porta do Flask.
+                Confirme a fonte na barra superior («Fonte de Vídeo»), <code style={{ fontSize: 10 }}>YOLO_STREAM_BUFFER=1</code> e URL HLS válida; alinhe <code style={{ fontSize: 10 }}>VITE_API_BASE</code> / <code style={{ fontSize: 10 }}>WEB_PORT</code> com a porta do Flask.
               </div>
             ) : null}
             {stats.vehicle_tracking_available && !vehicleClassActive ? (
@@ -412,8 +431,59 @@ export function VehiclesDashboard({ apiBase }: Props) {
             sub="px/s · veículos em mov."
             color="#A855F7"
           />
-          <KpiBox label="Alertas" value={sessionAlertCount} sub={cfg.car_colors.length > 0 ? cfg.car_colors.join(" · ") : "nenhuma cor alvo"} color="#F59E0B" />
+          <KpiBox
+            label="Alertas"
+            value={allVehiclesMode ? 0 : sessionAlertCount}
+            sub={
+              allVehiclesMode
+                ? "alertas por cor desligados"
+                : cfg.car_colors.length > 0
+                  ? cfg.car_colors.join(" · ")
+                  : "nenhuma cor alvo"
+            }
+            color={allVehiclesMode ? "#71717A" : "#F59E0B"}
+          />
         </div>
+
+        <div
+          className="card"
+          style={{
+            padding: "12px 16px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 16,
+            flexWrap: "wrap",
+            borderLeft: "3px solid #F97316",
+          }}
+        >
+          <div style={{ flex: "1 1 240px", minWidth: 0 }}>
+            <div style={{
+              fontSize: 9, fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.14em",
+              textTransform: "uppercase", color: "#F97316", marginBottom: 6,
+            }}>
+              Todos os veículos
+            </div>
+            <p style={{ margin: 0, fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text-secondary)", lineHeight: 1.55 }}>
+              Liga a contagem de <strong>todas</strong> as passagens na linha ou ROI (sem filtrar por cor ou «modelo» no classificador de alerta). Mantém entradas, saídas e velocidade média agregada; <strong>não dispara alertas</strong> por cor de carro. Tipos específicos (carro, moto, ônibus, …) podem ser acrescentados com um modelo treinado com mais classes.
+            </p>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+            <span style={{
+              fontSize: 10, fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.1em",
+              textTransform: "uppercase", color: allVehiclesMode ? "#F97316" : "var(--text-muted)",
+            }}>
+              {allVehiclesMode ? "Ligado" : "Desligado"}
+            </span>
+            <Toggle
+              value={allVehiclesMode}
+              onChange={v => void setAllVehiclesMode(v)}
+              disabled={allVehiclesPending || status !== "connected"}
+            />
+          </div>
+        </div>
+
+        <DisplayOverlayToggles apiBase={apiBase} variant="vehicles" />
 
         {/* ── Main layout: Camera (left) + Config (right) ───────── */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 340px", gap: 16, alignItems: "start" }}>
@@ -430,26 +500,10 @@ export function VehiclesDashboard({ apiBase }: Props) {
                 background: "var(--bg-elevated)",
                 display: "flex",
                 alignItems: "center",
+                justifyContent: "flex-end",
                 gap: 10,
-                flexWrap: "wrap",
               }}>
-                <button
-                  onClick={() => setSourceOpen(true)}
-                  style={{
-                    display: "flex", alignItems: "center", gap: 5,
-                    background: "var(--bg-elevated)", border: "1px solid var(--border)",
-                    borderRadius: "var(--radius-sm)",
-                    color: "var(--text-muted)", fontFamily: "var(--font-display)",
-                    fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase",
-                    padding: "4px 10px", cursor: "pointer",
-                  }}
-                >
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polygon points="23 7 16 12 23 17 23 7" /><rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
-                  </svg>
-                  Fonte de Vídeo
-                </button>
-                <div style={{ flex: 1, minWidth: 0, fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <div style={{ flex: 1, minWidth: 0, fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "right" }}>
                   {stats.infer_fps_ema > 0 ? `${stats.infer_fps_ema.toFixed(1)} fps inferência` : "aguardando…"}
                 </div>
               </div>
@@ -523,12 +577,31 @@ export function VehiclesDashboard({ apiBase }: Props) {
             </div>
 
             {/* Alert config card */}
-            <div className="card">
+            <div
+              className="card"
+              style={{
+                position: "relative",
+                opacity: allVehiclesMode ? 0.42 : 1,
+                pointerEvents: allVehiclesMode ? "none" : "auto",
+              }}
+            >
+              {allVehiclesMode ? (
+                <div style={{
+                  position: "absolute", inset: 0, zIndex: 2, borderRadius: "var(--radius)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  padding: 16, textAlign: "center",
+                  background: "rgba(0,0,0,0.35)", pointerEvents: "none",
+                }}>
+                  <span style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                    Painel de alertas por cor inativo enquanto «Todos os veículos» estiver ligado.
+                  </span>
+                </div>
+              ) : null}
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
                 <SectionLabel label="Alertas de Veículos" color="var(--amber)" />
                 <button
-                  onClick={() => void save()}
-                  disabled={saving}
+                  onClick={() => void save(allVehiclesMode)}
+                  disabled={saving || allVehiclesMode}
                   style={{
                     display: "flex", alignItems: "center", gap: 5,
                     padding: "4px 12px",
@@ -652,9 +725,6 @@ export function VehiclesDashboard({ apiBase }: Props) {
         </div>
       </div>
 
-      {sourceOpen && (
-        <SourceEditor apiBase={apiBase} onClose={() => setSourceOpen(false)} />
-      )}
     </div>
   );
 }
