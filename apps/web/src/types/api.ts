@@ -64,6 +64,8 @@ export interface Stats {
   vehicle_tracking_available?: boolean;
   /** IDs em COUNT_CLASS_IDS (mesma ordem que o backend) */
   yolo_count_class_ids?: number[];
+  /** ID YOLO da classe «pessoa» (PERSON_CLASS_ID); outras classes em COUNT_CLASS_IDS contam como veículo/outros */
+  yolo_person_class_id?: number;
   /** Subconjunto de yolo_count_class_ids com inferência e caixas ativas */
   track_active_class_ids?: number[];
   /** id -> nome da classe no modelo (YOLO names) */

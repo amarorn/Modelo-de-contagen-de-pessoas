@@ -1,381 +1,582 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useStats } from "../hooks/useStats";
+import { LiveFeed } from "../components/LiveFeed";
+import { SourceEditor } from "../components/SourceEditor";
 import { TrackingModeToggle } from "../components/TrackingModeToggle";
-import "./VehiclesDashboard.css";
+
+const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
 const HISTORY_MAX = 120;
 
-interface DataPoint {
-  ts: number;
-  total: number;
-  entries: number;
-  exits: number;
-}
+/* ── Types ─────────────────────────────────────────────────── */
+interface DataPoint { ts: number; total: number; entries: number; exits: number }
 
 interface Props {
   apiBase: string;
-  onBack: () => void;
 }
 
-/* ── Sparkline SVG chart ──────────────────────────────────────── */
+/* ── Car color palette ─────────────────────────────────────── */
+const CAR_COLORS = [
+  { key: "vermelho", label: "VERM", hex: "#DC2626" },
+  { key: "laranja",  label: "LARA", hex: "#EA580C" },
+  { key: "amarelo",  label: "AMAR", hex: "#D97706" },
+  { key: "verde",    label: "VERD", hex: "#16A34A" },
+  { key: "ciano",    label: "CIAN", hex: "#0891B2" },
+  { key: "azul",     label: "AZUL", hex: "#2563EB" },
+  { key: "roxo",     label: "ROXO", hex: "#7C3AED" },
+  { key: "rosa",     label: "ROSA", hex: "#DB2777" },
+  { key: "preto",    label: "PRET", hex: "#27272A" },
+  { key: "branco",   label: "BRAN", hex: "#E4E4E7" },
+  { key: "cinza",    label: "CINZ", hex: "#71717A" },
+  { key: "marrom",   label: "MARR", hex: "#92400E" },
+] as const;
+
+/* ── Alert config state ────────────────────────────────────── */
+interface AlertCfg {
+  cap_enabled: boolean;
+  cap_available: boolean;
+  cap_threshold: number;
+  car_colors: string[];
+  car_min_score: number;
+  cooldown_seconds: number;
+  server_beep: boolean;
+}
+
+function useAlertConfig() {
+  const [cfg, setCfg] = useState<AlertCfg>({
+    cap_enabled: false, cap_available: false, cap_threshold: 0.55,
+    car_colors: [], car_min_score: 0.08, cooldown_seconds: 3.0, server_beep: false,
+  });
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/alerts?since=0`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (!d) return;
+        setCfg({
+          cap_enabled: d.cap_enabled ?? false,
+          cap_available: d.cap_available ?? false,
+          cap_threshold: d.cap_threshold ?? 0.55,
+          car_colors: d.car_colors ?? [],
+          car_min_score: d.car_min_score ?? 0.08,
+          cooldown_seconds: d.cooldown_seconds ?? 3.0,
+          server_beep: d.server_beep ?? false,
+        });
+      })
+      .catch(() => {});
+  }, []);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await fetch(`${API_BASE}/api/alerts/config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(cfg),
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return { cfg, setCfg, saving, saved, save };
+}
+
+/* ── Sparkline ─────────────────────────────────────────────── */
 function Sparkline({ data }: { data: DataPoint[] }) {
   if (data.length < 2) {
     return (
-      <div className="vd-sparkline-empty">
-        aguardando dados de veículos…
+      <div style={{
+        height: 120, display: "flex", alignItems: "center", justifyContent: "center",
+        color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11,
+      }}>
+        aguardando dados…
       </div>
     );
   }
 
-  const W = 900, H = 180;
-  const pad = { top: 20, right: 12, bottom: 32, left: 44 };
-  const innerW = W - pad.left - pad.right;
-  const innerH = H - pad.top - pad.bottom;
+  const W = 800, H = 150;
+  const pad = { top: 16, right: 10, bottom: 28, left: 38 };
+  const iW = W - pad.left - pad.right;
+  const iH = H - pad.top - pad.bottom;
+  const maxV = Math.max(...data.map(d => d.total), 1);
+  const minV = Math.min(...data.map(d => d.total));
+  const range = maxV - minV || 1;
+  const xOf = (i: number) => pad.left + (i / (data.length - 1)) * iW;
+  const yOf = (v: number) => pad.top + (1 - (v - minV) / range) * iH;
 
-  const maxVal = Math.max(...data.map(d => d.total), 1);
-  const minVal = Math.min(...data.map(d => d.total));
-  const range = maxVal - minVal || 1;
-
-  const xOf = (i: number) => pad.left + (i / (data.length - 1)) * innerW;
-  const yOf = (v: number) => pad.top + (1 - (v - minVal) / range) * innerH;
-
-  const linePts = data.map((d, i) => `${i === 0 ? "M" : "L"}${xOf(i).toFixed(1)},${yOf(d.total).toFixed(1)}`).join(" ");
-  const areaPath =
-    linePts +
-    ` L${xOf(data.length - 1).toFixed(1)},${(pad.top + innerH).toFixed(1)}` +
-    ` L${xOf(0).toFixed(1)},${(pad.top + innerH).toFixed(1)} Z`;
-
-  const gridVals = [0, 0.33, 0.66, 1].map(t => ({
-    y: pad.top + t * innerH,
-    v: Math.round(maxVal - t * range),
-  }));
-
+  const pts = data.map((d, i) => `${i === 0 ? "M" : "L"}${xOf(i).toFixed(1)},${yOf(d.total).toFixed(1)}`).join(" ");
+  const area = pts + ` L${xOf(data.length - 1).toFixed(1)},${(pad.top + iH).toFixed(1)} L${xOf(0).toFixed(1)},${(pad.top + iH).toFixed(1)} Z`;
   const last = data[data.length - 1];
-  const lx = xOf(data.length - 1);
-  const ly = yOf(last.total);
 
   return (
-    <svg
-      viewBox={`0 0 ${W} ${H}`}
-      className="vd-sparkline-svg"
-      preserveAspectRatio="none"
-    >
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: 150 }} preserveAspectRatio="none">
       <defs>
-        <linearGradient id="vdGrad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#F97316" stopOpacity="0.28" />
+        <linearGradient id="vdg2" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#F97316" stopOpacity="0.25" />
           <stop offset="100%" stopColor="#F97316" stopOpacity="0.02" />
         </linearGradient>
-        <filter id="vdGlow">
-          <feGaussianBlur stdDeviation="2.5" result="blur" />
-          <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
-        </filter>
       </defs>
-
-      {/* Grid */}
-      {gridVals.map(({ y, v }) => (
-        <g key={v}>
-          <line
-            x1={pad.left} y1={y} x2={W - pad.right} y2={y}
-            stroke="#ffffff09" strokeWidth="1"
-          />
-          <text
-            x={pad.left - 7} y={y + 4}
-            fill="#484858" fontSize="10" textAnchor="end"
-            fontFamily="var(--font-mono)"
-          >
-            {v}
-          </text>
-        </g>
-      ))}
-
-      {/* Area fill */}
-      <path d={areaPath} fill="url(#vdGrad)" />
-
-      {/* Line */}
-      <path
-        d={linePts}
-        fill="none"
-        stroke="#F97316"
-        strokeWidth="2"
-        strokeLinejoin="round"
-        filter="url(#vdGlow)"
-      />
-
-      {/* Time labels */}
+      {[0, 0.33, 0.66, 1].map(t => {
+        const y = pad.top + t * iH;
+        const v = Math.round(maxV - t * range);
+        return (
+          <g key={t}>
+            <line x1={pad.left} y1={y} x2={W - pad.right} y2={y} stroke="#ffffff08" strokeWidth="1" />
+            <text x={pad.left - 5} y={y + 4} fill="#484858" fontSize="9" textAnchor="end" fontFamily="var(--font-mono)">{v}</text>
+          </g>
+        );
+      })}
+      <path d={area} fill="url(#vdg2)" />
+      <path d={pts} fill="none" stroke="#F97316" strokeWidth="2" strokeLinejoin="round" />
       {[0, 0.5, 1].map(t => {
         const idx = Math.round(t * (data.length - 1));
         const pt = data[idx];
         if (!pt) return null;
-        const x = xOf(idx);
-        const label = new Date(pt.ts).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
         return (
-          <text
-            key={t}
-            x={x} y={H - 4}
-            fill="#484858" fontSize="9"
-            textAnchor={t === 0 ? "start" : t === 1 ? "end" : "middle"}
-            fontFamily="var(--font-mono)"
-          >
-            {label}
+          <text key={t} x={xOf(idx)} y={H - 4} fill="#484858" fontSize="8"
+            textAnchor={t === 0 ? "start" : t === 1 ? "end" : "middle"} fontFamily="var(--font-mono)">
+            {new Date(pt.ts).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
           </text>
         );
       })}
-
-      {/* Live dot */}
-      <circle cx={lx} cy={ly} r="5" fill="#F97316" className="vd-live-dot" />
-      <circle cx={lx} cy={ly} r="9" fill="none" stroke="#F97316" strokeWidth="1" opacity="0.3" className="vd-pulse-ring" />
+      <circle cx={xOf(data.length - 1)} cy={yOf(last.total)} r="5" fill="#F97316" />
     </svg>
   );
 }
 
-/* ── KPI card ────────────────────────────────────────────────── */
-function KpiCard({
-  label,
-  value,
-  color,
-  sub,
-  large,
-  icon,
-}: {
-  label: string;
-  value: number;
-  color: string;
-  sub: string;
-  large?: boolean;
-  icon: React.ReactNode;
-}) {
-  const numRef = useRef<HTMLSpanElement>(null);
-  const prevRef = useRef(value);
+/* ── KPI box ───────────────────────────────────────────────── */
+function KpiBox({ label, value, sub, color }: { label: string; value: number; sub: string; color: string }) {
+  return (
+    <div style={{
+      flex: 1,
+      background: "var(--bg-elevated)",
+      border: "1px solid var(--border)",
+      borderRadius: "var(--radius)",
+      padding: "14px 16px",
+      position: "relative",
+      overflow: "hidden",
+    }}>
+      <div style={{
+        position: "absolute", inset: 0,
+        background: `radial-gradient(ellipse at 90% 50%, ${color}10 0%, transparent 60%)`,
+        pointerEvents: "none",
+      }} />
+      <div style={{ fontSize: 9, fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 8 }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 32, fontFamily: "var(--font-mono)", fontWeight: 700, color, lineHeight: 1, marginBottom: 4 }}>
+        {value.toLocaleString("pt-BR")}
+      </div>
+      <div style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>{sub}</div>
+    </div>
+  );
+}
 
-  useEffect(() => {
-    if (prevRef.current !== value && numRef.current) {
-      numRef.current.classList.remove("count-anim");
-      void numRef.current.offsetWidth;
-      numRef.current.classList.add("count-anim");
-    }
-    prevRef.current = value;
-  }, [value]);
-
+/* ── Toggle switch ─────────────────────────────────────────── */
+function Toggle({ value, onChange, disabled }: { value: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
   return (
     <div
-      className={`vd-kpi-card${large ? " vd-kpi-large" : ""}`}
-      style={{ "--kpi-color": color } as React.CSSProperties}
+      role="switch"
+      aria-checked={value}
+      onClick={() => !disabled && onChange(!value)}
+      style={{
+        width: 34, height: 18, borderRadius: 9, flexShrink: 0,
+        background: value ? "rgba(240,165,0,0.18)" : "var(--bg-hover)",
+        border: `1px solid ${value ? "var(--amber)" : "var(--border)"}`,
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.38 : 1,
+        position: "relative",
+        transition: "background 0.18s, border-color 0.18s",
+      }}
     >
-      <div className="vd-kpi-top">
-        <span className="vd-kpi-label">{label}</span>
-        <span className="vd-kpi-icon-wrap" style={{ color }}>
-          {icon}
-        </span>
+      <div style={{
+        position: "absolute", top: 2, left: 2,
+        width: 12, height: 12, borderRadius: "50%",
+        background: value ? "var(--amber)" : "var(--text-muted)",
+        transform: value ? "translateX(16px)" : "translateX(0)",
+        transition: "transform 0.18s, background 0.18s",
+      }} />
+    </div>
+  );
+}
+
+/* ── Section label ─────────────────────────────────────────── */
+function SectionLabel({ label, color = "var(--text-muted)" }: { label: string; color?: string }) {
+  return (
+    <div style={{ fontSize: 9, fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.16em", textTransform: "uppercase", color, marginBottom: 8 }}>
+      {label}
+    </div>
+  );
+}
+
+/* ── Slider row ────────────────────────────────────────────── */
+function SliderRow({ label, value, min, max, step, onChange }: {
+  label: string; value: number; min: number; max: number; step: number; onChange: (v: number) => void;
+}) {
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
+        <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>{label}</span>
+        <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--amber)" }}>{value.toFixed(2)}</span>
       </div>
-      <span
-        ref={numRef}
-        className="vd-kpi-value mono count-anim"
-        style={{ color, textShadow: `0 0 28px ${color}44` }}
-      >
-        {value.toLocaleString("pt-BR")}
-      </span>
-      <div className="vd-kpi-sub">{sub}</div>
-      <div
-        className="vd-kpi-glow"
-        style={{
-          background: `radial-gradient(ellipse at 85% 50%, ${color}16 0%, transparent 65%)`,
-        }}
+      <input type="range" min={min} max={max} step={step} value={value}
+        onChange={e => onChange(parseFloat(e.target.value))}
+        style={{ width: "100%", accentColor: "var(--amber)", cursor: "pointer" }}
       />
     </div>
   );
 }
 
-/* ── Stat row ────────────────────────────────────────────────── */
-function StatRow({ label, value, color }: { label: string; value: number; color: string }) {
-  return (
-    <div className="vd-stat-row">
-      <span className="vd-stat-label">{label}</span>
-      <span className="vd-stat-value mono" style={{ color }}>
-        {value.toLocaleString("pt-BR")}
-      </span>
-    </div>
-  );
-}
-
-/* ── SVG icons ───────────────────────────────────────────────── */
-function CarIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M19 17H5a2 2 0 0 1-2-2V9l2-4h10l2 4" />
-      <path d="M5 13h14" />
-      <circle cx="7.5" cy="17" r="1.5" />
-      <circle cx="16.5" cy="17" r="1.5" />
-    </svg>
-  );
-}
-function ArrowUpIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 19V5M5 12l7-7 7 7" />
-    </svg>
-  );
-}
-function ArrowDownIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 5v14M5 12l7 7 7-7" />
-    </svg>
-  );
-}
-function SpeedIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 2a10 10 0 1 0 10 10" />
-      <path d="M12 6v6l4 2" />
-    </svg>
-  );
-}
-
-/* ── Main page ───────────────────────────────────────────────── */
-export function VehiclesDashboard({ apiBase, onBack }: Props) {
+/* ── Main component ────────────────────────────────────────── */
+export function VehiclesDashboard({ apiBase }: Props) {
   const { stats, status } = useStats();
   const historyRef = useRef<DataPoint[]>([]);
   const [history, setHistory] = useState<DataPoint[]>([]);
+  const [sourceOpen, setSourceOpen] = useState(false);
+  const { cfg, setCfg, saving, saved, save } = useAlertConfig();
 
   useEffect(() => {
-    const point: DataPoint = {
-      ts: Date.now(),
-      total: stats.vehicle_total ?? 0,
-      entries: stats.vehicle_entries ?? 0,
-      exits: stats.vehicle_exits ?? 0,
-    };
-    historyRef.current = [...historyRef.current, point].slice(-HISTORY_MAX);
+    const pt: DataPoint = { ts: Date.now(), total: stats.vehicle_total ?? 0, entries: stats.vehicle_entries ?? 0, exits: stats.vehicle_exits ?? 0 };
+    historyRef.current = [...historyRef.current, pt].slice(-HISTORY_MAX);
     setHistory([...historyRef.current]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stats]); // stats é um novo objeto a cada polling (2s)
+  }, [stats]);
 
-  const sessionMax = history.length > 0 ? Math.max(...history.map(h => h.total)) : 0;
-  const sessionMin =
-    history.filter(h => h.total > 0).length > 0
-      ? Math.min(...history.filter(h => h.total > 0).map(h => h.total))
-      : 0;
+  const personClassId = stats.yolo_person_class_id ?? 0;
+  const vehicleClassActive = useMemo(() => {
+    const active = stats.track_active_class_ids ?? [];
+    return active.some((id) => id !== personClassId);
+  }, [stats.track_active_class_ids, personClassId]);
+
   const balance = (stats.vehicle_entries ?? 0) - (stats.vehicle_exits ?? 0);
-
   const ratePerMin = (() => {
     if (history.length < 2) return 0;
     const now = history[history.length - 1];
     const prev = history.find(h => now.ts - h.ts >= 60_000) ?? history[0];
     const dt = (now.ts - prev.ts) / 60_000;
     if (dt < 0.05) return 0;
-    const delta = (now.entries + now.exits) - (prev.entries + prev.exits);
-    return Math.max(0, Math.round(delta / dt));
+    return Math.max(0, Math.round(((now.entries + now.exits) - (prev.entries + prev.exits)) / dt));
   })();
 
+  const toggleColor = (key: string) =>
+    setCfg(p => ({
+      ...p,
+      car_colors: p.car_colors.includes(key)
+        ? p.car_colors.filter(c => c !== key)
+        : [...p.car_colors, key],
+    }));
+
   return (
-    <div className="vd-page">
-      {/* ── Header ── */}
-      <div className="vd-header">
-        <button className="vd-back-btn" onClick={onBack}>
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-            <path d="M19 12H5M12 5l-7 7 7 7" />
-          </svg>
-          <span>Voltar</span>
-        </button>
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflow: "auto" }}>
+      <div style={{
+        flex: 1,
+        padding: "16px clamp(14px, 2.5vw, 28px) 24px",
+        width: "100%",
+        maxWidth: "min(1920px, 100%)",
+        margin: "0 auto",
+        display: "flex",
+        flexDirection: "column",
+        gap: 16,
+      }}>
 
-        <div className="vd-title">
-          <span className="vd-title-icon"><CarIcon /></span>
-          <span>Veículos</span>
-        </div>
-
-        <div className="vd-header-sep" />
-
-        <div className={`vd-live-badge vd-live-${status}`}>
-          <span className="vd-live-dot" />
-          {status === "connected" ? "AO VIVO" : status === "connecting" ? "CONN…" : "ERRO"}
-        </div>
-      </div>
-
-      {/* ── KPI grid ── */}
-      <div className="vd-kpi-row">
-        <KpiCard
-          label="Total"
-          value={stats.vehicle_total ?? 0}
-          color="#F97316"
-          sub="passagens na sessão"
-          large
-          icon={<CarIcon />}
-        />
-        <KpiCard
-          label="Entradas"
-          value={stats.vehicle_entries ?? 0}
-          color="#2EB87A"
-          sub="sentido entrada"
-          icon={<ArrowUpIcon />}
-        />
-        <KpiCard
-          label="Saídas"
-          value={stats.vehicle_exits ?? 0}
-          color="#E04E4E"
-          sub="sentido saída"
-          icon={<ArrowDownIcon />}
-        />
-        <KpiCard
-          label="Taxa / min"
-          value={ratePerMin}
-          color="#3DAAC8"
-          sub="últimos 60s"
-          icon={<SpeedIcon />}
-        />
-      </div>
-
-      {/* ── Chart ── */}
-      <div className="vd-chart-card">
-        <div className="vd-section-header">
-          <span className="vd-section-title">FLUXO ACUMULADO — SESSÃO</span>
-          <span className="vd-section-meta">{history.length} amostras · intervalo 2s</span>
-        </div>
-        <Sparkline data={history} />
-      </div>
-
-      {/* ── Bottom row ── */}
-      <div className="vd-bottom-row">
-        {/* Session stats */}
-        <div className="vd-stats-card">
-          <div className="vd-section-header">
-            <span className="vd-section-title">ESTATÍSTICAS DA SESSÃO</span>
-          </div>
-          <div className="vd-stats-grid">
-            <StatRow label="Máximo" value={sessionMax} color="#F97316" />
-            <StatRow label="Mínimo" value={sessionMin} color="#888898" />
-            <StatRow
-              label="Balanço"
-              value={balance}
-              color={balance >= 0 ? "#2EB87A" : "#E04E4E"}
-            />
-            <StatRow label="Amostras" value={history.length} color="#3DAAC8" />
-          </div>
-        </div>
-
-        {/* Tracking toggle */}
-        <div className="vd-tracking-card">
-          <div className="vd-section-header">
-            <span className="vd-section-title">MODO DE RASTREAMENTO</span>
-          </div>
-          {stats.vehicle_tracking_available ? (
-            <div className="vd-tracking-body">
-              <p className="vd-tracking-hint">
-                Selecione quais classes o modelo deve rastrear. Pelo menos uma deve permanecer ativa.
-              </p>
-              <TrackingModeToggle
-                apiBase={apiBase}
-                vehicleTrackingAvailable={stats.vehicle_tracking_available ?? false}
-                yoloCountClassIds={stats.yolo_count_class_ids ?? []}
-                yoloClassLabels={stats.yolo_class_labels ?? {}}
-                trackActiveClassIds={stats.track_active_class_ids ?? []}
-              />
+        {/* ── Title row ─────────────────────────────────────────── */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{
+              width: 32, height: 32, borderRadius: "var(--radius-md)",
+              background: "rgba(249,115,22,0.12)", border: "1px solid rgba(249,115,22,0.35)",
+              display: "grid", placeItems: "center",
+            }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F97316" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M19 17H5a2 2 0 0 1-2-2V9l2-4h10l2 4" />
+                <path d="M5 13h14" /><circle cx="7.5" cy="17" r="1.5" /><circle cx="16.5" cy="17" r="1.5" />
+              </svg>
             </div>
-          ) : (
-            <p className="vd-unavail-msg">
-              O modelo atual detecta apenas uma classe. Carregue um modelo multi-classe (ex. pessoa + veículo) para habilitar o rastreamento independente por tipo.
-            </p>
-          )}
+            <div>
+              <div style={{ fontFamily: "var(--font-display)", fontSize: 16, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--text-primary)" }}>
+                Veículos
+              </div>
+              <div style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)", marginTop: 1 }}>
+                monitoramento em tempo real
+              </div>
+            </div>
+          </div>
+          <div className={`badge badge-${status === "connected" ? "green" : status === "error" ? "red" : "amber"}`} style={{ gap: 5 }}>
+            <span className={`pulse-dot ${status === "connected" ? "active" : status === "error" ? "error" : "connecting"}`} />
+            {status === "connected" ? "AO VIVO" : status === "connecting" ? "CONN…" : "OFFLINE"}
+          </div>
+        </div>
+
+        {(stats.error || (stats.vehicle_tracking_available && !vehicleClassActive) || (status === "connected" && (stats.infer_fps_ema ?? 0) < 0.05)) && (
+          <div
+            style={{
+              padding: "12px 14px",
+              borderRadius: "var(--radius-md)",
+              border: "1px solid var(--border-bright)",
+              background: "rgba(240, 165, 0, 0.08)",
+              fontSize: 11,
+              fontFamily: "var(--font-mono)",
+              color: "var(--text-secondary)",
+              lineHeight: 1.55,
+            }}
+          >
+            {stats.error ? (
+              <div>
+                <strong style={{ color: "var(--amber)" }}>Servidor:</strong> {stats.error}
+              </div>
+            ) : null}
+            {status === "connected" && (stats.infer_fps_ema ?? 0) < 0.05 ? (
+              <div style={{ marginTop: stats.error ? 8 : 0 }}>
+                <strong style={{ color: "var(--amber)" }}>Sem vídeo na inferência (0 FPS).</strong> Os contadores de veículos só sobem quando há stream estável e objetos cruzam a linha ou o polígono (ROI).
+                Confirme a fonte em «Fonte de Vídeo», <code style={{ fontSize: 10 }}>YOLO_STREAM_BUFFER=1</code> e URL HLS válida; alinhe <code style={{ fontSize: 10 }}>VITE_API_BASE</code> / <code style={{ fontSize: 10 }}>WEB_PORT</code> com a porta do Flask.
+              </div>
+            ) : null}
+            {stats.vehicle_tracking_available && !vehicleClassActive ? (
+              <div style={{ marginTop: stats.error || (stats.infer_fps_ema ?? 0) < 0.05 ? 8 : 0 }}>
+                <strong style={{ color: "var(--amber)" }}>Classe de veículo desligada no rastreio.</strong> Em «Modo de Rastreamento», ligue também a classe do veículo (não só pessoas); caso contrário o modelo não deteta carros e as passagens de veículo ficam em 0.
+              </div>
+            ) : null}
+          </div>
+        )}
+
+        {/* ── Main layout: Camera (left) + Config (right) ───────── */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 340px", gap: 16, alignItems: "start" }}>
+
+          {/* Left column: camera + KPIs + chart */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+
+            {/* Camera */}
+            <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+              <LiveFeed apiBase={apiBase} hero />
+              <div style={{
+                padding: "8px 14px",
+                borderTop: "1px solid var(--border)",
+                background: "var(--bg-elevated)",
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                flexWrap: "wrap",
+              }}>
+                <button
+                  onClick={() => setSourceOpen(true)}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 5,
+                    background: "var(--bg-elevated)", border: "1px solid var(--border)",
+                    borderRadius: "var(--radius-sm)",
+                    color: "var(--text-muted)", fontFamily: "var(--font-display)",
+                    fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase",
+                    padding: "4px 10px", cursor: "pointer",
+                  }}
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polygon points="23 7 16 12 23 17 23 7" /><rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+                  </svg>
+                  Fonte de Vídeo
+                </button>
+                <div style={{ flex: 1, minWidth: 0, fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {stats.infer_fps_ema > 0 ? `${stats.infer_fps_ema.toFixed(1)} fps inferência` : "aguardando…"}
+                </div>
+              </div>
+            </div>
+
+            {/* KPI row */}
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+              <KpiBox label="Total" value={stats.vehicle_total ?? 0} sub="passagens na sessão" color="#F97316" />
+              <KpiBox label="Entradas" value={stats.vehicle_entries ?? 0} sub="sentido A" color="#2EB87A" />
+              <KpiBox label="Saídas" value={stats.vehicle_exits ?? 0} sub="sentido B" color="#E04E4E" />
+              <KpiBox label="Taxa / min" value={ratePerMin} sub="últimos 60s" color="#3DAAC8" />
+            </div>
+
+            {/* Sparkline chart */}
+            <div className="card">
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                <p className="section-label" style={{ marginBottom: 0 }}>Fluxo Acumulado — Sessão</p>
+                <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>
+                  {history.length} amostras · {Math.round((history[history.length - 1]?.ts ?? Date.now()) - (history[0]?.ts ?? Date.now())) / 1000}s janela
+                </span>
+              </div>
+              <Sparkline data={history} />
+
+              {/* Session stats row */}
+              <div style={{ display: "flex", gap: 20, marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+                {[
+                  { label: "Máximo", v: history.length > 0 ? Math.max(...history.map(h => h.total)) : 0, color: "#F97316" },
+                  { label: "Mínimo", v: history.filter(h => h.total > 0).length > 0 ? Math.min(...history.filter(h => h.total > 0).map(h => h.total)) : 0, color: "var(--text-muted)" },
+                  { label: "Balanço", v: balance, color: balance >= 0 ? "#2EB87A" : "#E04E4E" },
+                ].map(({ label, v, color }) => (
+                  <div key={label}>
+                    <div style={{ fontSize: 9, fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 2 }}>{label}</div>
+                    <div style={{ fontSize: 18, fontFamily: "var(--font-mono)", fontWeight: 700, color }}>{v.toLocaleString("pt-BR")}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Right column: configuration ─────────────────────── */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+
+            {/* Tracking mode */}
+            <div className="card">
+              <SectionLabel label="Modo de Rastreamento" color="var(--cyan)" />
+              {stats.vehicle_tracking_available ? (
+                <>
+                  <p style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)", margin: "0 0 10px", lineHeight: 1.5 }}>
+                    Selecione quais classes o modelo rastreia. Pelo menos uma deve ficar ativa.
+                  </p>
+                  <TrackingModeToggle
+                    apiBase={apiBase}
+                    vehicleTrackingAvailable
+                    yoloCountClassIds={stats.yolo_count_class_ids ?? []}
+                    yoloClassLabels={stats.yolo_class_labels ?? {}}
+                    trackActiveClassIds={stats.track_active_class_ids ?? []}
+                  />
+                </>
+              ) : (
+                <p style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)", margin: 0, lineHeight: 1.5 }}>
+                  Modelo single-class. Carregue um modelo multi-classe para ativar.
+                </p>
+              )}
+            </div>
+
+            {/* Alert config card */}
+            <div className="card">
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+                <SectionLabel label="Alertas de Veículos" color="var(--amber)" />
+                <button
+                  onClick={() => void save()}
+                  disabled={saving}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 5,
+                    padding: "4px 12px",
+                    background: saved ? "var(--green-dim)" : saving ? "var(--bg-hover)" : "rgba(240,165,0,0.10)",
+                    border: `1px solid ${saved ? "var(--green)" : saving ? "var(--border)" : "var(--border-bright)"}`,
+                    borderRadius: "var(--radius-sm)",
+                    color: saved ? "var(--green)" : saving ? "var(--text-muted)" : "var(--amber)",
+                    fontFamily: "var(--font-display)", fontSize: 10, fontWeight: 700, letterSpacing: "0.10em",
+                    textTransform: "uppercase", cursor: saving ? "wait" : "pointer",
+                    transition: "all 0.18s",
+                  }}
+                >
+                  {saved ? "✓ Salvo" : saving ? "…" : "Aplicar"}
+                </button>
+              </div>
+
+              {/* Car color section */}
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 9, fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase", color: "#F59E0B", marginBottom: 8 }}>
+                  Cor de Carro
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 5, marginBottom: 10 }}>
+                  {CAR_COLORS.map(c => {
+                    const active = cfg.car_colors.includes(c.key);
+                    return (
+                      <button
+                        key={c.key}
+                        onClick={() => toggleColor(c.key)}
+                        title={c.key}
+                        style={{
+                          display: "flex", flexDirection: "column", alignItems: "center", gap: 3,
+                          padding: "5px 2px",
+                          background: active ? "rgba(240,165,0,0.10)" : "transparent",
+                          border: `1px solid ${active ? "var(--amber)" : "var(--border)"}`,
+                          borderRadius: "var(--radius-sm)",
+                          cursor: "pointer", transition: "border-color 0.14s",
+                        }}
+                      >
+                        <div style={{
+                          width: 16, height: 16, borderRadius: "50%", background: c.hex,
+                          border: c.key === "branco" ? "1px solid rgba(255,255,255,0.2)" : "none",
+                          boxShadow: active ? `0 0 6px ${c.hex}99` : "none",
+                          transition: "box-shadow 0.14s",
+                        }} />
+                        <span style={{ fontSize: 7, fontFamily: "var(--font-mono)", lineHeight: 1, color: active ? "var(--amber)" : "var(--text-muted)", textTransform: "uppercase" }}>
+                          {c.label}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <SliderRow
+                  label="Score mínimo"
+                  value={cfg.car_min_score}
+                  min={0.02} max={0.4} step={0.01}
+                  onChange={v => setCfg(p => ({ ...p, car_min_score: v }))}
+                />
+              </div>
+
+              {/* Cap section */}
+              <div style={{ marginBottom: 14, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                <div style={{ fontSize: 9, fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase", color: "#00D4FF", marginBottom: 8 }}>
+                  Bone / Chapéu
+                </div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+                  <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: cfg.cap_available ? "var(--text-secondary)" : "var(--text-muted)" }}>
+                    {cfg.cap_available ? "Detector CLIP ativo" : "Requer --cap-alert"}
+                  </span>
+                  <Toggle
+                    value={cfg.cap_enabled}
+                    disabled={!cfg.cap_available}
+                    onChange={v => setCfg(p => ({ ...p, cap_enabled: v }))}
+                  />
+                </div>
+                <SliderRow
+                  label="Confiança mínima"
+                  value={cfg.cap_threshold}
+                  min={0.3} max={0.9} step={0.01}
+                  onChange={v => setCfg(p => ({ ...p, cap_threshold: v }))}
+                />
+              </div>
+
+              {/* General section */}
+              <div style={{ paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                <div style={{ fontSize: 9, fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 8 }}>
+                  Geral
+                </div>
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)", marginBottom: 5 }}>
+                    Cooldown (segundos)
+                  </div>
+                  <input
+                    type="number" min={0} max={60} step={0.5}
+                    value={cfg.cooldown_seconds}
+                    onChange={e => setCfg(p => ({ ...p, cooldown_seconds: Math.max(0, parseFloat(e.target.value) || 0) }))}
+                    style={{
+                      width: "100%", boxSizing: "border-box",
+                      padding: "5px 8px",
+                      background: "var(--bg-hover)",
+                      border: "1px solid var(--border)",
+                      borderRadius: "var(--radius-sm)",
+                      color: "var(--text-primary)",
+                      fontFamily: "var(--font-mono)", fontSize: 12,
+                      outline: "none",
+                    }}
+                  />
+                </div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                  <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-secondary)" }}>
+                    Beep no terminal do servidor
+                  </span>
+                  <Toggle
+                    value={cfg.server_beep}
+                    onChange={v => setCfg(p => ({ ...p, server_beep: v }))}
+                  />
+                </div>
+              </div>
+            </div>
+
+          </div>
         </div>
       </div>
+
+      {sourceOpen && (
+        <SourceEditor apiBase={apiBase} onClose={() => setSourceOpen(false)} />
+      )}
     </div>
   );
 }

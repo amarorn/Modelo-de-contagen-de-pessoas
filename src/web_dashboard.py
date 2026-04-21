@@ -1892,11 +1892,15 @@ def inference_loop(
                         if inside_for_presence:
                             current_present_ids.add(track_id)
                             zone_entered_at_by_id.setdefault(track_id, frame_ts)
-                        # Track confidence update
+                        # Track confidence update (veiculos: score sem penalizar bbox instavel)
                         _det_conf = conf_by_tid.get(track_id, 1.0)
+                        _is_veh = cls_by_tid.get(track_id, _default_det_cls) != person_class_id
                         track_conf_tracker.update(
-                            track_id, _det_conf,
-                            (x_min, y_min, x_max, y_max), frame_ts,
+                            track_id,
+                            _det_conf,
+                            (x_min, y_min, x_max, y_max),
+                            frame_ts,
+                            is_vehicle=_is_veh,
                         )
                         _track_reliable = track_conf_tracker.is_reliable(track_id)
                         _cx_n, _cy_n = foot_x / fw, foot_y / fh
@@ -1908,7 +1912,6 @@ def inference_loop(
                             foot_y / float(fh),
                             dt_by_tid.get(int(track_id), 0.0),
                         )
-                        _is_veh = cls_by_tid.get(track_id, _default_det_cls) != person_class_id
                         _last_norm_pos_by_id[int(track_id)] = (_cx_n, _cy_n)
                         if not _is_veh:
                             _bbox_h_samples.append(y_max - y_min)
@@ -2489,9 +2492,11 @@ def inference_loop(
                         )
                     elif is_skyline_hls_url(str(raw_src)):
                         _err_msg = (
-                            "Falha ao ler frames HLS Skyline (manifesto pode estar OK mas FFmpeg nao leu segmentos). "
-                            "Token ?a= expira; substitua o URL no .env/preset, ou use pagina .html. "
-                            f"Tente YOLO_STREAM_BUFFER=1. Fonte: {raw_src!r}"
+                            "Falha ao ler segmentos HLS Skyline (token ?a= expira; manifesto m3u8 pode abrir mas os .ts falham). "
+                            "Solucao: no preset ou YOLO_WEB_SOURCE use a pagina .html da camara "
+                            "(ex.: skylinewebcams.com/.../webcam/.../nome.html), nao o link hd-auth.../live.m3u8?a=... copiado. "
+                            "Defina YOLO_STREAM_BUFFER=1 no .env. Fonte actual: "
+                            f"{raw_src!r}"
                         )
                     else:
                         _err_msg = (
@@ -2728,6 +2733,7 @@ def build_stats_payload(shared: SharedState) -> dict:
             "cam_drift_baseline_ready": shared.cam_drift_baseline_ready,
             "vehicle_tracking_available": len(shared.yolo_count_class_ids) > 1,
             "yolo_count_class_ids": list(shared.yolo_count_class_ids),
+            "yolo_person_class_id": int(shared.yolo_person_class_id),
             "track_active_class_ids": list(shared.track_active_class_ids),
             "yolo_class_labels": {
                 str(k): shared.yolo_class_names.get(k, f"class_{k}")

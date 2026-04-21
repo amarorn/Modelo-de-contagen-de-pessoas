@@ -20,6 +20,22 @@ _UA = (
 _SKYLINE_REFERER = "https://www.skylinewebcams.com/"
 
 
+def _ffmpeg_opts_skyline_friendly(base: str) -> str:
+    """Remove segmentos que atrapalham o 1.o segmento HLS (ex. fflags;nobuffer do run_web.sh)."""
+    if not base.strip():
+        return ""
+    out: list[str] = []
+    for seg in base.split("|"):
+        s = seg.strip()
+        if not s:
+            continue
+        low = s.lower()
+        if low.startswith("fflags;") and "nobuffer" in low:
+            continue
+        out.append(s)
+    return "|".join(out)
+
+
 def is_skyline_hls_url(url: str) -> bool:
     u = url.strip().lower()
     return "skylinewebcams.com" in u and ".m3u8" in u
@@ -113,14 +129,19 @@ def apply_opencv_ffmpeg_capture_env(
     u = str(stream_src).strip().lower() if isinstance(stream_src, str) else ""
     if "skylinewebcams.com" in u:
         # stimeout/timeout em microsegundos — HLS ao vivo pode demorar a entregar o 1.o segmento
+        base_hls = _ffmpeg_opts_skyline_friendly(base)
         sky = (
             "protocol_whitelist;file,http,https,tcp,tls,crypto|"
             f"user_agent;{_UA}|"
             f"referer;{_SKYLINE_REFERER}|"
-            "stimeout;25000000|"
-            "timeout;25000000"
+            "analyzeduration;10000000|"
+            "probesize;10000000|"
+            "max_delay;2000000|"
+            "stimeout;40000000|"
+            "timeout;40000000|"
+            "reconnect;1|reconnect_streamed;1|reconnect_delay_max;4"
         )
-        os.environ[key] = f"{base}|{sky}" if base else sky
+        os.environ[key] = f"{base_hls}|{sky}" if base_hls else sky
         return
     if isinstance(stream_src, str):
         gen = _generic_hls_ffmpeg_opts(stream_src)
@@ -234,6 +255,16 @@ def resolve_stream_source(raw: str) -> str:
     s = raw.strip()
     if not s or (s.isdigit() and len(s) <= 3):
         return s
+    # Com preset antigo hd-auth...m3u8?a=... (token expira): definir YOLO_SKYLINE_WEBCAM_PAGE para a pagina .html
+    page_override = os.environ.get("YOLO_SKYLINE_WEBCAM_PAGE", "").strip()
+    if page_override and is_skylinewebcams_webcam_page(page_override):
+        if is_skyline_hls_url(s):
+            print(
+                "[skyline] YOLO_SKYLINE_WEBCAM_PAGE: a obter m3u8 novo a partir da pagina .html "
+                "(ignora o URL hd-auth do preset).",
+                flush=True,
+            )
+            return resolve_skylinewebcams_page(page_override)
     if is_skylinewebcams_webcam_page(s):
         return resolve_skylinewebcams_page(s)
     return _normalize_skyline_m3u8(s)
