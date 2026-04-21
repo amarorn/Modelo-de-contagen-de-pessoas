@@ -1,0 +1,933 @@
+openapi: 3.0.3
+info:
+  title: Dashboard Web — Contagem de pessoas
+  description: |
+    API REST do servidor `web_dashboard.py` (Flask).
+    Especificação gerada para documentação; validar sempre contra o código em produção.
+  version: "1.0.0"
+
+servers:
+  - url: http://localhost:8080
+    description: Porta por defeito (WEB_PORT / run_web.sh)
+  - url: /
+    description: Mesmo host que serve a UI
+
+tags:
+  - name: config-roi
+    description: Modo linha/polígono, overlays e presets de ROI
+  - name: source
+    description: Fonte de vídeo e presets de câmara
+  - name: stats-tracking
+    description: Estatísticas ao vivo e classes YOLO activas
+  - name: heatmap
+    description: Mapas de calor e fluxo
+  - name: zones-dwell
+    description: Zonas semânticas, dwell e hotspots
+  - name: alerts
+    description: Alertas (boné, cor de veículo, etc.)
+  - name: system
+    description: Definições, exportações, auditoria, drift
+
+components:
+  schemas:
+    PixelPoint:
+      type: object
+      required: [x, y]
+      properties:
+        x: { type: integer }
+        y: { type: integer }
+
+    NormPoint:
+      type: object
+      description: Coordenadas normalizadas [0,1] (zonas)
+      required: [x, y]
+      properties:
+        x: { type: number, format: float }
+        y: { type: number, format: float }
+
+    CountPolygonSpec:
+      type: object
+      required: [title, points]
+      properties:
+        title:
+          type: string
+          maxLength: 64
+        points:
+          type: array
+          items: { $ref: "#/components/schemas/PixelPoint" }
+          minItems: 3
+
+    LineCoords:
+      type: object
+      required: [x1, y1, x2, y2]
+      properties:
+        x1: { type: integer }
+        y1: { type: integer }
+        x2: { type: integer }
+        y2: { type: integer }
+
+    ApiConfig:
+      type: object
+      properties:
+        mode: { type: string, enum: [line, polygon] }
+        line: { $ref: "#/components/schemas/LineCoords" }
+        default_line: { $ref: "#/components/schemas/LineCoords" }
+        polygon:
+          type: array
+          items: { $ref: "#/components/schemas/PixelPoint" }
+          description: Primeiro polígono (compatibilidade)
+        polygons:
+          type: array
+          items: { $ref: "#/components/schemas/CountPolygonSpec" }
+        default_polygon:
+          type: array
+          items: { $ref: "#/components/schemas/PixelPoint" }
+        default_polygons:
+          type: array
+          items: { $ref: "#/components/schemas/CountPolygonSpec" }
+        show_trail: { type: boolean }
+        show_heading: { type: boolean }
+        heatmap_available: { type: boolean }
+        show_heatmap: { type: boolean }
+        sex_overlay_available: { type: boolean }
+        show_sex_overlay: { type: boolean }
+        show_roi: { type: boolean }
+        active_preset_id: { type: string }
+
+    ErrorMessage:
+      type: object
+      properties:
+        error: { type: string }
+
+    OkTrue:
+      type: object
+      properties:
+        ok: { type: boolean, example: true }
+
+paths:
+  /api/settings:
+    get:
+      tags: [system]
+      summary: Ler chaves editáveis do .env e métricas do modelo
+      responses:
+        "200":
+          description: JSON com env, metrics, editable_keys, env_file
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    post:
+      tags: [system]
+      summary: Actualizar chaves editáveis no ficheiro .env
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: ok, updated, restart_required
+        "400": { description: Erro, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorMessage" } } } }
+
+  /api/config:
+    get:
+      tags: [config-roi]
+      summary: Configuração de contagem (linha, polígonos, overlays)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiConfig" }
+
+  /api/overlay:
+    post:
+      tags: [config-roi]
+      summary: Alternar overlays no vídeo
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                show_trail: { type: boolean }
+                show_heading: { type: boolean }
+                show_heatmap: { type: boolean }
+                show_sex_overlay: { type: boolean }
+                show_roi: { type: boolean }
+      responses:
+        "200":
+          description: Estado actual dos toggles
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/line:
+    get:
+      tags: [config-roi]
+      summary: Linha de contagem e polígonos actuais
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mode: { type: string }
+                  line: { $ref: "#/components/schemas/LineCoords" }
+                  default: { $ref: "#/components/schemas/LineCoords" }
+                  polygon:
+                    type: array
+                    items: { $ref: "#/components/schemas/PixelPoint" }
+                  polygons:
+                    type: array
+                    items: { $ref: "#/components/schemas/CountPolygonSpec" }
+    post:
+      tags: [config-roi]
+      summary: Definir linha de contagem (modo linha)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - { $ref: "#/components/schemas/LineCoords" }
+                - type: object
+                  properties:
+                    reset_counters: { type: boolean }
+      responses:
+        "200": { description: OK }
+        "400": { content: { application/json: { schema: { $ref: "#/components/schemas/ErrorMessage" } } } }
+
+  /api/line/reset:
+    post:
+      tags: [config-roi]
+      summary: Repor linha ao default
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reset_counters: { type: boolean }
+      responses:
+        "200": { description: OK }
+
+  /api/polygon:
+    post:
+      tags: [config-roi]
+      summary: Definir polígono(s) de contagem (união de áreas)
+      description: |
+        Envie `polygons` como lista de `{ title, points: [{x,y}, ...] }` (mín. 3 vértices por anel).
+        Legado aceite lista de anéis só com pontos (sem `title`) — o servidor atribui "Área N".
+        Alternativa legada corpo `{ "points": [...] }` — um só polígono.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                polygons:
+                  type: array
+                  items:
+                    oneOf:
+                      - { $ref: "#/components/schemas/CountPolygonSpec" }
+                      - type: array
+                        items: { $ref: "#/components/schemas/PixelPoint" }
+                        minItems: 3
+                points:
+                  type: array
+                  items: { $ref: "#/components/schemas/PixelPoint" }
+                  minItems: 3
+                reset_counters: { type: boolean }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  mode: { type: string, example: polygon }
+                  polygon:
+                    type: array
+                    items: { $ref: "#/components/schemas/PixelPoint" }
+                  polygons:
+                    type: array
+                    items: { $ref: "#/components/schemas/CountPolygonSpec" }
+        "400": { content: { application/json: { schema: { $ref: "#/components/schemas/ErrorMessage" } } } }
+
+  /api/polygon/reset:
+    post:
+      tags: [config-roi]
+      summary: Sair do modo polígono e repor polígonos ao default
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reset_counters: { type: boolean }
+      responses:
+        "200": { description: mode line + polygon data }
+
+  /api/mode:
+    post:
+      tags: [config-roi]
+      summary: Alternar entre line e polygon
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode: { type: string, enum: [line, polygon] }
+                reset_counters: { type: boolean }
+      responses:
+        "200": { description: OK }
+        "400": { content: { application/json: { schema: { $ref: "#/components/schemas/ErrorMessage" } } } }
+
+  /api/source:
+    get:
+      tags: [source]
+      summary: URL actual, presets e preset activo
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  source: { type: string }
+                  changing: { type: boolean }
+                  active_preset_id: { type: string }
+                  presets:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        label: { type: string }
+                        url: { type: string }
+    post:
+      tags: [source]
+      summary: Definir fonte de vídeo por URL (string)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source]
+              properties:
+                source: { type: string, maxLength: 4096 }
+      responses:
+        "200": { description: OK }
+        "400": { content: { application/json: { schema: { $ref: "#/components/schemas/ErrorMessage" } } } }
+
+  /api/source/presets:
+    post:
+      tags: [source]
+      summary: Adicionar preset de câmara
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string }
+                label: { type: string, maxLength: 128 }
+      responses:
+        "200": { description: preset criado }
+
+  /api/source/presets/{preset_id}:
+    delete:
+      tags: [source]
+      summary: Remover preset e calibração associada
+      parameters:
+        - name: preset_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: OK }
+
+  /api/source/select:
+    post:
+      tags: [source]
+      summary: Activar preset por id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [preset_id]
+              properties:
+                preset_id: { type: string }
+      responses:
+        "200": { description: OK }
+        "404": { content: { application/json: { schema: { $ref: "#/components/schemas/ErrorMessage" } } } }
+
+  /api/stats:
+    get:
+      tags: [stats-tracking]
+      summary: Contadores e métricas ao vivo (JSON polling)
+      responses:
+        "200":
+          description: Ver `build_stats_payload` em web_dashboard.py
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /api/tracking/mode:
+    post:
+      tags: [stats-tracking]
+      summary: Classes YOLO a rastrear / flags legado track_people e track_vehicles
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                class_ids:
+                  type: array
+                  items: { type: integer }
+                track_people: { type: boolean }
+                track_vehicles: { type: boolean }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  track_people: { type: boolean }
+                  track_vehicles: { type: boolean }
+                  track_active_class_ids:
+                    type: array
+                    items: { type: integer }
+        "400": { content: { application/json: { schema: { $ref: "#/components/schemas/ErrorMessage" } } } }
+
+  /api/insights/flow:
+    get:
+      tags: [stats-tracking]
+      summary: Recomendações de fluxo (horários, fila, etc.)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/heatmap/live:
+    get:
+      tags: [heatmap]
+      summary: Grelha de calor ao vivo (sessão)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/heatmap/vehicles/live:
+    get:
+      tags: [heatmap]
+      summary: Heatmap de veículos ao vivo
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/heatmap/historical:
+    get:
+      tags: [heatmap]
+      summary: Heatmap agregado por período
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [session, 1h, today]
+            default: session
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/heatmap/diff:
+    get:
+      tags: [heatmap]
+      summary: Comparar dois períodos
+      parameters:
+        - name: period
+          in: query
+          schema: { type: string, default: "1h" }
+        - name: baseline
+          in: query
+          schema: { type: string, default: "today" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/heatmap/replay:
+    get:
+      tags: [heatmap]
+      summary: Slots para animação / replay
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [today, session, 1h]
+            default: "today"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/heatmap/grid_version:
+    get:
+      tags: [heatmap]
+      summary: Versão da grelha para preset/câmara activa
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  camera_id: { type: string }
+                  grid_version: { type: integer }
+
+  /api/flow/vectors:
+    get:
+      tags: [heatmap]
+      summary: Vectores de fluxo agregados (PCA / movimento)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/profiles:
+    get:
+      tags: [system]
+      summary: Listar perfis de ambiente (thresholds)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/profiles/{profile_id}/apply:
+    post:
+      tags: [system]
+      summary: Aplicar perfil por id
+      parameters:
+        - name: profile_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: OK }
+        "404": { content: { application/json: { schema: { $ref: "#/components/schemas/ErrorMessage" } } } }
+
+  /api/profiles/reset:
+    post:
+      tags: [system]
+      summary: Repor thresholds ao default
+      responses:
+        "200": { description: OK }
+
+  /api/suggest/line:
+    get:
+      tags: [config-roi]
+      summary: Sugestão de linha de contagem a partir do fluxo
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/suggest/zones:
+    get:
+      tags: [config-roi]
+      summary: Sugestão de rectângulos (heatmap) para ROI
+      parameters:
+        - name: max_zones
+          in: query
+          schema: { type: integer, default: 4, maximum: 6 }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  zones:
+                    type: array
+                    items: { type: object, additionalProperties: true }
+
+  /api/dwell/live:
+    get:
+      tags: [zones-dwell]
+      summary: Dwell ao vivo (sessão)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/hotspots/live:
+    get:
+      tags: [zones-dwell]
+      summary: Hotspots ao vivo
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/hotspots/historical:
+    get:
+      tags: [zones-dwell]
+      summary: Score de grelha histórico
+      parameters:
+        - name: window
+          in: query
+          schema:
+            type: string
+            enum: [recent, hist, composite]
+            default: composite
+        - name: from
+          in: query
+          schema: { type: number }
+        - name: to
+          in: query
+          schema: { type: number }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/zone-templates:
+    get:
+      tags: [zones-dwell]
+      summary: Catálogo de templates de zona
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  templates: { type: array, items: { type: object } }
+    post:
+      tags: [zones-dwell]
+      summary: Criar template customizado
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slug, name, zones]
+              properties:
+                slug: { type: string }
+                name: { type: string }
+                description: { type: string }
+                zones: { type: array, items: { type: object } }
+                weights: { type: object, additionalProperties: true }
+      responses:
+        "200": { description: ok + id }
+        "400": { content: { application/json: { schema: { $ref: "#/components/schemas/ErrorMessage" } } } }
+
+  /api/zones:
+    get:
+      tags: [zones-dwell]
+      summary: Listar zonas por câmara
+      parameters:
+        - name: camera_id
+          in: query
+          schema: { type: string, default: default }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  zones: { type: array, items: { type: object } }
+    post:
+      tags: [zones-dwell]
+      summary: Criar zona (polígono normalizado)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, polygon]
+              properties:
+                camera_id: { type: string }
+                name: { type: string }
+                zone_type: { type: string }
+                polygon:
+                  type: array
+                  items: { $ref: "#/components/schemas/NormPoint" }
+                template_id: { type: integer }
+      responses:
+        "200": { description: ok, id, grid_version }
+        "400": { content: { application/json: { schema: { $ref: "#/components/schemas/ErrorMessage" } } } }
+
+  /api/zones/from-template:
+    post:
+      tags: [zones-dwell]
+      summary: Instanciar zonas a partir de template
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [template_slug]
+              properties:
+                template_slug: { type: string }
+                camera_id: { type: string }
+      responses:
+        "200": { description: zone_ids, grid_version }
+        "400": { content: { application/json: { schema: { $ref: "#/components/schemas/ErrorMessage" } } } }
+
+  /api/zones/{zone_id}:
+    put:
+      tags: [zones-dwell]
+      summary: Actualizar zona
+      parameters:
+        - name: zone_id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                camera_id: { type: string }
+                name: { type: string }
+                zone_type: { type: string }
+                polygon:
+                  type: array
+                  items: { $ref: "#/components/schemas/NormPoint" }
+      responses:
+        "200": { description: ok, grid_version }
+        "404": { content: { application/json: { schema: { $ref: "#/components/schemas/ErrorMessage" } } } }
+    delete:
+      tags: [zones-dwell]
+      summary: Soft-delete de zona
+      parameters:
+        - name: zone_id
+          in: path
+          required: true
+          schema: { type: integer }
+        - name: camera_id
+          in: query
+          schema: { type: string }
+      responses:
+        "200": { description: OK }
+        "404": { content: { application/json: { schema: { $ref: "#/components/schemas/ErrorMessage" } } } }
+
+  /api/zones/vehicles/live:
+    get:
+      tags: [zones-dwell]
+      summary: Ocupação por zona (veículos)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/zones/{zone_id}/stats:
+    get:
+      tags: [zones-dwell]
+      summary: Séries agregadas por slot temporal
+      parameters:
+        - name: zone_id
+          in: path
+          required: true
+          schema: { type: integer }
+        - name: from
+          in: query
+          schema: { type: number, default: 0 }
+        - name: to
+          in: query
+          schema: { type: number }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  zone_id: { type: integer }
+                  slots: { type: array, items: { type: object } }
+
+  /api/alerts:
+    get:
+      tags: [alerts]
+      summary: Eventos de alerta desde um seq
+      parameters:
+        - name: since
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/alerts/config:
+    post:
+      tags: [alerts]
+      summary: Configurar cooldown, boné, cores, modo todos os veículos
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                cooldown_seconds: { type: number }
+                server_beep: { type: boolean }
+                cap_enabled: { type: boolean }
+                cap_threshold: { type: number }
+                all_vehicles_mode: { type: boolean }
+                car_colors: { type: array, items: { type: string } }
+                car_min_score: { type: number }
+      responses:
+        "200": { description: Estado actual }
+        "400": { content: { application/json: { schema: { $ref: "#/components/schemas/ErrorMessage" } } } }
+
+  /api/audit-log:
+    get:
+      tags: [system]
+      summary: Eventos de configuração persistidos
+      parameters:
+        - name: type
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 200, maximum: 1000 }
+        - name: since
+          in: query
+          schema: { type: number }
+        - name: all_sessions
+          in: query
+          schema: { type: string, enum: ["0", "1"] }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/camera/drift:
+    get:
+      tags: [system]
+      summary: Estado de drift de câmara / iluminação
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/camera/drift/reset:
+    post:
+      tags: [system]
+      summary: Repor baseline de drift
+      responses:
+        "200": { description: OK }
+
+  /api/export:
+    post:
+      tags: [system]
+      summary: Exportar CSV de resumo da sessão
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  csv_path: { type: string }
+
+  /api/export/zones:
+    post:
+      tags: [system]
+      summary: CSV agregado por zona
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                camera_id: { type: string }
+                from: { type: number }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  csv_path: { type: string }
+
+  /api/export/dwell-report:
+    post:
+      tags: [system]
+      summary: Relatório texto dwell em outputs/
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                camera_id: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  path: { type: string }
+
+  /video_feed:
+    get:
+      tags: [config-roi]
+      summary: MJPEG do frame anotado (multipart/x-mixed-replace)
+      responses:
+        "200":
+          description: Stream contínuo de JPEG
+          content:
+            multipart/x-mixed-replace:
+              schema:
+                type: string
+                format: binary

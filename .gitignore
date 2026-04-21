@@ -6,6 +6,9 @@ __pycache__/
 .venv/
 outputs/
 data/contagem.db
+data/audit_log.db
+data/*.db-wal
+data/*.db-shm
 data/gender_classify_7k_view/
 /*.pt
 weights/**/*.pt

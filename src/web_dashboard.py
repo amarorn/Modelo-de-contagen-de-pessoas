@@ -3049,7 +3049,15 @@ def create_app(
     drift_detector: CameraDriftDetector,
 ) -> Flask:
     app = Flask(__name__)
-    CORS(app, resources={r"/api/*": {"origins": "*"}, r"/video_feed": {"origins": "*"}})
+    CORS(
+        app,
+        resources={
+            r"/api/*": {"origins": "*"},
+            r"/video_feed": {"origins": "*"},
+            r"/openapi.yaml": {"origins": "*"},
+            r"/docs": {"origins": "*"},
+        },
+    )
     env_file = Path(__file__).resolve().parent.parent / ".env"
     heatmap_store_api = HeatmapStore()
     dwell_store_api = DwellStore()
@@ -4511,6 +4519,45 @@ def create_app(
 
         return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
+    _openapi_path = Path(__file__).resolve().parent.parent / "docs" / "openapi.yaml"
+
+    @app.get("/openapi.yaml")
+    def serve_openapi() -> Response:
+        if not _openapi_path.is_file():
+            return jsonify({"error": "Especificacao OpenAPI nao encontrada"}), 404
+        return Response(
+            _openapi_path.read_text(encoding="utf-8"),
+            mimetype="text/yaml; charset=utf-8",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    @app.get("/docs")
+    def swagger_ui_page() -> Response:
+        html = """<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>API — Swagger UI</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui.css"/>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui-bundle.js"></script>
+  <script>
+    window.onload = function () {
+      window.ui = SwaggerUIBundle({
+        url: "/openapi.yaml",
+        dom_id: "#swagger-ui",
+        deepLinking: true,
+        presets: [SwaggerUIBundle.presets.apis],
+      });
+    };
+  </script>
+</body>
+</html>"""
+        return Response(html, mimetype="text/html; charset=utf-8")
+
     return app
 
 
@@ -4561,6 +4608,11 @@ def main() -> None:
     )
 
     app = create_app(shared, audit_log, drift_detector)
+    print(
+        f"[web] Documentacao OpenAPI: http://{args.host}:{args.port}/docs "
+        f"(YAML: http://{args.host}:{args.port}/openapi.yaml)",
+        flush=True,
+    )
     try:
         app.run(
             host=args.host,

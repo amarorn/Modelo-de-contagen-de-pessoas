@@ -18,6 +18,7 @@ Contar entradas e saidas com alta precisao, baixa latencia e rastreabilidade de 
 - `docs/05_plano_validacao.md`: metodos de validacao, metricas e criterios de aceite
 - `docs/06_ultralytics_treino.md`: guia de treino local/HUB na Ultralytics
 - `docs/07_web_online.md`: dashboard web e publicacao online
+- `docs/openapi.yaml`: especificacao OpenAPI 3.0 da API REST do dashboard; com o servidor a correr, UI em `http://localhost:8080/docs` (porta conforme `WEB_PORT`)
 - `docs/08_mobile_camera_browser.md`: camera do proprio celular no navegador
 - `docs/11_guia_teste_pipeline_local_monitoramento.md`: guia rapido para testar pipeline, monitorar e subir para plataforma
 - `docs/diagrams/`: diagramas Mermaid prontos para renderizacao
