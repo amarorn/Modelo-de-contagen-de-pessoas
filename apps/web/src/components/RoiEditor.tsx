@@ -8,7 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
-import type { ApiConfig, CountPolygonSpec } from "../types/api";
+import type { ApiConfig, CountPolygonSpec, FlowVectorsPayload } from "../types/api";
 import {
   IconRuler, IconPolygon, IconX, IconCheck,
   IconRotateCcw, IconTrash, IconAlertTriangle, IconPencil, IconArrowsUpDown,
@@ -98,6 +98,7 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
   const [showFeetGuide, setShowFeetGuide] = useState(false);
   const [feetNow, setFeetNow]       = useState<Point[]>([]);
   const [feetTrail, setFeetTrail]   = useState<Point[]>([]);
+  const [optimizingRingIdx, setOptimizingRingIdx] = useState<number | null>(null);
 
   const snapSrc = `${apiBase}/video_feed`;
 
@@ -802,6 +803,68 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
     setMsg({ text: "Polígono movido para o rascunho · edite os vértices no canvas.", ok: true });
   }, [polyDraft]);
 
+  const optimizeRingForPassage = useCallback(async (ringIdx: number) => {
+    const ring = polyRings[ringIdx];
+    if (!ring || ring.points.length < 3) return;
+    setOptimizingRingIdx(ringIdx);
+    try {
+      const cx = ring.points.reduce((s, p) => s + p.x, 0) / ring.points.length;
+      const cy = ring.points.reduce((s, p) => s + p.y, 0) / ring.points.length;
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const p of ring.points) {
+        minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+        minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+      }
+      const bboxW = Math.max(1, maxX - minX);
+      const bboxH = Math.max(1, maxY - minY);
+      let flowVx = 0, flowVy = 0, hasFlow = false;
+      try {
+        const res = await fetch(`${apiBase}/api/flow/vectors`, { cache: "no-store" });
+        if (res.ok) {
+          const data = (await res.json()) as FlowVectorsPayload;
+          if (data.vectors && data.vectors.length > 0 && data.max_mag > 0) {
+            const cellW = imgSize.w / data.grid_w;
+            const cellH = imgSize.h / data.grid_h;
+            let totalW = 0, sumVx = 0, sumVy = 0;
+            for (const v of data.vectors) {
+              if (v.mag <= 0) continue;
+              const dist = Math.hypot((v.c + 0.5) * cellW - cx, (v.r + 0.5) * cellH - cy);
+              const w = v.mag / (1 + dist / Math.max(bboxW, bboxH));
+              sumVx += v.vx * w; sumVy += v.vy * w; totalW += w;
+            }
+            if (totalW > 0) {
+              flowVx = sumVx / totalW; flowVy = sumVy / totalW;
+              const m = Math.hypot(flowVx, flowVy);
+              if (m > 0.01) { flowVx /= m; flowVy /= m; hasFlow = true; }
+            }
+          }
+        }
+      } catch { /* silencioso */ }
+      if (!hasFlow) {
+        // Fallback: bbox orientation — longer axis = flow direction
+        if (bboxW >= bboxH) { flowVx = 1; flowVy = 0; } else { flowVx = 0; flowVy = 1; }
+      }
+      // Strip: long perpendicular to flow, thin along flow
+      const perpVx = -flowVy, perpVy = flowVx;
+      const halfLen   = Math.max(bboxW, bboxH) * 0.55;
+      const halfThick = Math.max(8, Math.min(30, Math.min(bboxW, bboxH) * 0.15));
+      const clamp = (v: number, max: number) => Math.min(max - 1, Math.max(0, Math.round(v)));
+      const W = imgSize.w, H = imgSize.h;
+      const newPoints: Point[] = [
+        { x: clamp(cx + perpVx * halfLen - flowVx * halfThick, W), y: clamp(cy + perpVy * halfLen - flowVy * halfThick, H) },
+        { x: clamp(cx + perpVx * halfLen + flowVx * halfThick, W), y: clamp(cy + perpVy * halfLen + flowVy * halfThick, H) },
+        { x: clamp(cx - perpVx * halfLen + flowVx * halfThick, W), y: clamp(cy - perpVy * halfLen + flowVy * halfThick, H) },
+        { x: clamp(cx - perpVx * halfLen - flowVx * halfThick, W), y: clamp(cy - perpVy * halfLen - flowVy * halfThick, H) },
+      ];
+      setPolyRings((prev) => prev.map((r, i) => i === ringIdx ? { ...r, points: newPoints } : r));
+      setMsg({ text: `"${ring.title}" ajustado para faixa de cruzamento${hasFlow ? " (fluxo detectado)" : " (fallback)"}`, ok: true });
+    } catch (err) {
+      setMsg({ text: `Erro ao otimizar: ${err}`, ok: false });
+    } finally {
+      setOptimizingRingIdx(null);
+    }
+  }, [polyRings, apiBase, imgSize]);
+
   const apply = useCallback(async () => {
     setSaving(true);
     setMsg(null);
@@ -921,6 +984,10 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
         @keyframes roi-msg-in {
           from { opacity: 0; transform: translateY(3px); }
           to   { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes roi-spin {
+          from { transform: rotate(0deg); }
+          to   { transform: rotate(360deg); }
         }
         .roi-row { animation: roi-row-in 0.18s ease both; }
       `}</style>
@@ -1461,6 +1528,53 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
                               }}
                             >
                               <IconArrowsUpDown size={10} />
+                            </button>
+                            {/* Optimize for passage — reshapes to crossing strip */}
+                            <button
+                              type="button"
+                              onClick={() => void optimizeRingForPassage(ri)}
+                              disabled={optimizingRingIdx !== null}
+                              title="Ajustar para faixa de cruzamento — cria uma faixa fina perpendicular ao fluxo para registrar toda passagem"
+                              style={{
+                                background: "none",
+                                border: `1px solid ${optimizingRingIdx === ri ? "rgba(16,185,129,0.4)" : "var(--border)"}`,
+                                color: optimizingRingIdx === ri ? "var(--green)" : "var(--text-muted)",
+                                cursor: optimizingRingIdx !== null ? "not-allowed" : "pointer",
+                                padding: 3,
+                                borderRadius: 3,
+                                display: "flex",
+                                alignItems: "center",
+                                transition: "color 0.15s, border-color 0.15s",
+                                opacity: optimizingRingIdx !== null && optimizingRingIdx !== ri ? 0.4 : 1,
+                              }}
+                              onMouseEnter={(e) => {
+                                if (optimizingRingIdx === null) {
+                                  const b = e.currentTarget as HTMLButtonElement;
+                                  b.style.color = "var(--green)";
+                                  b.style.borderColor = "rgba(16,185,129,0.4)";
+                                }
+                              }}
+                              onMouseLeave={(e) => {
+                                if (optimizingRingIdx !== ri) {
+                                  const b = e.currentTarget as HTMLButtonElement;
+                                  b.style.color = "var(--text-muted)";
+                                  b.style.borderColor = "var(--border)";
+                                }
+                              }}
+                            >
+                              {optimizingRingIdx === ri ? (
+                                <svg width={10} height={10} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" style={{ animation: "roi-spin 0.9s linear infinite", transformOrigin: "center" }}>
+                                  <path d="M12 2a10 10 0 0 1 10 10"/>
+                                </svg>
+                              ) : (
+                                <svg width={10} height={10} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
+                                  <polyline points="5 9 2 12 5 15"/>
+                                  <polyline points="19 9 22 12 19 15"/>
+                                  <line x1="2" y1="12" x2="22" y2="12"/>
+                                  <line x1="12" y1="2" x2="12" y2="6"/>
+                                  <line x1="12" y1="18" x2="12" y2="22"/>
+                                </svg>
+                              )}
                             </button>
                             <button
                               type="button"
