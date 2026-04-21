@@ -80,13 +80,13 @@ export default function App() {
               {/* Action bar */}
               <div
                 style={{
-                  padding: "10px 16px",
+                  padding: "9px 16px",
                   borderTop: "1px solid var(--border)",
-                  background: "var(--bg-elevated)",
+                  background: "linear-gradient(180deg, var(--bg-elevated) 0%, var(--bg-surface) 100%)",
                   display: "flex",
                   flexWrap: "wrap",
                   alignItems: "center",
-                  gap: 10,
+                  gap: 8,
                   justifyContent: "space-between",
                   flexShrink: 0,
                 }}
@@ -130,20 +130,21 @@ export default function App() {
               {/* Column header */}
               <div
                 style={{
-                  padding: "10px 20px 9px",
+                  padding: "9px 18px 8px",
                   borderBottom: "1px solid var(--border)",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "space-between",
                   flexShrink: 0,
+                  background: "rgba(255,149,0,0.025)",
                 }}
               >
                 <span
                   style={{
                     fontFamily: "var(--font-display)",
-                    fontSize: 10,
+                    fontSize: 9,
                     fontWeight: 700,
-                    letterSpacing: "0.18em",
+                    letterSpacing: "0.22em",
                     textTransform: "uppercase",
                     color: "var(--text-muted)",
                   }}
@@ -152,12 +153,13 @@ export default function App() {
                 </span>
                 <span
                   style={{
-                    width: 6,
-                    height: 6,
+                    width: 5,
+                    height: 5,
                     borderRadius: "50%",
                     background: "var(--amber)",
                     animation: "pulse 2.5s infinite",
                     display: "inline-block",
+                    boxShadow: "0 0 6px var(--amber)",
                   }}
                 />
               </div>
@@ -395,33 +397,31 @@ export default function App() {
       <footer
         style={{
           borderTop: "1px solid var(--border)",
-          padding: "10px 20px",
+          padding: "8px 20px",
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
           background: "var(--bg-surface)",
           flexShrink: 0,
+          boxShadow: "0 -1px 0 rgba(255,149,0,0.07)",
         }}
       >
-        <span
-          style={{
-            fontFamily: "var(--font-display)",
-            fontSize: 11,
-            fontWeight: 600,
-            letterSpacing: "0.12em",
-            textTransform: "uppercase",
-            color: "var(--text-muted)",
-          }}
-        >
-          VisionCount — Atualização a cada 2s
+        <span style={{
+          fontFamily: "var(--font-display)",
+          fontSize: 10,
+          fontWeight: 700,
+          letterSpacing: "0.18em",
+          textTransform: "uppercase",
+          color: "var(--text-muted)",
+        }}>
+          VisionCount · Atualização a cada 2s
         </span>
-        <span
-          style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: 11,
-            color: "var(--text-muted)",
-          }}
-        >
+        <span style={{
+          fontFamily: "var(--font-mono)",
+          fontSize: 10,
+          color: "var(--text-muted)",
+          letterSpacing: "0.04em",
+        }}>
           {new Date().toLocaleTimeString("pt-BR")}
         </span>
       </footer>
@@ -437,34 +437,7 @@ function ActionButton({
   return (
     <button
       onClick={onClick}
-      style={{
-        padding: "7px 14px",
-        background: "var(--bg-surface)",
-        border: "1px solid var(--border)",
-        borderRadius: "var(--radius-sm)",
-        color: "var(--text-secondary)",
-        fontFamily: "var(--font-display)",
-        fontSize: 12,
-        fontWeight: 700,
-        letterSpacing: "0.08em",
-        textTransform: "uppercase",
-        cursor: "pointer",
-        display: "flex",
-        alignItems: "center",
-        gap: 6,
-        transition: "border-color 0.15s, color 0.15s",
-        whiteSpace: "nowrap",
-      }}
-      onMouseEnter={(e) => {
-        const b = e.currentTarget as HTMLButtonElement;
-        b.style.borderColor = "var(--border-accent)";
-        b.style.color = "var(--amber)";
-      }}
-      onMouseLeave={(e) => {
-        const b = e.currentTarget as HTMLButtonElement;
-        b.style.borderColor = "var(--border)";
-        b.style.color = "var(--text-secondary)";
-      }}
+      className="action-btn"
     >
       {icon}
       {label}

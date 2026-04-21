@@ -44,106 +44,81 @@ export function StatCard({
   const display =
     decimals > 0 ? value.toFixed(decimals) : value.toLocaleString("pt-BR");
 
-  /* ── Counter variant (KPI sidebar column) ─────────────────── */
+  /* ── Counter variant (KPI sidebar) ───────────────────────────── */
   if (variant === "counter") {
     return (
       <div
         style={{
           flex: 1,
-          padding: "16px 20px",
+          padding: "14px 18px 14px 20px",
           borderBottom: "1px solid var(--border)",
           display: "flex",
           flexDirection: "column",
-          gap: 4,
+          gap: 5,
           position: "relative",
           overflow: "hidden",
           transition: "background 0.18s",
-          minHeight: 90,
+          minHeight: 86,
         }}
         onMouseEnter={(e) => {
-          (e.currentTarget as HTMLDivElement).style.background = "var(--bg-hover)";
+          (e.currentTarget as HTMLDivElement).style.background = "rgba(255,255,255,0.025)";
         }}
         onMouseLeave={(e) => {
           (e.currentTarget as HTMLDivElement).style.background = "transparent";
         }}
       >
-        {/* Left accent bar */}
-        <div
-          style={{
-            position: "absolute",
-            left: 0,
-            top: "20%",
-            bottom: "20%",
-            width: 2,
-            background: color,
-            borderRadius: "0 2px 2px 0",
-          }}
-        />
+        {/* Left accent bar — full height, sharp */}
+        <div style={{
+          position: "absolute",
+          left: 0,
+          top: 0,
+          bottom: 0,
+          width: 3,
+          background: `linear-gradient(180deg, ${color}00 0%, ${color} 25%, ${color} 75%, ${color}00 100%)`,
+        }} />
 
         {/* Label row */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 7,
-            marginLeft: 8,
-          }}
-        >
-          <span style={{ color, opacity: 0.9, display: "flex", alignItems: "center" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 7, marginLeft: 8 }}>
+          <span style={{ color, opacity: 0.80, display: "flex", alignItems: "center" }}>
             {icon}
           </span>
-          <span
-            style={{
-              fontFamily: "var(--font-display)",
-              fontSize: 11,
-              fontWeight: 700,
-              letterSpacing: "0.14em",
-              textTransform: "uppercase",
-              color: "var(--text-muted)",
-            }}
-          >
+          <span style={{
+            fontFamily: "var(--font-display)",
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: "0.16em",
+            textTransform: "uppercase",
+            color: "var(--text-muted)",
+          }}>
             {label}
           </span>
           {tooltip && (
             <Tooltip text={tooltip} align="left">
-              <span style={{ color: "var(--text-muted)", opacity: 0.55, display: "flex", alignItems: "center" }}>
-                <InfoIcon size={11} />
+              <span style={{ color: "var(--text-muted)", opacity: 0.45, display: "flex", alignItems: "center" }}>
+                <InfoIcon size={10} />
               </span>
             </Tooltip>
           )}
         </div>
 
         {/* Value */}
-        <div
-          style={{
-            marginLeft: 8,
-            display: "flex",
-            alignItems: "baseline",
-            gap: 4,
-          }}
-        >
+        <div style={{ marginLeft: 8, display: "flex", alignItems: "baseline", gap: 4 }}>
           <span
             ref={numRef}
             className="mono count-anim"
             style={{
-              fontSize: 38,
+              fontSize: 36,
               fontWeight: 600,
               color,
-              letterSpacing: "-0.03em",
+              letterSpacing: "-0.04em",
               lineHeight: 1,
-              textShadow: `0 0 22px ${color}33`,
+              textShadow: `0 0 24px ${color}3A`,
             }}
           >
             {display}
           </span>
           {suffix && (
-            <span
-              style={{
-                fontSize: 13,
-                color: "var(--text-muted)",
-                fontFamily: "var(--font-mono)",
-              }}
-            >
+            <span style={{ fontSize: 12, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
               {suffix}
             </span>
           )}
@@ -151,36 +126,33 @@ export function StatCard({
 
         {/* Subtitle */}
         {subtitle && (
-          <div
-            style={{
-              marginLeft: 8,
-              fontSize: 11,
-              color: "var(--text-muted)",
-              fontFamily: "var(--font-mono)",
-            }}
-          >
+          <div style={{
+            marginLeft: 8,
+            fontSize: 10,
+            color: "var(--text-muted)",
+            fontFamily: "var(--font-mono)",
+            letterSpacing: "0.02em",
+          }}>
             {subtitle}
           </div>
         )}
 
-        {/* Background glow */}
-        <div
-          style={{
-            position: "absolute",
-            right: -20,
-            top: "50%",
-            transform: "translateY(-50%)",
-            width: 80,
-            height: 80,
-            background: `radial-gradient(circle, ${color}12 0%, transparent 70%)`,
-            pointerEvents: "none",
-          }}
-        />
+        {/* Background radial glow (right side) */}
+        <div style={{
+          position: "absolute",
+          right: -16,
+          top: "50%",
+          transform: "translateY(-50%)",
+          width: 88,
+          height: 88,
+          background: `radial-gradient(circle, ${color}10 0%, transparent 70%)`,
+          pointerEvents: "none",
+        }} />
       </div>
     );
   }
 
-  /* ── Card variant (analytics grid) ──────────────────────────── */
+  /* ── Card variant (analytics grid) ─────────────────────────── */
   return (
     <div
       className="card"
@@ -194,37 +166,28 @@ export function StatCard({
         overflow: "hidden",
       }}
     >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-        }}
-      >
-        <span
-          style={{
-            fontFamily: "var(--font-display)",
-            fontSize: 12,
-            fontWeight: 700,
-            letterSpacing: "0.1em",
-            textTransform: "uppercase",
-            color: "var(--text-secondary)",
-          }}
-        >
+      {/* Label + icon row */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span style={{
+          fontFamily: "var(--font-display)",
+          fontSize: 11,
+          fontWeight: 700,
+          letterSpacing: "0.12em",
+          textTransform: "uppercase",
+          color: "var(--text-secondary)",
+        }}>
           {label}
         </span>
-        <span
-          style={{
-            background: colorDim,
-            border: `1px solid ${color}22`,
-            borderRadius: "var(--radius-sm)",
-            width: 34,
-            height: 34,
-            display: "grid",
-            placeItems: "center",
-            color,
-          }}
-        >
+        <span style={{
+          background: colorDim,
+          border: `1px solid ${color}20`,
+          borderRadius: "var(--radius)",
+          width: 32,
+          height: 32,
+          display: "grid",
+          placeItems: "center",
+          color,
+        }}>
           {icon}
         </span>
       </div>
@@ -235,30 +198,29 @@ export function StatCard({
             ref={numRef}
             className="mono count-anim"
             style={{
-              fontSize: 34,
+              fontSize: 32,
               fontWeight: 600,
               color,
-              letterSpacing: "-0.03em",
+              letterSpacing: "-0.04em",
               lineHeight: 1,
+              textShadow: `0 0 20px ${color}30`,
             }}
           >
             {display}
           </span>
           {suffix && (
-            <span style={{ fontSize: 13, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+            <span style={{ fontSize: 12, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
               {suffix}
             </span>
           )}
         </div>
         {subtitle && (
-          <div
-            style={{
-              fontSize: 11,
-              color: "var(--text-muted)",
-              marginTop: 4,
-              fontFamily: "var(--font-mono)",
-            }}
-          >
+          <div style={{
+            fontSize: 10,
+            color: "var(--text-muted)",
+            marginTop: 4,
+            fontFamily: "var(--font-mono)",
+          }}>
             {subtitle}
           </div>
         )}
