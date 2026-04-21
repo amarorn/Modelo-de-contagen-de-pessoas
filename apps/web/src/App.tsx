@@ -3,7 +3,7 @@ import { useStats } from "./hooks/useStats";
 import { useConfig } from "./hooks/useConfig";
 import {
   IconArrowUp, IconArrowDown, IconUsers, IconArrowsUpDown,
-  IconCar, IconQueue, IconPerson,
+  IconCar, IconQueue, IconPerson, IconRotateCcw,
 } from "./components/Icons";
 import { Header, type AppView } from "./components/Header";
 import { StatCard } from "./components/StatCard";
@@ -39,6 +39,27 @@ export default function App() {
   const [roiOpen, setRoiOpen]       = useState(false);
   const [sourceOpen, setSourceOpen] = useState(false);
   const [view, setView]             = useState<AppView>("pessoas");
+  const [resetting, setResetting]   = useState(false);
+
+  const handleResetCounters = async () => {
+    if (resetting) return;
+    const ok = window.confirm(
+      "Zerar todos os contadores (entradas, saídas, fluxo horário e agregados)?\nEssa ação não pode ser desfeita.",
+    );
+    if (!ok) return;
+    setResetting(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/counters/reset`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!res.ok) throw new Error(await res.text());
+    } catch (err) {
+      window.alert(`Falha ao zerar contadores: ${err}`);
+    } finally {
+      setResetting(false);
+    }
+  };
 
   return (
     <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
@@ -74,10 +95,20 @@ export default function App() {
             margin: "0 auto",
           }}
         >
-          {/* ── Ops layout: Video left + KPI column right ─────────── */}
-          <div className="ops-layout">
+          {/* ── Ops layout: Zones left + Video center + KPI column right ── */}
+          <div className={`ops-layout${(stats.polygon_stats?.length ?? 0) > 0 ? " has-zones" : ""}`}>
 
-            {/* Left column: video + action bar */}
+            {/* Left column: zone cards (only visible in polygon mode) */}
+            {(stats.polygon_stats?.length ?? 0) > 0 && (
+              <div className="ops-zones-col">
+                <PolygonMetricsStrip
+                  polygonStats={stats.polygon_stats ?? []}
+                  orientation="vertical"
+                />
+              </div>
+            )}
+
+            {/* Center column: video + action bar */}
             <div className="ops-video-col">
               <LiveFeed apiBase={API_BASE} hero />
 
@@ -123,8 +154,6 @@ export default function App() {
                 />
               </div>
 
-              {/* Per-polygon live metrics strip (only visible in polygon mode) */}
-              <PolygonMetricsStrip polygonStats={stats.polygon_stats ?? []} />
             </div>
 
             {/* Right column: KPI counters */}
@@ -153,17 +182,57 @@ export default function App() {
                 >
                   Contadores
                 </span>
-                <span
-                  style={{
-                    width: 5,
-                    height: 5,
-                    borderRadius: "50%",
-                    background: "var(--amber)",
-                    animation: "pulse 2.5s infinite",
-                    display: "inline-block",
-                    boxShadow: "0 0 6px var(--amber)",
-                  }}
-                />
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <button
+                    type="button"
+                    onClick={handleResetCounters}
+                    disabled={resetting}
+                    title="Zerar contadores (entradas, saidas, fluxo horario)"
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 4,
+                      padding: "3px 8px",
+                      borderRadius: 4,
+                      border: "1px solid var(--border)",
+                      background: "transparent",
+                      color: resetting ? "var(--text-muted)" : "var(--text-secondary)",
+                      fontFamily: "var(--font-display)",
+                      fontSize: 9,
+                      fontWeight: 700,
+                      letterSpacing: "0.1em",
+                      textTransform: "uppercase",
+                      cursor: resetting ? "wait" : "pointer",
+                      opacity: resetting ? 0.55 : 1,
+                      transition: "all 0.15s",
+                    }}
+                    onMouseEnter={(e) => {
+                      if (resetting) return;
+                      const b = e.currentTarget as HTMLButtonElement;
+                      b.style.borderColor = "rgba(239,68,68,0.5)";
+                      b.style.color = "var(--red)";
+                    }}
+                    onMouseLeave={(e) => {
+                      const b = e.currentTarget as HTMLButtonElement;
+                      b.style.borderColor = "var(--border)";
+                      b.style.color = resetting ? "var(--text-muted)" : "var(--text-secondary)";
+                    }}
+                  >
+                    <IconRotateCcw size={10} />
+                    {resetting ? "zerando..." : "zerar"}
+                  </button>
+                  <span
+                    style={{
+                      width: 5,
+                      height: 5,
+                      borderRadius: "50%",
+                      background: "var(--amber)",
+                      animation: "pulse 2.5s infinite",
+                      display: "inline-block",
+                      boxShadow: "0 0 6px var(--amber)",
+                    }}
+                  />
+                </div>
               </div>
 
               {/* Counters */}

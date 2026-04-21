@@ -11,7 +11,7 @@ import {
 import type { ApiConfig, CountPolygonSpec } from "../types/api";
 import {
   IconRuler, IconPolygon, IconX, IconCheck,
-  IconRotateCcw, IconTrash, IconAlertTriangle,
+  IconRotateCcw, IconTrash, IconAlertTriangle, IconPencil,
 } from "./Icons";
 import { SuggestLineButton, SuggestZonesButton } from "./SuggestButton";
 
@@ -114,17 +114,47 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
   }, [config]);
 
   /* ── Coordinate conversion ──────────────────────────── */
+  // Retângulo real da imagem dentro do canvas, considerando object-fit: contain
+  // (a imagem é letterboxed, não preenche o container inteiro).
+  const getImageRect = useCallback(
+    (rectW: number, rectH: number) => {
+      const iw = Math.max(1, imgSize.w);
+      const ih = Math.max(1, imgSize.h);
+      const containerAspect = rectW / rectH;
+      const imageAspect = iw / ih;
+      let dispW: number, dispH: number, offX: number, offY: number;
+      if (imageAspect > containerAspect) {
+        dispW = rectW;
+        dispH = rectW / imageAspect;
+        offX = 0;
+        offY = (rectH - dispH) / 2;
+      } else {
+        dispH = rectH;
+        dispW = rectH * imageAspect;
+        offX = (rectW - dispW) / 2;
+        offY = 0;
+      }
+      return { dispW, dispH, offX, offY };
+    },
+    [imgSize],
+  );
+
   const toFrameCoords = useCallback(
     (cx: number, cy: number): Point => {
       const canvas = canvasRef.current;
       if (!canvas) return { x: cx, y: cy };
       const rect = canvas.getBoundingClientRect();
+      const { dispW, dispH, offX, offY } = getImageRect(rect.width, rect.height);
+      const nx = (cx - offX) / Math.max(1, dispW);
+      const ny = (cy - offY) / Math.max(1, dispH);
+      const clampedX = Math.min(1, Math.max(0, nx));
+      const clampedY = Math.min(1, Math.max(0, ny));
       return {
-        x: Math.round((cx / rect.width)  * imgSize.w),
-        y: Math.round((cy / rect.height) * imgSize.h),
+        x: Math.round(clampedX * imgSize.w),
+        y: Math.round(clampedY * imgSize.h),
       };
     },
-    [imgSize],
+    [imgSize, getImageRect],
   );
 
   const toCanvasCoords = useCallback(
@@ -132,12 +162,13 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
       const canvas = canvasRef.current;
       if (!canvas) return { x: fx, y: fy };
       const rect = canvas.getBoundingClientRect();
+      const { dispW, dispH, offX, offY } = getImageRect(rect.width, rect.height);
       return {
-        x: (fx / imgSize.w) * rect.width,
-        y: (fy / imgSize.h) * rect.height,
+        x: (fx / Math.max(1, imgSize.w)) * dispW + offX,
+        y: (fy / Math.max(1, imgSize.h)) * dispH + offY,
       };
     },
-    [imgSize],
+    [imgSize, getImageRect],
   );
 
   /* ── Draw canvas ────────────────────────────────────── */
@@ -365,16 +396,33 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
           const pts = effDraft.map((p) => toCanvasCoords(p.x, p.y));
           const last = pts[pts.length - 1];
           ctx.save();
-          ctx.strokeStyle = "rgba(245,158,11,0.28)";
-          ctx.lineWidth = 1.5;
-          ctx.setLineDash([5, 5]);
+          // Glow externo para destaque sobre fundo claro/escuro
+          ctx.strokeStyle = "rgba(0,0,0,0.55)";
+          ctx.lineWidth = 4;
+          ctx.setLineDash([7, 5]);
           ctx.lineCap = "round";
           ctx.beginPath();
           ctx.moveTo(last.x, last.y);
           ctx.lineTo(cursor.cx, cursor.cy);
           ctx.stroke();
+          // Linha tracejada brilhante do último ponto ao cursor
+          ctx.strokeStyle = "rgba(245,158,11,0.95)";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(last.x, last.y);
+          ctx.lineTo(cursor.cx, cursor.cy);
+          ctx.stroke();
+          // Linha tracejada do cursor ao primeiro ponto (preview de fechamento)
           if (effDraft.length >= 3) {
-            ctx.strokeStyle = "rgba(245,158,11,0.12)";
+            ctx.strokeStyle = "rgba(0,0,0,0.45)";
+            ctx.lineWidth = 3;
+            ctx.setLineDash([5, 6]);
+            ctx.beginPath();
+            ctx.moveTo(pts[0].x, pts[0].y);
+            ctx.lineTo(cursor.cx, cursor.cy);
+            ctx.stroke();
+            ctx.strokeStyle = "rgba(245,158,11,0.60)";
+            ctx.lineWidth = 1.5;
             ctx.beginPath();
             ctx.moveTo(pts[0].x, pts[0].y);
             ctx.lineTo(cursor.cx, cursor.cy);
@@ -664,6 +712,31 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
     ]);
     setPolyDraft([]);
     setMsg(null);
+  }, [polyDraft]);
+
+  const deleteRing = useCallback((ringIdx: number) => {
+    setPolyRings((rings) => rings.filter((_, i) => i !== ringIdx));
+    setMsg(null);
+  }, []);
+
+  // Reabre um polígono fechado para edição: move seus vértices para o rascunho.
+  // Se já houver um rascunho: fecha-o antes se valido (>=3 pts) ou descarta se incompleto.
+  const editRing = useCallback((ringIdx: number) => {
+    setPolyRings((rings) => {
+      const target = rings[ringIdx];
+      if (!target) return rings;
+      const draftSnapshot = polyDraft;
+      const next = rings.filter((_, i) => i !== ringIdx);
+      if (draftSnapshot.length >= 3) {
+        next.push({
+          title: `Área ${next.length + 1}`,
+          points: draftSnapshot.map((p) => ({ ...p })),
+        });
+      }
+      setPolyDraft(target.points.map((p) => ({ ...p })));
+      return next;
+    });
+    setMsg({ text: "Polígono movido para o rascunho · edite os vértices no canvas.", ok: true });
   }, [polyDraft]);
 
   const apply = useCallback(async () => {
@@ -1216,16 +1289,81 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
                           gap: 6,
                         }}
                       >
-                        <span style={{
-                          fontFamily: "var(--font-display)",
-                          fontSize: 8,
-                          fontWeight: 700,
-                          letterSpacing: "0.12em",
-                          textTransform: "uppercase",
-                          color: "var(--text-muted)",
+                        <div style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: 6,
                         }}>
-                          Título · polígono {ri + 1}
-                        </span>
+                          <span style={{
+                            fontFamily: "var(--font-display)",
+                            fontSize: 8,
+                            fontWeight: 700,
+                            letterSpacing: "0.12em",
+                            textTransform: "uppercase",
+                            color: "var(--text-muted)",
+                          }}>
+                            Título · polígono {ri + 1}
+                          </span>
+                          <div style={{ display: "flex", gap: 4 }}>
+                            <button
+                              type="button"
+                              onClick={() => editRing(ri)}
+                              title="Editar vértices (move para o rascunho)"
+                              style={{
+                                background: "none",
+                                border: "1px solid var(--border)",
+                                color: "var(--text-muted)",
+                                cursor: "pointer",
+                                padding: 3,
+                                borderRadius: 3,
+                                display: "flex",
+                                alignItems: "center",
+                                transition: "color 0.15s, border-color 0.15s",
+                              }}
+                              onMouseEnter={(e) => {
+                                const b = e.currentTarget as HTMLButtonElement;
+                                b.style.color = "var(--amber)";
+                                b.style.borderColor = "var(--border-accent)";
+                              }}
+                              onMouseLeave={(e) => {
+                                const b = e.currentTarget as HTMLButtonElement;
+                                b.style.color = "var(--text-muted)";
+                                b.style.borderColor = "var(--border)";
+                              }}
+                            >
+                              <IconPencil size={10} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => deleteRing(ri)}
+                              title="Excluir polígono"
+                              style={{
+                                background: "none",
+                                border: "1px solid var(--border)",
+                                color: "var(--text-muted)",
+                                cursor: "pointer",
+                                padding: 3,
+                                borderRadius: 3,
+                                display: "flex",
+                                alignItems: "center",
+                                transition: "color 0.15s, border-color 0.15s",
+                              }}
+                              onMouseEnter={(e) => {
+                                const b = e.currentTarget as HTMLButtonElement;
+                                b.style.color = "var(--red)";
+                                b.style.borderColor = "rgba(239,68,68,0.4)";
+                              }}
+                              onMouseLeave={(e) => {
+                                const b = e.currentTarget as HTMLButtonElement;
+                                b.style.color = "var(--text-muted)";
+                                b.style.borderColor = "var(--border)";
+                              }}
+                            >
+                              <IconTrash size={10} />
+                            </button>
+                          </div>
+                        </div>
                         <input
                           type="text"
                           value={pr.title}

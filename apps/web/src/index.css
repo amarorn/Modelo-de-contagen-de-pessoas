@@ -81,7 +81,7 @@ body {
 
 #root { min-height: 100vh; display: flex; flex-direction: column; }
 
-/* ── Ops-center layout: video left + KPI column right ───────── */
+/* ── Ops-center layout: zones left + video center + KPI column right ───── */
 .ops-layout {
   display: grid;
   grid-template-columns: 1fr 288px;
@@ -92,6 +92,18 @@ body {
   background: var(--bg-surface);
   margin-bottom: 16px;
   box-shadow: var(--shadow-card);
+}
+.ops-layout.has-zones {
+  grid-template-columns: 260px 1fr 288px;
+}
+
+.ops-zones-col {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  border-right: 1px solid var(--border);
+  background: var(--bg-panel);
 }
 
 .ops-video-col {
@@ -111,8 +123,14 @@ body {
   background-image: linear-gradient(180deg, rgba(255,149,0,0.024) 0%, transparent 40%);
 }
 
+@media (max-width: 1200px) {
+  .ops-layout.has-zones { grid-template-columns: 220px 1fr 288px; }
+}
+
 @media (max-width: 960px) {
-  .ops-layout { grid-template-columns: 1fr; }
+  .ops-layout,
+  .ops-layout.has-zones { grid-template-columns: 1fr; }
+  .ops-zones-col { border-right: none; border-bottom: 1px solid var(--border); }
   .ops-video-col { border-right: none; border-bottom: 1px solid var(--border); }
   .ops-kpi-col { flex-direction: row; flex-wrap: wrap; }
 }

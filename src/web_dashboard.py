@@ -171,6 +171,10 @@ def reset_entry_exit_counters(shared: SharedState) -> None:
     shared.age_agg = AgeAggregateStats()
     shared.hourly_entries = [0] * 24
     shared.hourly_exits = [0] * 24
+    # Sinaliza ao loop de inferencia para zerar contadores por poligono
+    # e limpar o historico de "dentro/fora" (senao tracks ja presentes
+    # ficam travados e a proxima entrada nao e registrada).
+    shared.counters_reset_flag = True
 
 
 def _hour_now() -> int:
@@ -415,6 +419,9 @@ class SharedState:
             "grid_w": 32, "grid_h": 18, "max_val": 0.0, "cells": [], "mode": "composite", "alpha": 0.6,
         }
         self.zones_reload_flag: bool = True
+        # Quando True, o loop de inferencia zera contadores por poligono
+        # e limpa o historico "prev_inside_per_poly_by_id" na proxima iteracao.
+        self.counters_reset_flag: bool = False
         # Multi-classe YOLO (ex. pessoa + veículo): controlado na UI sem reiniciar processo
         self.yolo_count_class_ids: list[int] = []
         self.yolo_person_class_id: int = 0
@@ -1890,6 +1897,17 @@ def inference_loop(
                 if len(poly_session_entries) != n_poly:
                     poly_session_entries = [0] * n_poly
                     poly_session_exits = [0] * n_poly
+                with shared.lock:
+                    _do_reset = bool(shared.counters_reset_flag)
+                    if _do_reset:
+                        shared.counters_reset_flag = False
+                if _do_reset:
+                    poly_session_entries = [0] * n_poly
+                    poly_session_exits = [0] * n_poly
+                    prev_inside_by_id.clear()
+                    prev_inside_per_poly_by_id.clear()
+                    zone_entered_per_poly_by_id.clear()
+                    last_side_by_id.clear()
                 frame_ts = time.monotonic()
                 if prev_frame_mono is not None:
                     dt = frame_ts - prev_frame_mono
@@ -2702,19 +2720,24 @@ def inference_loop(
                     vehicle_zone_tracker.flush_stats()  # reset session slot; no DB persistence yet
                 if count_mode == "polygon" and poly_pts_list:
                     if show_roi_ui:
+                        # Pintura no piso: fill translucido sobre o frame, depois
+                        # contorno fino. Evita o efeito "neon/elevado" do outline duplo.
+                        overlay = frame.copy()
                         for ri, ring in enumerate(poly_pts_list):
                             bd_color = _C_AMBER if ri % 2 == 0 else _C_CYAN
-                            shadow_poly = tuple(int(c * 0.25) for c in bd_color)
                             arr = np.array(ring, dtype=np.int32).reshape(-1, 1, 2)
-                            cv2.polylines(
-                                frame, [arr], isClosed=True, color=shadow_poly, thickness=5, lineType=cv2.LINE_AA
-                            )  # type: ignore[arg-type]
+                            cv2.fillPoly(overlay, [arr], bd_color, lineType=cv2.LINE_AA)
+                        cv2.addWeighted(overlay, 0.28, frame, 0.72, 0, frame)
+
+                        for ri, ring in enumerate(poly_pts_list):
+                            bd_color = _C_AMBER if ri % 2 == 0 else _C_CYAN
+                            arr = np.array(ring, dtype=np.int32).reshape(-1, 1, 2)
                             cv2.polylines(
                                 frame, [arr], isClosed=True, color=bd_color, thickness=2, lineType=cv2.LINE_AA
                             )
                             for pt in ring:
-                                cv2.circle(frame, pt, 5, _C_BLACK, -1, lineType=cv2.LINE_AA)
-                                cv2.circle(frame, pt, 3, bd_color, -1, lineType=cv2.LINE_AA)
+                                cv2.circle(frame, pt, 4, _C_BLACK, -1, lineType=cv2.LINE_AA)
+                                cv2.circle(frame, pt, 2, bd_color, -1, lineType=cv2.LINE_AA)
                             label = (
                                 (poly_titles[ri].strip() if ri < len(poly_titles) else "")
                                 or f"Área {ri + 1}"
@@ -3523,6 +3546,23 @@ def create_app(
             ap = str(shared.active_preset_id or "").strip()
         _save_calibration_for_preset(shared, ap)
         return jsonify({"ok": True, "line": {"x1": x1, "y1": y1, "x2": x2, "y2": y2}})
+
+    @app.post("/api/counters/reset")
+    def reset_counters_only() -> Response:
+        """Zera apenas os contadores (entradas, saidas, fluxo horario, agregados
+        de sexo/idade) sem alterar linha ou poligonos."""
+        with shared.lock:
+            reset_entry_exit_counters(shared)
+            snapshot = {
+                "entries": int(shared.counter.entries),
+                "exits": int(shared.counter.exits),
+            }
+        _persist_config_event(
+            shared,
+            "counters_reset",
+            {"preset_id": str(shared.active_preset_id or "").strip()},
+        )
+        return jsonify({"ok": True, **snapshot})
 
     @app.post("/api/polygon")
     def post_polygon() -> Response:

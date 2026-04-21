@@ -3,6 +3,7 @@ import type { PolygonStat } from "../types/api";
 
 interface Props {
   polygonStats: PolygonStat[];
+  orientation?: "horizontal" | "vertical";
 }
 
 const POLY_COLORS: Array<"amber" | "cyan"> = ["amber", "cyan"];
@@ -111,20 +112,26 @@ function MetricChip({
   );
 }
 
-export function PolygonMetricsStrip({ polygonStats }: Props) {
+export function PolygonMetricsStrip({ polygonStats, orientation = "horizontal" }: Props) {
   if (!polygonStats || polygonStats.length === 0) return null;
+
+  const isVertical = orientation === "vertical";
 
   return (
     <div
       style={{
-        padding: "10px 16px",
-        borderTop: "1px solid var(--border)",
-        background:
-          "linear-gradient(180deg, rgba(17,17,26,0.95) 0%, var(--bg-surface) 100%)",
+        padding: isVertical ? "12px 12px" : "10px 16px",
+        borderTop: isVertical ? "none" : "1px solid var(--border)",
+        background: isVertical
+          ? "transparent"
+          : "linear-gradient(180deg, rgba(17,17,26,0.95) 0%, var(--bg-surface) 100%)",
         display: "flex",
+        flexDirection: isVertical ? "column" : "row",
         gap: 10,
-        flexWrap: "wrap",
+        flexWrap: isVertical ? "nowrap" : "wrap",
         alignItems: "stretch",
+        height: isVertical ? "100%" : undefined,
+        overflowY: isVertical ? "auto" : undefined,
       }}
     >
       {/* Section label */}
@@ -132,23 +139,26 @@ export function PolygonMetricsStrip({ polygonStats }: Props) {
         style={{
           display: "flex",
           alignItems: "center",
-          alignSelf: "center",
-          paddingRight: 10,
-          borderRight: "1px solid var(--border)",
-          marginRight: 2,
+          alignSelf: isVertical ? "stretch" : "center",
+          paddingRight: isVertical ? 0 : 10,
+          paddingBottom: isVertical ? 6 : 0,
+          borderRight: isVertical ? "none" : "1px solid var(--border)",
+          borderBottom: isVertical ? "1px solid var(--border)" : "none",
+          marginRight: isVertical ? 0 : 2,
+          marginBottom: isVertical ? 4 : 0,
           flexShrink: 0,
         }}
       >
         <span
           style={{
             fontFamily: "var(--font-display)",
-            fontSize: 8,
+            fontSize: isVertical ? 9 : 8,
             fontWeight: 700,
             letterSpacing: "0.22em",
             textTransform: "uppercase",
             color: "var(--text-muted)",
-            writingMode: "vertical-rl",
-            transform: "rotate(180deg)",
+            writingMode: isVertical ? "horizontal-tb" : "vertical-rl",
+            transform: isVertical ? "none" : "rotate(180deg)",
             lineHeight: 1,
           }}
         >
@@ -157,7 +167,16 @@ export function PolygonMetricsStrip({ polygonStats }: Props) {
       </div>
 
       {/* Polygon cards */}
-      <div style={{ display: "flex", gap: 10, flex: 1, flexWrap: "wrap" }}>
+      <div
+        style={{
+          display: "flex",
+          flexDirection: isVertical ? "column" : "row",
+          gap: 10,
+          flex: 1,
+          flexWrap: isVertical ? "nowrap" : "wrap",
+          minHeight: 0,
+        }}
+      >
         {polygonStats.map((stat, i) => {
           const colorKey = POLY_COLORS[i % POLY_COLORS.length];
           const c = COLOR_MAP[colorKey];
@@ -175,9 +194,10 @@ export function PolygonMetricsStrip({ polygonStats }: Props) {
                 border: `1px solid ${c.glow}`,
                 borderLeft: `3px solid ${c.accent}`,
                 borderRadius: "0 6px 6px 0",
-                minWidth: 220,
-                flex: "1 1 220px",
-                maxWidth: 320,
+                minWidth: isVertical ? 0 : 220,
+                flex: isVertical ? "0 0 auto" : "1 1 220px",
+                maxWidth: isVertical ? "100%" : 320,
+                width: isVertical ? "100%" : undefined,
                 overflow: "hidden",
               }}
             >
