@@ -91,6 +91,7 @@ export interface PolygonStat {
   exits: number;
   occupancy_now: number;
   avg_dwell_s: number;
+  inverted?: boolean;
 }
 
 export interface AuditEvent {
@@ -110,6 +111,8 @@ export interface AuditEvent {
 export interface CountPolygonSpec {
   title: string;
   points: { x: number; y: number }[];
+  /** Quando true, saída da zona conta como entrada e vice-versa */
+  inverted?: boolean;
 }
 
 export interface ApiConfig {

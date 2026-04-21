@@ -61,7 +61,7 @@ def parse_polygons_json(raw: Any) -> list[dict[str, Any]]:
                 if len(ring) < 3:
                     continue
                 title = _polygon_title_from_item(item, len(out))
-                out.append({"title": title, "points": ring})
+                out.append({"title": title, "points": ring, "inverted": bool(item.get("inverted", False))})
             return out
         ring = _ring_from_dict_list(raw)
         return [{"title": "Área 1", "points": ring}] if len(ring) >= 3 else []
@@ -83,7 +83,11 @@ def dump_polygons_json(polygons: list[dict[str, Any]]) -> str:
             continue
         title = _polygon_title_from_item(e, len(items))
         items.append(
-            {"title": title, "points": [{"x": int(a), "y": int(b)} for a, b in pts]}
+            {
+                "title": title,
+                "points": [{"x": int(a), "y": int(b)} for a, b in pts],
+                "inverted": bool(e.get("inverted", False)),
+            }
         )
     return json.dumps(items, ensure_ascii=False)
 

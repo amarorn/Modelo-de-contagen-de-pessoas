@@ -242,7 +242,7 @@ function ElevatedCard({
         {stat.occupancy_now > 0 && (
           <span
             style={{
-              marginLeft: "auto",
+              marginLeft: stat.inverted ? 4 : "auto",
               width: 5, height: 5,
               borderRadius: "50%",
               background: c.accent,
@@ -251,6 +251,37 @@ function ElevatedCard({
               flexShrink: 0,
             }}
           />
+        )}
+        {/* Inverted indicator badge */}
+        {stat.inverted && (
+          <span
+            title="Direção invertida: saída da zona conta como entrada"
+            style={{
+              marginLeft: "auto",
+              display: "flex",
+              alignItems: "center",
+              gap: 3,
+              padding: "1px 5px",
+              borderRadius: 3,
+              background: "rgba(0,180,216,0.12)",
+              border: "1px solid rgba(0,180,216,0.3)",
+              flexShrink: 0,
+            }}
+          >
+            <svg width={8} height={8} viewBox="0 0 24 24" fill="none" stroke="var(--cyan)" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="7 16 12 21 17 16"/>
+              <polyline points="7 8 12 3 17 8"/>
+              <line x1="12" y1="21" x2="12" y2="3"/>
+            </svg>
+            <span style={{
+              fontFamily: "var(--font-display)",
+              fontSize: 7,
+              fontWeight: 700,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              color: "var(--cyan)",
+            }}>inv</span>
+          </span>
         )}
       </div>
 
@@ -280,9 +311,9 @@ function ElevatedCard({
               <polyline points="5 12 12 5 19 12" />
             </svg>
           }
-          label="Entradas"
+          label={stat.inverted ? "Entradas ↕" : "Entradas"}
           value={stat.entries}
-          color="var(--green)"
+          color={stat.inverted ? "var(--cyan)" : "var(--green)"}
         />
         <MetricCell
           icon={
@@ -291,7 +322,7 @@ function ElevatedCard({
               <polyline points="19 12 12 19 5 12" />
             </svg>
           }
-          label="Saídas"
+          label={stat.inverted ? "Saídas ↕" : "Saídas"}
           value={stat.exits}
           color="var(--red)"
         />

@@ -11,7 +11,7 @@ import {
 import type { ApiConfig, CountPolygonSpec } from "../types/api";
 import {
   IconRuler, IconPolygon, IconX, IconCheck,
-  IconRotateCcw, IconTrash, IconAlertTriangle, IconPencil,
+  IconRotateCcw, IconTrash, IconAlertTriangle, IconPencil, IconArrowsUpDown,
 } from "./Icons";
 import { SuggestLineButton, SuggestZonesButton } from "./SuggestButton";
 
@@ -24,7 +24,7 @@ interface Props {
 
 type DrawMode = "line" | "polygon";
 type Point = { x: number; y: number };
-type PolygonRing = { title: string; points: Point[] };
+type PolygonRing = { title: string; points: Point[]; inverted?: boolean };
 
 function polygonRingsFromConfig(config: ApiConfig): PolygonRing[] {
   const polys = config.polygons;
@@ -40,6 +40,7 @@ function polygonRingsFromConfig(config: ApiConfig): PolygonRing[] {
         title:
           (typeof spec.title === "string" && spec.title.trim()) || `Área ${i + 1}`,
         points: spec.points.map((p) => ({ x: p.x, y: p.y })),
+        inverted: spec.inverted ?? false,
       }));
     }
     return (polys as unknown as { x: number; y: number }[][]).map((ring, i) => ({
@@ -822,6 +823,7 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
         const specs: CountPolygonSpec[] = polyRings.map((r, i) => ({
           title: (r.title.trim() || `Área ${i + 1}`).slice(0, 64),
           points: r.points.map((p) => ({ ...p })),
+          inverted: r.inverted ?? false,
         }));
         if (polyDraft.length >= 3) {
           specs.push({
@@ -1420,6 +1422,46 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
                             >
                               <IconPencil size={10} />
                             </button>
+                            {/* Invert direction toggle */}
+                            <button
+                              type="button"
+                              title={pr.inverted ? "Direção invertida — clique para restaurar" : "Inverter sentido de entrada/saída"}
+                              onClick={() =>
+                                setPolyRings((prev) =>
+                                  prev.map((p, i) =>
+                                    i === ri ? { ...p, inverted: !p.inverted } : p,
+                                  ),
+                                )
+                              }
+                              style={{
+                                background: pr.inverted ? "rgba(0,180,216,0.15)" : "none",
+                                border: `1px solid ${pr.inverted ? "var(--cyan)" : "var(--border)"}`,
+                                color: pr.inverted ? "var(--cyan)" : "var(--text-muted)",
+                                cursor: "pointer",
+                                padding: 3,
+                                borderRadius: 3,
+                                display: "flex",
+                                alignItems: "center",
+                                transition: "color 0.15s, border-color 0.15s, background 0.15s",
+                                position: "relative",
+                              }}
+                              onMouseEnter={(e) => {
+                                if (!pr.inverted) {
+                                  const b = e.currentTarget as HTMLButtonElement;
+                                  b.style.color = "var(--cyan)";
+                                  b.style.borderColor = "var(--cyan)";
+                                }
+                              }}
+                              onMouseLeave={(e) => {
+                                if (!pr.inverted) {
+                                  const b = e.currentTarget as HTMLButtonElement;
+                                  b.style.color = "var(--text-muted)";
+                                  b.style.borderColor = "var(--border)";
+                                }
+                              }}
+                            >
+                              <IconArrowsUpDown size={10} />
+                            </button>
                             <button
                               type="button"
                               onClick={() => deleteRing(ri)}
@@ -1481,6 +1523,31 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
                         }}>
                           {pr.points.length} vértice{pr.points.length !== 1 ? "s" : ""}
                         </span>
+                        {/* Invert direction indicator */}
+                        {pr.inverted && (
+                          <div style={{
+                            marginTop: 2,
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 4,
+                            padding: "3px 6px",
+                            borderRadius: 3,
+                            background: "rgba(0,180,216,0.10)",
+                            border: "1px solid rgba(0,180,216,0.25)",
+                          }}>
+                            <IconArrowsUpDown size={9} color="var(--cyan)" />
+                            <span style={{
+                              fontFamily: "var(--font-display)",
+                              fontSize: 7.5,
+                              fontWeight: 700,
+                              letterSpacing: "0.12em",
+                              textTransform: "uppercase",
+                              color: "var(--cyan)",
+                            }}>
+                              Direção invertida — saída conta como entrada
+                            </span>
+                          </div>
+                        )}
                       </div>
                     ))}
                     {polyDraft.length === 0 ? (

@@ -1143,7 +1143,7 @@ def copy_polygon_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if len(pts) < 3:
             continue
         t = str(e.get("title") or "").strip() or f"Área {len(out) + 1}"
-        out.append({"title": t[:64], "points": pts})
+        out.append({"title": t[:64], "points": pts, "inverted": bool(e.get("inverted", False))})
     return out
 
 
@@ -1158,7 +1158,11 @@ def clamp_named_polygons(
         if len(pts) < 3:
             continue
         t = str(e.get("title") or "").strip() or f"Área {len(out) + 1}"
-        out.append({"title": t[:64], "points": clamp_polygon(list(pts), fw, fh)})
+        out.append({
+            "title": t[:64],
+            "points": clamp_polygon(list(pts), fw, fh),
+            "inverted": bool(e.get("inverted", False)),
+        })
     return out
 
 
@@ -1171,7 +1175,7 @@ def polygon_entries_sig(entries: list[dict[str, Any]]) -> str:
         if len(pts) < 3:
             continue
         t = str(e.get("title") or "").strip() or "?"
-        ser.append([t, [[int(a), int(b)] for a, b in pts]])
+        ser.append([t, [[int(a), int(b)] for a, b in pts], bool(e.get("inverted", False))])
     return json.dumps(ser, separators=(",", ":"))
 
 
@@ -2155,7 +2159,12 @@ def inference_loop(
                                 for pi, inside_pi in enumerate(cur_poly):
                                     pp = prev_poly[pi]
                                     if _track_reliable:
-                                        if not pp and inside_pi:
+                                        _inv = bool(named_clamped[pi].get("inverted", False)) if pi < len(named_clamped) else False
+                                        _went_in  = not pp and inside_pi
+                                        _went_out = pp and not inside_pi
+                                        _is_entry = _went_out if _inv else _went_in
+                                        _is_exit  = _went_in  if _inv else _went_out
+                                        if _is_entry:
                                             if pi < len(poly_session_entries):
                                                 poly_session_entries[pi] += 1
                                             ept = zone_entered_per_poly_by_id.setdefault(
@@ -2164,7 +2173,7 @@ def inference_loop(
                                             if len(ept) < len(poly_pts_list):
                                                 ept.extend([None] * (len(poly_pts_list) - len(ept)))
                                             ept[pi] = frame_ts
-                                        elif pp and not inside_pi:
+                                        elif _is_exit:
                                             if pi < len(poly_session_exits):
                                                 poly_session_exits[pi] += 1
                                 prev_inside_per_poly_by_id[track_id] = cur_poly
@@ -2637,6 +2646,7 @@ def inference_loop(
                                 "exits": poly_session_exits[_pi] if _pi < len(poly_session_exits) else 0,
                                 "occupancy_now": _poly_occ[_pi],
                                 "avg_dwell_s": round(_avg_d, 1),
+                                "inverted": bool(_e.get("inverted", False)),
                             })
                         shared.polygon_live_stats = _live_stats
                     else:
@@ -3629,11 +3639,12 @@ def create_app(
                             if isinstance(t, str) and str(t).strip()
                             else f"Área {len(entries_out) + 1}"
                         )
-                        entries_out.append({"title": title, "points": ring})
+                        inverted = bool(raw_item.get("inverted", False))
+                        entries_out.append({"title": title, "points": ring, "inverted": inverted})
                 else:
                     ring = _one_ring(raw_item)
                     if ring is not None:
-                        entries_out.append({"title": f"Área {len(entries_out) + 1}", "points": ring})
+                        entries_out.append({"title": f"Área {len(entries_out) + 1}", "points": ring, "inverted": False})
             if not entries_out:
                 return jsonify(
                     {"error": "Lista polygons: cada poligono precisa de pelo menos 3 vertices (x,y)"}
@@ -3671,7 +3682,11 @@ def create_app(
             ap = str(shared.active_preset_id or "").strip()
         _save_calibration_for_preset(shared, ap)
         polys_json = [
-            {"title": str(e.get("title") or ""), "points": [{"x": a, "y": b} for a, b in e["points"]]}
+            {
+                "title": str(e.get("title") or ""),
+                "points": [{"x": a, "y": b} for a, b in e["points"]],
+                "inverted": bool(e.get("inverted", False)),
+            }
             for e in entries_out
         ]
         poly0 = polys_json[0]["points"] if polys_json else []
