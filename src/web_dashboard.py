@@ -422,6 +422,12 @@ class SharedState:
         # Quando True, o loop de inferencia zera contadores por poligono
         # e limpa o historico "prev_inside_per_poly_by_id" na proxima iteracao.
         self.counters_reset_flag: bool = False
+        # Posicao dos pes (centro-baixo do bbox) das pessoas ativas no ultimo frame,
+        # e rastro agregado dos pes nos ultimos segundos (guia visual no editor de ROI).
+        self.live_feet_px: list[tuple[int, int]] = []
+        self.recent_feet_trail_px: deque[tuple[int, int]] = deque(maxlen=600)
+        self.frame_w: int = 0
+        self.frame_h: int = 0
         # Multi-classe YOLO (ex. pessoa + veículo): controlado na UI sem reiniciar processo
         self.yolo_count_class_ids: list[int] = []
         self.yolo_person_class_id: int = 0
@@ -2251,6 +2257,14 @@ def inference_loop(
                             int(round((rx1 + rx2) / 2.0)),
                             int(round(float(ry2))),
                         )
+                # Publica pes atuais + rastro para o editor de ROI (guia visual do chao).
+                _feet_now = list(raw_foot_by_id.values())
+                with shared.lock:
+                    shared.live_feet_px = _feet_now
+                    shared.frame_w = int(fw)
+                    shared.frame_h = int(fh)
+                    for _pt in _feet_now:
+                        shared.recent_feet_trail_px.append(_pt)
                 flow_grid.decay()
                 for tid in list(last_side_by_id.keys()):
                     if tid not in active_ids:
@@ -3549,6 +3563,23 @@ def create_app(
             ap = str(shared.active_preset_id or "").strip()
         _save_calibration_for_preset(shared, ap)
         return jsonify({"ok": True, "line": {"x1": x1, "y1": y1, "x2": x2, "y2": y2}})
+
+    @app.get("/api/live/feet")
+    def get_live_feet() -> Response:
+        """Retorna a posicao dos pes (centro-baixo do bbox) das pessoas ativas
+        e um rastro recente dos pes, em coords de frame (px). Usado pelo editor
+        de ROI como guia visual para desenhar poligonos no chao."""
+        with shared.lock:
+            feet = list(shared.live_feet_px)
+            trail = list(shared.recent_feet_trail_px)
+            fw = int(shared.frame_w)
+            fh = int(shared.frame_h)
+        return jsonify({
+            "feet": [{"x": int(x), "y": int(y)} for x, y in feet],
+            "trail": [{"x": int(x), "y": int(y)} for x, y in trail],
+            "frame_w": fw,
+            "frame_h": fh,
+        })
 
     @app.post("/api/counters/reset")
     def reset_counters_only() -> Response:

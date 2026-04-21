@@ -92,6 +92,11 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
   const [saving, setSaving]         = useState(false);
   const [msg, setMsg]               = useState<{ text: string; ok: boolean } | null>(null);
   const [coords, setCoords]         = useState<Point | null>(null);
+  // Guia de chao: rastro dos pes das pessoas detectadas (ajuda a desenhar
+  // poligonos exatamente onde as pessoas pisam).
+  const [showFeetGuide, setShowFeetGuide] = useState(false);
+  const [feetNow, setFeetNow]       = useState<Point[]>([]);
+  const [feetTrail, setFeetTrail]   = useState<Point[]>([]);
 
   const snapSrc = `${apiBase}/video_feed`;
 
@@ -112,6 +117,34 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
     setPolyRings(polygonRingsFromConfig(config));
     setPolyDraft([]);
   }, [config]);
+
+  useEffect(() => {
+    if (!showFeetGuide) {
+      setFeetNow([]);
+      setFeetTrail([]);
+      return;
+    }
+    let cancelled = false;
+    const fetchFeet = async () => {
+      try {
+        const r = await fetch(`${apiBase}/api/live/feet`, { cache: "no-store" });
+        if (!r.ok) return;
+        const js = (await r.json()) as {
+          feet: Point[];
+          trail: Point[];
+        };
+        if (cancelled) return;
+        setFeetNow(Array.isArray(js.feet) ? js.feet : []);
+        setFeetTrail(Array.isArray(js.trail) ? js.trail : []);
+      } catch { /* silencioso */ }
+    };
+    fetchFeet();
+    const id = window.setInterval(fetchFeet, 500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [showFeetGuide, apiBase]);
 
   /* ── Coordinate conversion ──────────────────────────── */
   // Retângulo real da imagem dentro do canvas, considerando object-fit: contain
@@ -182,6 +215,35 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
     const cursor  = cursorRef.current;
     const drag    = dragRef.current;
     const hovered = hoveredPtRef.current;
+
+    // Guia de chao: rastro e pes atuais (desenhado por baixo das formas).
+    if (showFeetGuide && (feetTrail.length > 0 || feetNow.length > 0)) {
+      ctx.save();
+      for (const p of feetTrail) {
+        const c = toCanvasCoords(p.x, p.y);
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, 2, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(16,185,129,0.28)";
+        ctx.fill();
+      }
+      for (const p of feetNow) {
+        const c = toCanvasCoords(p.x, p.y);
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, 6, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(0,0,0,0.55)";
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = GREEN;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, 9, 0, Math.PI * 2);
+        ctx.strokeStyle = "rgba(16,185,129,0.55)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
 
     // Pontos efectivos (incluindo override de drag)
     const effLine = drag?.active && drag.mode === "line"
@@ -466,7 +528,7 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
       }
       ctx.restore();
     }
-  }, [mode, linePoints, polyRings, polyDraft, toCanvasCoords]);
+  }, [mode, linePoints, polyRings, polyDraft, toCanvasCoords, showFeetGuide, feetNow, feetTrail]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -1012,6 +1074,30 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
                   </button>
                 ))}
                 <div style={{ flex: 1 }} />
+                <button
+                  type="button"
+                  onClick={() => setShowFeetGuide((v) => !v)}
+                  title="Mostra onde os pes das pessoas pisam (guia para desenhar poligonos no chao)"
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 5,
+                    padding: "5px 11px",
+                    borderRadius: 6,
+                    border: "1px solid",
+                    borderColor: showFeetGuide ? "#10B981" : "var(--border)",
+                    background: showFeetGuide ? "rgba(16,185,129,0.18)" : "transparent",
+                    color: showFeetGuide ? "#10B981" : "var(--text-muted)",
+                    fontFamily: "var(--font-display)",
+                    fontSize: 9,
+                    fontWeight: 700,
+                    letterSpacing: "0.06em",
+                    textTransform: "uppercase",
+                    cursor: "pointer",
+                  }}
+                >
+                  {showFeetGuide ? "Pés: on" : "Mostrar pés"}
+                </button>
                 {mode === "line" && (
                   <SuggestLineButton
                     apiBase={apiBase}
