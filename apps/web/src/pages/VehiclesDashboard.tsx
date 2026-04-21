@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStats } from "../hooks/useStats";
+import { useVehicleZones } from "../hooks/useVehicleZones";
 import { LiveFeed } from "../components/LiveFeed";
 import { SourceEditor } from "../components/SourceEditor";
 import { TrackingModeToggle } from "../components/TrackingModeToggle";
@@ -232,6 +233,48 @@ function SliderRow({ label, value, min, max, step, onChange }: {
   );
 }
 
+/* ── Zone type colors ──────────────────────────────────────── */
+const ZONE_TYPE_COLOR: Record<string, string> = {
+  approach:  "var(--cyan)",
+  display:   "var(--amber)",
+  aisle:     "#2EB87A",
+  counter:   "#F97316",
+  queue:     "#9B59B6",
+  exit_area: "var(--red)",
+  generic:   "var(--text-muted)",
+};
+
+/* ── Vehicle Zone Card ─────────────────────────────────────── */
+function VehicleZoneCard({ zone }: { zone: { id: number; name: string; zone_type: string; occupancy_now: number; session_visits: number } }) {
+  const color = ZONE_TYPE_COLOR[zone.zone_type] ?? "var(--text-muted)";
+  return (
+    <div style={{
+      background: "var(--bg-elevated)",
+      border: "1px solid var(--border)",
+      borderLeft: `2px solid ${color}`,
+      borderRadius: "var(--radius-md)",
+      padding: "10px 14px",
+      display: "flex",
+      flexDirection: "column",
+      gap: 6,
+      minWidth: 0,
+    }}>
+      <div style={{ fontSize: 9, fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase", color, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {zone.name}
+      </div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+        <span style={{ fontSize: 28, fontFamily: "var(--font-mono)", fontWeight: 700, color, lineHeight: 1 }}>
+          {zone.occupancy_now}
+        </span>
+        <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>agora</span>
+      </div>
+      <div style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>
+        {zone.session_visits.toLocaleString("pt-BR")} visitas na sessão
+      </div>
+    </div>
+  );
+}
+
 /* ── Main component ────────────────────────────────────────── */
 export function VehiclesDashboard({ apiBase }: Props) {
   const { stats, status } = useStats();
@@ -239,6 +282,19 @@ export function VehiclesDashboard({ apiBase }: Props) {
   const [history, setHistory] = useState<DataPoint[]>([]);
   const [sourceOpen, setSourceOpen] = useState(false);
   const { cfg, setCfg, saving, saved, save } = useAlertConfig();
+  const vehicleZones = useVehicleZones(apiBase, true);
+
+  const [sessionAlertCount, setSessionAlertCount] = useState<number>(() => {
+    try { return ((JSON.parse(localStorage.getItem("alerts.counts") ?? "{}") as { car?: number }).car ?? 0); } catch { return 0; }
+  });
+  useEffect(() => {
+    const sync = () => {
+      try { setSessionAlertCount(((JSON.parse(localStorage.getItem("alerts.counts") ?? "{}") as { car?: number }).car ?? 0)); } catch { /* ignore */ }
+    };
+    const id = setInterval(sync, 2000);
+    window.addEventListener("storage", sync);
+    return () => { clearInterval(id); window.removeEventListener("storage", sync); };
+  }, []);
 
   useEffect(() => {
     const pt: DataPoint = { ts: Date.now(), total: stats.vehicle_total ?? 0, entries: stats.vehicle_entries ?? 0, exits: stats.vehicle_exits ?? 0 };
@@ -390,6 +446,7 @@ export function VehiclesDashboard({ apiBase }: Props) {
               <KpiBox label="Entradas" value={stats.vehicle_entries ?? 0} sub="sentido A" color="#2EB87A" />
               <KpiBox label="Saídas" value={stats.vehicle_exits ?? 0} sub="sentido B" color="#E04E4E" />
               <KpiBox label="Taxa / min" value={ratePerMin} sub="últimos 60s" color="#3DAAC8" />
+              <KpiBox label="Alertas" value={sessionAlertCount} sub={cfg.car_colors.length > 0 ? cfg.car_colors.join(" · ") : "nenhuma cor alvo"} color="#F59E0B" />
             </div>
 
             {/* Sparkline chart */}
@@ -416,6 +473,21 @@ export function VehiclesDashboard({ apiBase }: Props) {
                 ))}
               </div>
             </div>
+            {/* Vehicle zones section */}
+            {vehicleZones.length > 0 && (
+              <div className="card">
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                  <p className="section-label" style={{ marginBottom: 0 }}>Zonas — Veículos</p>
+                  <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>
+                    {vehicleZones.reduce((s, z) => s + z.occupancy_now, 0)} presentes · {vehicleZones.reduce((s, z) => s + z.session_visits, 0)} visitas
+                  </span>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 8 }}>
+                  {vehicleZones.map(z => <VehicleZoneCard key={z.id} zone={z} />)}
+                </div>
+              </div>
+            )}
+
           </div>
 
           {/* Right column: configuration ─────────────────────── */}

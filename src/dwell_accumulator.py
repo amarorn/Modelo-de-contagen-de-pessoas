@@ -98,6 +98,22 @@ class ZoneSlotTracker:
         for zid in self._ids:
             self._peak[zid] = max(self._peak[zid], occupancy.get(zid, 0))
 
+    def get_snapshot(self) -> list[dict]:
+        """Live snapshot: occupancy from last frame + session visit count (without clearing)."""
+        occ: dict[int, int] = {z: 0 for z in self._ids}
+        for zones in self._prev_zones.values():
+            for zid in zones:
+                if zid in occ:
+                    occ[zid] += 1
+        return [
+            {
+                "zone_id": zid,
+                "occupancy_now": occ.get(zid, 0),
+                "session_visits": int(self._visits.get(zid, 0)),
+            }
+            for zid in self._ids
+        ]
+
     def forget_track(self, tid: int) -> None:
         self._prev_zones.pop(int(tid), None)
 

@@ -385,6 +385,7 @@ class SharedState:
         self.vehicle_heatmap_live_payload: dict = {
             "grid_w": 32, "grid_h": 18, "max_val": 0.0, "total_events": 0, "cells": [],
         }
+        self.vehicle_zone_live_payload: dict = {"zones": []}
         self.dwell_live_payload: dict = {
             "grid_w": 32, "grid_h": 18, "max_val": 0.0, "total_dwell_s": 0.0, "cells": [],
         }
@@ -1553,6 +1554,8 @@ def inference_loop(
         zone_store_inf = ZoneStore()
         zone_tracker = ZoneSlotTracker([])
         zone_tracker_ids: tuple[int, ...] = ()
+        vehicle_zone_tracker = ZoneSlotTracker([])
+        vehicle_zone_tracker_ids: tuple[int, ...] = ()
         last_ts_by_id: dict[int, float] = {}
         hotspot_scorer = HotspotScorer(
             _hm_site_id, _hm_cam_id, _hm_grid_version, heatmap_store, dwell_store
@@ -2035,6 +2038,17 @@ def inference_loop(
                         ]
                         zone_tracker.step_frame(assigner, positions, dt_by_tid)
 
+                        # Vehicle zone tracking (separate tracker, vehicles only)
+                        if cur_zids != vehicle_zone_tracker_ids:
+                            vehicle_zone_tracker = ZoneSlotTracker(list(cur_zids))
+                            vehicle_zone_tracker_ids = cur_zids
+                        vehicle_positions = [
+                            (int(tid), float((xa + xb) / 2.0), float(yb))
+                            for tid, (xa, ya, xb, yb) in zip(ids_list, xys_raw)
+                            if cls_by_tid.get(tid, _default_det_cls) != person_class_id
+                        ]
+                        vehicle_zone_tracker.step_frame(assigner, vehicle_positions, dt_by_tid)
+
                 draw_items = box_overlay.step(ids_list, xys_raw)
                 active_ids = {t for t, _, _ in draw_items}
                 raw_foot_by_id: dict[int, tuple[int, int]] = {}
@@ -2069,6 +2083,7 @@ def inference_loop(
                         last_ts_by_id.pop(tid, None)
                         last_yolo_cls_by_tid.pop(tid, None)
                         zone_tracker.forget_track(tid)
+                        vehicle_zone_tracker.forget_track(tid)
                         track_conf_tracker.evict(tid)
                         _lp = _last_norm_pos_by_id.pop(tid, None)
                         if _lp is not None:
@@ -2399,6 +2414,7 @@ def inference_loop(
                         _grid_live_counter = 0
                         shared.heatmap_live_payload = grid_live.to_payload()
                         shared.vehicle_heatmap_live_payload = vehicle_grid_live.to_payload()
+                        shared.vehicle_zone_live_payload = {"zones": vehicle_zone_tracker.get_snapshot()}
                         _hm_cam_id = shared.active_preset_id or "default"
                         _hm_sess_id = shared.session_id
                     if _hotspot_payload_counter >= 30:
@@ -2452,6 +2468,7 @@ def inference_loop(
                             p95_dwell_s=float(row["p95_dwell_s"]),
                             peak_occupancy=int(row["peak_occupancy"]),
                         )
+                    vehicle_zone_tracker.flush_stats()  # reset session slot; no DB persistence yet
                 if count_mode == "polygon" and len(poly_pts) >= 3:
                     if show_roi_ui:
                         arr = np.array(poly_pts, dtype=np.int32).reshape(-1, 1, 2)
@@ -3867,6 +3884,29 @@ def create_app(
         with shared.lock:
             shared.zones_reload_flag = True
         return jsonify({"ok": True})
+
+    @app.get("/api/zones/vehicles/live")
+    def zones_vehicles_live() -> Response:
+        with shared.lock:
+            payload = dict(shared.vehicle_zone_live_payload)
+            cam_id = shared.active_preset_id or "default"
+        try:
+            zrecs = zone_store_api.load_zone_records(cam_cal.site_id(), cam_id)
+            name_map = {z.id: {"name": z.name, "zone_type": z.zone_type} for z in zrecs}
+        except Exception:
+            name_map = {}
+        zones_out = []
+        for z in payload.get("zones", []):
+            zid = int(z.get("zone_id", 0))
+            info = name_map.get(zid, {})
+            zones_out.append({
+                "id": zid,
+                "name": info.get("name", f"Zona {zid}"),
+                "zone_type": info.get("zone_type", "generic"),
+                "occupancy_now": int(z.get("occupancy_now", 0)),
+                "session_visits": int(z.get("session_visits", 0)),
+            })
+        return jsonify({"zones": zones_out})
 
     @app.get("/api/zones/<int:zone_id>/stats")
     def zones_stats(zone_id: int) -> Response:
