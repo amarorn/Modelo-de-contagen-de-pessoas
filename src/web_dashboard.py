@@ -360,6 +360,7 @@ class SharedState:
         # Media do rastro dos pes (px/frame) só para quem nao esta "parado"; px/s = * infer_fps_ema
         self.avg_move_speed_px_per_frame: float = 0.0
         self.avg_move_speed_px_per_sec: float = 0.0
+        self.vehicle_avg_speed_px_per_sec: float = 0.0
         self.infer_fps_ema: float = 0.0
         # fonte de vídeo trocável em tempo real
         self.source_live: str = ""
@@ -2346,6 +2347,22 @@ def inference_loop(
                     float(sum(move_speed_samples) / len(move_speed_samples)) if move_speed_samples else 0.0
                 )
                 avg_move_px_sec = avg_move_px_frame * ema_infer_fps if ema_infer_fps > 0 else 0.0
+
+                # Velocidade média dos veículos (apenas tracks com cls != person)
+                _veh_speed_samples: list[float] = []
+                for _vtid in current_present_ids:
+                    if last_yolo_cls_by_tid.get(_vtid, person_class_id) == person_class_id:
+                        continue
+                    _vdq = foot_trail_by_id.get(_vtid)
+                    _vspd = estimate_trail_speed(list(_vdq), max_points=trail_eval_max) if _vdq is not None else None
+                    if _vspd is not None and _vspd > shared.thr_stationary_max_speed:
+                        _veh_speed_samples.append(_vspd)
+                vehicle_avg_speed_px_sec = (
+                    float(sum(_veh_speed_samples) / len(_veh_speed_samples)) * ema_infer_fps
+                    if _veh_speed_samples and ema_infer_fps > 0
+                    else 0.0
+                )
+
                 _established = sum(1 for d in dwell_values if d > 1.0)
                 _track_stability = _established / max(1, len(dwell_values)) if dwell_values else 1.0
                 avg_bbox_h = float(sum(_bbox_h_samples) / len(_bbox_h_samples)) if _bbox_h_samples else 0.0
@@ -2374,6 +2391,7 @@ def inference_loop(
                     shared.max_dwell_sec = max_dwell_sec
                     shared.avg_move_speed_px_per_frame = avg_move_px_frame
                     shared.avg_move_speed_px_per_sec = avg_move_px_sec
+                    shared.vehicle_avg_speed_px_per_sec = vehicle_avg_speed_px_sec
                     shared.infer_fps_ema = ema_infer_fps
                     shared.cam_confidence = cam_conf
                     shared.cam_confidence_reasons = cam_conf_reasons
@@ -2711,6 +2729,7 @@ def build_stats_payload(shared: SharedState) -> dict:
             "vehicle_entries": shared.counter.vehicle_entries,
             "vehicle_exits": shared.counter.vehicle_exits,
             "vehicle_total": shared.counter.vehicle_total,
+            "vehicle_avg_speed_px_per_sec": shared.vehicle_avg_speed_px_per_sec,
             "occupancy_now": shared.occupancy_now,
             "moving_now": shared.moving_now,
             "stationary_now": shared.stationary_now,

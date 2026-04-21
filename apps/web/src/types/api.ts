@@ -5,6 +5,8 @@ export interface Stats {
   vehicle_entries: number;
   vehicle_exits: number;
   vehicle_total: number;
+  /** Velocidade media dos veiculos em movimento (px/s no plano da imagem); 0 quando sem tracks de veiculo */
+  vehicle_avg_speed_px_per_sec?: number;
   occupancy_now: number;
   moving_now: number;
   stationary_now: number;

@@ -400,10 +400,25 @@ export function VehiclesDashboard({ apiBase }: Props) {
           </div>
         )}
 
+        {/* ── KPI row — full width, sempre visível ─────────────── */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 10 }}>
+          <KpiBox label="Total" value={stats.vehicle_total ?? 0} sub="passagens na sessão" color="#F97316" />
+          <KpiBox label="Entradas" value={stats.vehicle_entries ?? 0} sub="sentido A" color="#2EB87A" />
+          <KpiBox label="Saídas" value={stats.vehicle_exits ?? 0} sub="sentido B" color="#E04E4E" />
+          <KpiBox label="Taxa / min" value={ratePerMin} sub="últimos 60s" color="#3DAAC8" />
+          <KpiBox
+            label="Vel. Média"
+            value={Math.round(stats.vehicle_avg_speed_px_per_sec ?? 0)}
+            sub="px/s · veículos em mov."
+            color="#A855F7"
+          />
+          <KpiBox label="Alertas" value={sessionAlertCount} sub={cfg.car_colors.length > 0 ? cfg.car_colors.join(" · ") : "nenhuma cor alvo"} color="#F59E0B" />
+        </div>
+
         {/* ── Main layout: Camera (left) + Config (right) ───────── */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 340px", gap: 16, alignItems: "start" }}>
 
-          {/* Left column: camera + KPIs + chart */}
+          {/* Left column: camera + chart */}
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
 
             {/* Camera */}
@@ -438,15 +453,6 @@ export function VehiclesDashboard({ apiBase }: Props) {
                   {stats.infer_fps_ema > 0 ? `${stats.infer_fps_ema.toFixed(1)} fps inferência` : "aguardando…"}
                 </div>
               </div>
-            </div>
-
-            {/* KPI row */}
-            <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-              <KpiBox label="Total" value={stats.vehicle_total ?? 0} sub="passagens na sessão" color="#F97316" />
-              <KpiBox label="Entradas" value={stats.vehicle_entries ?? 0} sub="sentido A" color="#2EB87A" />
-              <KpiBox label="Saídas" value={stats.vehicle_exits ?? 0} sub="sentido B" color="#E04E4E" />
-              <KpiBox label="Taxa / min" value={ratePerMin} sub="últimos 60s" color="#3DAAC8" />
-              <KpiBox label="Alertas" value={sessionAlertCount} sub={cfg.car_colors.length > 0 ? cfg.car_colors.join(" · ") : "nenhuma cor alvo"} color="#F59E0B" />
             </div>
 
             {/* Sparkline chart */}
