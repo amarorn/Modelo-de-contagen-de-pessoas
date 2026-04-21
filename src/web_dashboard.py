@@ -1216,6 +1216,49 @@ def foot_inside_polygon(
     return float(v) >= 0.0
 
 
+def _seg_cross(ax: float, ay: float, bx: float, by: float,
+               cx: float, cy: float, dx: float, dy: float) -> bool:
+    """True se segmento AB cruza segmento CD (excluindo extremidades collineares)."""
+    def _cross(ox, oy, px, py, qx, qy) -> float:
+        return (px - ox) * (qy - oy) - (py - oy) * (qx - ox)
+    d1 = _cross(cx, cy, dx, dy, ax, ay)
+    d2 = _cross(cx, cy, dx, dy, bx, by)
+    d3 = _cross(ax, ay, bx, by, cx, cy)
+    d4 = _cross(ax, ay, bx, by, dx, dy)
+    if ((d1 > 0 > d2) or (d1 < 0 < d2)) and ((d3 > 0 > d4) or (d3 < 0 < d4)):
+        return True
+    return False
+
+
+def polygon_crossing_direction(
+    prev_x: float, prev_y: float,
+    curr_x: float, curr_y: float,
+    pts: list[tuple[int, int]],
+) -> int:
+    """
+    Retorna +1 (entrou no polígono), -1 (saiu), 0 (sem cruzamento).
+
+    Conta quantas arestas do polígono o segmento prev→curr cruza.
+    Cruzamento ímpar significa que os pontos estão em lados opostos (cruzou).
+    A direção (entrou/saiu) é determinada pela posição do ponto anterior.
+    """
+    n = len(pts)
+    if n < 3:
+        return 0
+    crossings = 0
+    for i in range(n):
+        ax, ay = pts[i]
+        bx, by = pts[(i + 1) % n]
+        if _seg_cross(prev_x, prev_y, curr_x, curr_y, ax, ay, bx, by):
+            crossings += 1
+    if crossings % 2 == 0:
+        return 0
+    # Número ímpar de cruzamentos: usamos o ponto anterior para determinar
+    # se o movimento foi de fora para dentro (+1) ou de dentro para fora (-1).
+    prev_inside = foot_inside_polygon(prev_x, prev_y, pts)
+    return +1 if not prev_inside else -1
+
+
 def foot_inside_any_of_polygons(
     fx: float, fy: float, polygons: list[list[tuple[int, int]]]
 ) -> bool:
@@ -1735,6 +1778,8 @@ def inference_loop(
         prev_inside_by_id: dict[int, bool] = {}
         prev_inside_per_poly_by_id: dict[int, list[bool | None]] = {}
         zone_entered_per_poly_by_id: dict[int, list[float | None]] = {}
+        # Ultimo ponto do pe por track_id (para deteção de cruzamento por segmento)
+        prev_foot_per_track: dict[int, tuple[float, float]] = {}
         poly_session_entries: list[int] = []
         poly_session_exits: list[int] = []
         # Vetor de direcao medio (EMA) por poligono, em px/frame.
@@ -2000,6 +2045,7 @@ def inference_loop(
                     prev_inside_by_id.clear()
                     prev_inside_per_poly_by_id.clear()
                     zone_entered_per_poly_by_id.clear()
+                    prev_foot_per_track.clear()
                     foot_trail_by_id.clear()
                     zone_entered_at_by_id.clear()
                     stationary_since_by_id.clear()
@@ -2260,20 +2306,30 @@ def inference_loop(
                             # Per-polygon individual tracking (entries/exits per zone)
                             if poly_pts_list:
                                 cur_poly = [foot_inside_polygon(foot_x, foot_y, pts) for pts in poly_pts_list]
+                                prev_foot = prev_foot_per_track.get(track_id)
                                 prev_poly = prev_inside_per_poly_by_id.get(track_id)
                                 is_new_track = prev_poly is None or len(prev_poly) != len(poly_pts_list)
                                 if is_new_track:
-                                    # New track: bootstrap as [False,...] so an immediate
-                                    # inside position correctly fires as an entry.
                                     prev_poly = [False] * len(poly_pts_list)
                                 for pi, inside_pi in enumerate(cur_poly):
-                                    pp = prev_poly[pi]
                                     if _track_reliable:
                                         _inv = bool(named_clamped[pi].get("inverted", False)) if pi < len(named_clamped) else False
-                                        _went_in  = not pp and inside_pi
-                                        _went_out = pp and not inside_pi
-                                        _is_entry = _went_out if _inv else _went_in
-                                        _is_exit  = _went_in  if _inv else _went_out
+                                        if prev_foot is not None:
+                                            # Detecção precisa: segmento prev→curr cruza a fronteira?
+                                            _cross = polygon_crossing_direction(
+                                                prev_foot[0], prev_foot[1],
+                                                foot_x, foot_y,
+                                                poly_pts_list[pi],
+                                            )
+                                            _is_entry = (_cross == -1) if _inv else (_cross == +1)
+                                            _is_exit  = (_cross == +1) if _inv else (_cross == -1)
+                                        else:
+                                            # Primeiro frame do track: fallback à comparação de estado
+                                            pp = prev_poly[pi]
+                                            _went_in  = not pp and inside_pi
+                                            _went_out = pp and not inside_pi
+                                            _is_entry = _went_out if _inv else _went_in
+                                            _is_exit  = _went_in  if _inv else _went_out
                                         if _is_entry:
                                             if pi < len(poly_session_entries):
                                                 poly_session_entries[pi] += 1
@@ -2312,6 +2368,7 @@ def inference_loop(
                                 prev_foot_px_by_id[track_id] = (
                                     int(round(foot_x)), int(round(foot_y))
                                 )
+                                prev_foot_per_track[track_id] = (foot_x, foot_y)
                         elif count_mode == "line":
                             side = side_of_line(foot_x, foot_y, x1, y1, x2, y2)
                             with shared.lock:
@@ -2423,6 +2480,7 @@ def inference_loop(
                     if tid not in active_ids:
                         del prev_inside_per_poly_by_id[tid]
                         zone_entered_per_poly_by_id.pop(tid, None)
+                        prev_foot_per_track.pop(tid, None)
                 for tid in list(prev_foot_px_by_id.keys()):
                     if tid not in active_ids:
                         del prev_foot_px_by_id[tid]
