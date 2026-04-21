@@ -5,7 +5,7 @@ import {
   IconArrowUp, IconArrowDown, IconUsers, IconArrowsUpDown,
   IconTarget, IconVideo, IconCar, IconQueue, IconPerson,
 } from "./components/Icons";
-import { Header } from "./components/Header";
+import { Header, type AppView } from "./components/Header";
 import { StatCard } from "./components/StatCard";
 import { LiveFeed } from "./components/LiveFeed";
 import { HourlyFlowChart } from "./components/HourlyFlowChart";
@@ -37,29 +37,29 @@ export default function App() {
   const config = useConfig();
   const [roiOpen, setRoiOpen]       = useState(false);
   const [sourceOpen, setSourceOpen] = useState(false);
-  const [view, setView]             = useState<"live" | "settings" | "zones" | "vehicles">("live");
+  const [view, setView]             = useState<AppView>("pessoas");
 
   return (
     <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
       <Header
         status={status}
         apiBase={API_BASE}
+        view={view}
+        onChangeView={setView}
         confidence={stats.cam_confidence}
         confidenceReasons={stats.cam_confidence_reasons}
         camDriftLevel={stats.cam_drift_level ?? "ok"}
         camDriftScore={stats.cam_drift_score ?? 0}
         camDriftReason={stats.cam_drift_reason ?? ""}
         camDriftBaselineReady={stats.cam_drift_baseline_ready ?? false}
-        onOpenSettings={view === "live" ? () => setView("settings") : undefined}
-        onBackToLive={view === "settings" || view === "zones" || view === "vehicles" ? () => setView("live") : undefined}
       />
 
-      {view === "zones" ? (
-        <ZonesPage apiBase={API_BASE} onBack={() => setView("live")} />
-      ) : view === "settings" ? (
-        <SettingsDashboard apiBase={API_BASE} onBack={() => setView("live")} />
-      ) : view === "vehicles" ? (
-        <VehiclesDashboard apiBase={API_BASE} onBack={() => setView("live")} />
+      {view === "zonas" ? (
+        <ZonesPage apiBase={API_BASE} onBack={() => setView("pessoas")} />
+      ) : view === "configuracoes" ? (
+        <SettingsDashboard apiBase={API_BASE} onBack={() => setView("pessoas")} />
+      ) : view === "veiculos" ? (
+        <VehiclesDashboard apiBase={API_BASE} />
       ) : (
         <main
           style={{
@@ -112,7 +112,7 @@ export default function App() {
                   <ActionButton
                     icon={<IconTarget size={13} />}
                     label="Zonas e hotspots"
-                    onClick={() => setView("zones")}
+                    onClick={() => setView("zonas")}
                   />
                 </div>
                 <div style={{ flex: "1 1 240px", minWidth: 0 }}>
@@ -205,8 +205,8 @@ export default function App() {
               <div
                 role="button"
                 tabIndex={0}
-                onClick={() => setView("vehicles")}
-                onKeyDown={e => e.key === "Enter" && setView("vehicles")}
+                onClick={() => setView("veiculos")}
+                onKeyDown={e => e.key === "Enter" && setView("veiculos")}
                 style={{ cursor: "pointer" }}
                 title="Abrir dashboard de veículos"
               >
@@ -379,10 +379,10 @@ export default function App() {
       )}
 
       {/* ── Modals ──────────────────────────────────────────────── */}
-      {view === "live" && sourceOpen && (
+      {view === "pessoas" && sourceOpen && (
         <SourceEditor apiBase={API_BASE} onClose={() => setSourceOpen(false)} />
       )}
-      {view === "live" && roiOpen && (
+      {view === "pessoas" && roiOpen && (
         <RoiEditor
           apiBase={API_BASE}
           config={config}

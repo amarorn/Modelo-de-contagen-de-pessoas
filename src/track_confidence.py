@@ -43,6 +43,8 @@ def _env_int(key: str, default: int) -> int:
 
 # Tracks below this score are considered unreliable for counting.
 SUPPRESS_THRESHOLD: float = _env_float("TRACK_CONF_SUPPRESS_THRESHOLD", 0.35)
+# Veiculos: bbox grande oscila mais (perspectiva); score separado e limiar mais baixo.
+VEHICLE_SUPPRESS_THRESHOLD: float = _env_float("TRACK_CONF_VEHICLE_SUPPRESS_THRESHOLD", 0.30)
 
 # Tracks need at least this many frames before being trusted.
 MIN_AGE_FRAMES: int = max(1, _env_int("TRACK_CONF_MIN_AGE_FRAMES", 3))
@@ -61,6 +63,7 @@ class _TrackRecord:
     size_var_ema: float = 0.0   # EMA of squared deviation
     last_ts: float = 0.0
     score: float = 0.0
+    is_vehicle: bool = False
 
 
 class TrackConfidenceTracker:
@@ -75,12 +78,18 @@ class TrackConfidenceTracker:
         det_conf: float,
         bbox: tuple[float, float, float, float],
         ts: float,
+        *,
+        is_vehicle: bool = False,
     ) -> float:
-        """Update record for *track_id* and return the current confidence score."""
+        """Update record for *track_id* and return the current confidence score.
+
+        *is_vehicle*: se True, nao penaliza por instabilidade de area da bbox (comum em carros).
+        """
         rec = self._records.get(track_id)
         if rec is None:
             rec = _TrackRecord()
             self._records[track_id] = rec
+        rec.is_vehicle = is_vehicle
 
         x_min, y_min, x_max, y_max = bbox
         bbox_area = (x_max - x_min) * (y_max - y_min)
@@ -114,12 +123,15 @@ class TrackConfidenceTracker:
         # Age bonus: full credit after MIN_AGE_FRAMES frames.
         age_factor = min(1.0, rec.frames / MIN_AGE_FRAMES)
 
-        # Composite score: weighted combination.
-        rec.score = (
-            0.50 * rec.conf_ema
-            + 0.30 * stability
-            + 0.20 * age_factor
-        )
+        if is_vehicle:
+            # Carros: area do bbox varia muito frame a frame; conf YOLO + idade bastam.
+            rec.score = 0.62 * rec.conf_ema + 0.38 * age_factor
+        else:
+            rec.score = (
+                0.50 * rec.conf_ema
+                + 0.30 * stability
+                + 0.20 * age_factor
+            )
         return rec.score
 
     def is_reliable(self, track_id: int) -> bool:
@@ -129,7 +141,8 @@ class TrackConfidenceTracker:
             return False
         if rec.frames < MIN_AGE_FRAMES:
             return False
-        return rec.score >= SUPPRESS_THRESHOLD
+        thresh = VEHICLE_SUPPRESS_THRESHOLD if rec.is_vehicle else SUPPRESS_THRESHOLD
+        return rec.score >= thresh
 
     def score_of(self, track_id: int) -> float:
         rec = self._records.get(track_id)
@@ -139,7 +152,10 @@ class TrackConfidenceTracker:
         self._records.pop(track_id, None)
 
     def low_confidence_count(self) -> int:
-        return sum(1 for r in self._records.values() if r.score < SUPPRESS_THRESHOLD)
+        def _thresh(r: _TrackRecord) -> float:
+            return VEHICLE_SUPPRESS_THRESHOLD if r.is_vehicle else SUPPRESS_THRESHOLD
+
+        return sum(1 for r in self._records.values() if r.score < _thresh(r))
 
     def scores_snapshot(self) -> dict[int, float]:
         return {tid: r.score for tid, r in self._records.items()}
