@@ -3335,6 +3335,14 @@ def build_stats_payload(shared: SharedState) -> dict:
             ),
             "all_vehicles_mode": shared.all_vehicles_mode,
             "polygon_stats": list(shared.polygon_live_stats),
+            # Migracoes zona-zona: sum(entradas por poligono) - entradas globais.
+            # Conta quantas pessoas migraram de uma zona para outra sem sair
+            # da uniao (esses eventos nao aparecem no contador global).
+            "polygon_migrations": max(
+                0,
+                sum(int(p.get("entries", 0) or 0) for p in shared.polygon_live_stats)
+                - int(shared.counter.entries),
+            ),
         }
 
 

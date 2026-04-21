@@ -83,6 +83,12 @@ export interface Stats {
    */
   all_vehicles_mode?: boolean;
   polygon_stats?: PolygonStat[];
+  /**
+   * Migracoes zona -> zona: total de transicoes entre poligonos distintos
+   * que NAO aparecem no contador global (pessoa permaneceu dentro da uniao
+   * dos poligonos ao mudar de zona).
+   */
+  polygon_migrations?: number;
 }
 
 export interface PolygonStat {

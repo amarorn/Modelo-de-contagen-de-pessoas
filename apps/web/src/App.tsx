@@ -3,6 +3,7 @@ import { useStats } from "./hooks/useStats";
 import { useConfig } from "./hooks/useConfig";
 import {
   IconArrowUp, IconArrowDown, IconUsers, IconArrowsUpDown,
+  IconArrowsLeftRight,
   IconCar, IconQueue, IconPerson, IconRotateCcw,
 } from "./components/Icons";
 import { Header, type AppView } from "./components/Header";
@@ -273,6 +274,18 @@ export default function App() {
                 colorDim="var(--amber-dim)"
                 subtitle={`pico: ${stats.peak_flow} às ${String(stats.peak_hour).padStart(2, "0")}h`}
               />
+              {(stats.polygon_migrations ?? 0) > 0 && (
+                <StatCard
+                  variant="counter"
+                  label="Migrações entre zonas"
+                  value={stats.polygon_migrations ?? 0}
+                  icon={<IconArrowsLeftRight size={14} />}
+                  color="#A78BFA"
+                  colorDim="rgba(167,139,250,0.12)"
+                  subtitle="transições zona → zona (não contam no global)"
+                  tooltip="Número de vezes em que alguém saiu de uma zona e entrou em outra sem deixar a união dos polígonos. Por isso o contador global (passagens pela borda externa) pode ser menor que a soma das entradas das zonas individuais."
+                />
+              )}
               <div
                 role="button"
                 tabIndex={0}

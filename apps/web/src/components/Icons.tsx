@@ -33,6 +33,7 @@ function Svg({
 export const IconArrowUp      = (p: IconProps) => <Svg {...{...defaults,...p}}><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></Svg>;
 export const IconArrowDown    = (p: IconProps) => <Svg {...{...defaults,...p}}><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></Svg>;
 export const IconArrowsUpDown = (p: IconProps) => <Svg {...{...defaults,...p}}><polyline points="7 16 12 21 17 16"/><polyline points="7 8 12 3 17 8"/><line x1="12" y1="21" x2="12" y2="3"/></Svg>;
+export const IconArrowsLeftRight = (p: IconProps) => <Svg {...{...defaults,...p}}><polyline points="8 7 3 12 8 17"/><polyline points="16 7 21 12 16 17"/><line x1="3" y1="12" x2="21" y2="12"/></Svg>;
 export const IconUsers        = (p: IconProps) => <Svg {...{...defaults,...p}}><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></Svg>;
 export const IconActivity     = (p: IconProps) => <Svg {...{...defaults,...p}}><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></Svg>;
 export const IconPerson       = (p: IconProps) => <Svg {...{...defaults,...p}}><circle cx="12" cy="5" r="3"/><path d="M12 22V12m0 0l-4-4m4 4l4-4"/></Svg>;
