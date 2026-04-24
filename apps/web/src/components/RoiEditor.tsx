@@ -1335,15 +1335,49 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
                   }}>
                     Pontos
                   </span>
-                  <span style={{
-                    fontFamily: "var(--font-mono)",
-                    fontSize: 9, fontWeight: 700,
-                    color: hasGeometry ? accent : "var(--text-muted)",
-                    transition: "color 0.2s",
-                  }}>
-                    {mode === "line" ? linePoints.length : polyVertCount}
-                    {mode === "line" ? " / 2" : ""}
-                  </span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    {mode === "polygon" && (polyRings.length > 0 || polyDraft.length > 0) && (
+                      <button
+                        type="button"
+                        onClick={() => { setPolyRings([]); setPolyDraft([]); setMsg(null); }}
+                        title="Limpar todos os polígonos"
+                        style={{
+                          display: "flex", alignItems: "center", gap: 3,
+                          padding: "2px 7px",
+                          background: "none",
+                          border: "1px solid var(--border)",
+                          borderRadius: 4,
+                          color: "var(--text-muted)",
+                          fontFamily: "var(--font-display)",
+                          fontSize: 8, fontWeight: 700,
+                          letterSpacing: "0.10em", textTransform: "uppercase",
+                          cursor: "pointer",
+                          transition: "color 0.15s, border-color 0.15s",
+                        }}
+                        onMouseEnter={(e) => {
+                          const b = e.currentTarget as HTMLButtonElement;
+                          b.style.color = "var(--red)";
+                          b.style.borderColor = "rgba(239,68,68,0.4)";
+                        }}
+                        onMouseLeave={(e) => {
+                          const b = e.currentTarget as HTMLButtonElement;
+                          b.style.color = "var(--text-muted)";
+                          b.style.borderColor = "var(--border)";
+                        }}
+                      >
+                        <IconTrash size={8} /> Limpar todos
+                      </button>
+                    )}
+                    <span style={{
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 9, fontWeight: 700,
+                      color: hasGeometry ? accent : "var(--text-muted)",
+                      transition: "color 0.2s",
+                    }}>
+                      {mode === "line" ? linePoints.length : polyVertCount}
+                      {mode === "line" ? " / 2" : ""}
+                    </span>
+                  </div>
                 </div>
 
                 {/* LINE: slots A & B */}
