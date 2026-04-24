@@ -1,0 +1,41 @@
+# Dataset local cached pelo Ultralytics HUB durante o exp-31-4.
+# nc=25 e obrigatorio: os .txt do dataset tem class_ids ate 24 (raros: 7, 9, 24).
+# Se nc<25, o trainer crasha com "index out of bounds" no IndexKernel CUDA.
+#
+# Uso recomendado para contagem de pessoas:
+#   YOLO_CLASSES=0                          -> so Pessoa (recomendado, treino rapido)
+#   YOLO_CLASSES=0,1,2,3,4,5,6              -> Pessoa + veiculos (ignora class7..24)
+# Sem YOLO_CLASSES treina todas 25 classes (mau: class7..24 estao quase vazias).
+
+path: /home/amaro-neto/datasets/person-5170a94e
+train: images/train
+val: images/val
+test: images/test
+
+nc: 25
+names:
+  0: Pessoa
+  1: Carro
+  2: Moto
+  3: Onibus
+  4: Van
+  5: caminhao
+  6: bicicleta
+  7: class7
+  8: class8
+  9: class9
+  10: class10
+  11: class11
+  12: class12
+  13: class13
+  14: class14
+  15: class15
+  16: class16
+  17: class17
+  18: class18
+  19: class19
+  20: class20
+  21: class21
+  22: class22
+  23: class23
+  24: class24

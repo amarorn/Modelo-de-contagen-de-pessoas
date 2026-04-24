@@ -13,11 +13,16 @@
 # Formato YOLO txt por imagem:
 # <class_id> <x_center> <y_center> <width> <height>
 # valores normalizados entre 0 e 1.
-
-path: data/person_count
+# configs/dataset_person_clean.yaml (a criar)
+path: /home/amaro-neto/datasets/person-5170a94e
 train: images/train
 val: images/val
 test: images/test
-
 names:
-  0: person
+  0: Pessoa
+  1: Carro
+  2: Moto
+  3: Onibus
+  4: Van
+  5: caminhão
+  6: bicicleta

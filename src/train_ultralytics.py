@@ -51,12 +51,25 @@ def ensure_yolo_detect_tree(root: Path) -> None:
         (root / "labels" / split).mkdir(parents=True, exist_ok=True)
 
 
+def _is_hub_dataset_uri(data_arg: str) -> bool:
+    """Identifica URIs de dataset do Ultralytics HUB (ul://..., https://hub.ultralytics.com/...)."""
+    s = str(data_arg).strip().lower()
+    return (
+        s.startswith("ul://")
+        or s.startswith("https://hub.ultralytics.com/")
+        or s.startswith("http://hub.ultralytics.com/")
+        or s.startswith("hub.ultralytics.com/")
+    )
+
+
 def expand_project_dataset_yaml(data_arg: str) -> tuple[str, Path | None]:
     """Ultralytics junta `path` relativo a DATASETS_DIR se a pasta nao existir no cwd.
 
     Em `configs/dataset.yaml`, `path: data/person_count` e relativo a este repositorio.
     Gera um YAML temporario com `path` absoluto para o treino encontrar os dados.
     """
+    if _is_hub_dataset_uri(data_arg):
+        return str(data_arg), None
     data_path = Path(data_arg).resolve()
     try:
         rel_in_repo = data_path.relative_to(REPO_ROOT)
@@ -171,6 +184,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cos-lr", action="store_true", help="Habilita scheduler coseno")
     parser.add_argument("--close-mosaic", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--deterministic", action="store_true")
+    parser.add_argument("--optimizer", default=None, help="auto, SGD, Adam, AdamW, NAdam, RAdam, RMSProp")
+    parser.add_argument("--lr0", type=float, default=None)
+    parser.add_argument("--lrf", type=float, default=None)
+    parser.add_argument("--weight-decay", type=float, default=None)
+    parser.add_argument("--warmup-epochs", type=float, default=None)
+    parser.add_argument("--momentum", type=float, default=None)
+    parser.add_argument("--box", type=float, default=None)
+    parser.add_argument("--cls", type=float, default=None)
+    parser.add_argument("--dfl", type=float, default=None)
+    parser.add_argument("--mosaic", type=float, default=None)
+    parser.add_argument("--mixup", type=float, default=None)
+    parser.add_argument("--cutmix", type=float, default=None)
+    parser.add_argument("--erasing", type=float, default=None)
+    parser.add_argument("--scale", type=float, default=None)
+    parser.add_argument("--translate", type=float, default=None)
+    parser.add_argument("--degrees", type=float, default=None)
+    parser.add_argument("--fliplr", type=float, default=None)
+    parser.add_argument("--flipud", type=float, default=None)
+    parser.add_argument("--hsv-h", type=float, default=None)
+    parser.add_argument("--hsv-s", type=float, default=None)
+    parser.add_argument("--hsv-v", type=float, default=None)
+    parser.add_argument("--copy-paste", type=float, default=None)
+    parser.add_argument("--auto-augment", default=None, help="randaugment, autoaugment, augmix ou None")
+    parser.add_argument("--amp", action="store_true", default=None)
     parser.add_argument(
         "--classes",
         default=None,
@@ -185,6 +223,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_data_arg(data_arg: str) -> str:
+    # URIs do HUB passam direto; o Ultralytics resolve com o API key autenticado.
+    if _is_hub_dataset_uri(data_arg):
+        return str(data_arg)
     data_path = Path(data_arg)
     if data_path.exists():
         return str(data_path)
@@ -204,6 +245,14 @@ def resolve_data_arg(data_arg: str) -> str:
 
 
 def configure_hub() -> bool:
+    # Se YOLO_NO_HUB=1, forcar treino totalmente offline (desliga callbacks do HUB).
+    if os.getenv("YOLO_NO_HUB", "").strip() in {"1", "true", "True", "YES", "yes"}:
+        if "hub" in settings:
+            settings.update({"hub": False})
+        if "sync" in settings:
+            settings.update({"sync": False})
+        print("[train] YOLO_NO_HUB=1 -> HUB/Platform desactivados (treino local puro).")
+        return False
     token = os.getenv("ULTRALYTICS_HUB_API_KEY", "").strip()
     if token:
         try:
@@ -271,6 +320,38 @@ def main() -> None:
     )
     if cls_filter is not None:
         train_kwargs["classes"] = cls_filter
+
+    # Hiperparametros opcionais: so passa ao Ultralytics se o utilizador definiu.
+    _optional = {
+        "deterministic": args.deterministic or None,
+        "optimizer": args.optimizer,
+        "lr0": args.lr0,
+        "lrf": args.lrf,
+        "weight_decay": args.weight_decay,
+        "warmup_epochs": args.warmup_epochs,
+        "momentum": args.momentum,
+        "box": args.box,
+        "cls": args.cls,
+        "dfl": args.dfl,
+        "mosaic": args.mosaic,
+        "mixup": args.mixup,
+        "cutmix": args.cutmix,
+        "erasing": args.erasing,
+        "scale": args.scale,
+        "translate": args.translate,
+        "degrees": args.degrees,
+        "fliplr": args.fliplr,
+        "flipud": args.flipud,
+        "hsv_h": args.hsv_h,
+        "hsv_s": args.hsv_s,
+        "hsv_v": args.hsv_v,
+        "copy_paste": args.copy_paste,
+        "auto_augment": args.auto_augment,
+        "amp": args.amp,
+    }
+    for _k, _v in _optional.items():
+        if _v is not None:
+            train_kwargs[_k] = _v
 
     try:
         try:

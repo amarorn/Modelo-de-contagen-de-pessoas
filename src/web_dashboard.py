@@ -4098,6 +4098,36 @@ def create_app(
         _persist_config_event(shared, "preset_delete", {"preset_id": preset_id})
         return jsonify({"ok": True, "presets": presets})
 
+    @app.put("/api/source/presets/<preset_id>")
+    def put_source_preset(preset_id: str) -> Response:
+        data = request.get_json(silent=True) or {}
+        new_url = str(data.get("url", "")).strip()
+        new_label = str(data.get("label", "") or "").strip()[:128]
+        if not new_url or len(new_url) > 4096:
+            return jsonify({"error": "url invalido"}), 400
+        with shared.lock:
+            found = False
+            for p in shared.source_presets:
+                if str(p.get("id", "")) == preset_id:
+                    p["url"] = new_url
+                    if new_label:
+                        p["label"] = new_label
+                    found = True
+                    # Se o preset editado e o activo, actualiza tambem a fonte viva.
+                    if shared.active_preset_id == preset_id:
+                        shared.source_live = new_url
+                        shared.source_changed = True
+                    break
+            if not found:
+                return jsonify({"error": "Preset nao encontrado"}), 404
+            presets = list(shared.source_presets)
+            apid = shared.active_preset_id
+        _save_source_presets_to_file(presets)
+        _persist_config_event(shared, "preset_update", {"preset_id": preset_id})
+        return jsonify(
+            {"ok": True, "preset_id": preset_id, "active_preset_id": apid, "presets": presets}
+        )
+
     @app.post("/api/source/select")
     def post_source_select() -> Response:
         data = request.get_json(silent=True) or {}

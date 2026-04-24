@@ -88,34 +88,57 @@ def main() -> None:
         print("[extract_cv] Atualize o token na URL ou teste a mesma URL em ./scripts/run_web.sh", file=sys.stderr)
         raise SystemExit(1)
 
-    if args.warmup_reads > 0:
+    # Detectar se a fonte e ficheiro (decode a velocidade maxima) ou stream ao vivo.
+    # Em ficheiro: usar decimacao por contagem de frames ancorada no FPS da fonte.
+    # Em stream: manter a logica de wall-clock (a cadencia real tempo-e-a-mesma do stream).
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    src_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    is_file = frame_count > 0 and src_fps > 0.0
+
+    if args.warmup_reads > 0 and not is_file:
         for _ in range(args.warmup_reads):
             cap.read()
 
-    interval = 1.0 / max(0.05, float(args.fps))
+    target_fps = max(0.05, float(args.fps))
+    step_frames = max(1, int(round(src_fps / target_fps))) if is_file else 0
+    interval = 1.0 / target_fps
     t_start = time.perf_counter()
     last_write = t_start - interval
     n_saved = 0
     idx = 0
+    src_idx = -1
+
+    if is_file:
+        print(
+            f"[extract_cv] ficheiro: {frame_count} frames @ {src_fps:.2f} fps -> guardar 1 a cada {step_frames} frames (alvo {target_fps} fps)",
+            file=sys.stderr,
+        )
 
     try:
         while True:
             ok, frame = cap.read()
             if not ok or frame is None:
-                print("[extract_cv] aviso: read() falhou ou fim do stream", file=sys.stderr)
+                if not is_file:
+                    print("[extract_cv] aviso: read() falhou ou fim do stream", file=sys.stderr)
                 break
-            now = time.perf_counter()
-            if now - last_write < interval:
-                continue
-            last_write = now
+            src_idx += 1
+            if is_file:
+                if src_idx % step_frames != 0:
+                    continue
+            else:
+                now = time.perf_counter()
+                if now - last_write < interval:
+                    continue
+                last_write = now
             idx += 1
             path = out / f"frame_{idx:06d}.jpg"
             cv2.imwrite(str(path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
             n_saved += 1
             if args.max_frames and n_saved >= args.max_frames:
                 break
-            if args.duration > 0 and (now - t_start) >= args.duration:
-                break
+            if not is_file and args.duration > 0:
+                if (time.perf_counter() - t_start) >= args.duration:
+                    break
     finally:
         cap.release()
 

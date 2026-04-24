@@ -66,3 +66,6 @@ export const IconWifi         = (p: IconProps) => <Svg {...{...defaults,...p}}><
 export const IconBalance      = (p: IconProps) => <Svg {...{...defaults,...p}}><line x1="12" y1="3" x2="12" y2="21"/><path d="M3 9l4 3-4 3"/><path d="M21 9l-4 3 4 3"/><line x1="3" y1="12" x2="21" y2="12" strokeDasharray="2 2"/></Svg>;
 export const IconZap          = (p: IconProps) => <Svg {...{...defaults,...p}}><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></Svg>;
 export const IconQueue        = (p: IconProps) => <Svg {...{...defaults,...p}}><circle cx="5" cy="5" r="2"/><circle cx="5" cy="12" r="2"/><circle cx="5" cy="19" r="2"/><line x1="9" y1="5" x2="22" y2="5"/><line x1="9" y1="12" x2="22" y2="12"/><line x1="9" y1="19" x2="22" y2="19"/></Svg>;
+export const IconFile         = (p: IconProps) => <Svg {...{...defaults,...p}}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></Svg>;
+export const IconPlay         = (p: IconProps) => <Svg {...{...defaults,...p}}><polygon points="5 3 19 12 5 21 5 3"/></Svg>;
+export const IconGlobe        = (p: IconProps) => <Svg {...{...defaults,...p}}><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></Svg>;
