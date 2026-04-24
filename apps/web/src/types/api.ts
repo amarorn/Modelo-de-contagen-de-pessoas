@@ -100,6 +100,8 @@ export interface PolygonStat {
   occupancy_now: number;
   avg_dwell_s: number;
   inverted?: boolean;
+  vehicle_entries?: number;
+  vehicle_exits?: number;
 }
 
 export interface AuditEvent {

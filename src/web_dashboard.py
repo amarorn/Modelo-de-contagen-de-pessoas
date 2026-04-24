@@ -1785,6 +1785,8 @@ def inference_loop(
         prev_foot_per_track: dict[int, tuple[float, float]] = {}
         poly_session_entries: list[int] = []
         poly_session_exits: list[int] = []
+        poly_session_vehicle_entries: list[int] = []
+        poly_session_vehicle_exits: list[int] = []
         # Vetor de direcao medio (EMA) por poligono, em px/frame.
         # Usado para desenhar uma seta de fluxo dentro da zona.
         poly_heading_ema: list[tuple[float, float]] = []
@@ -2062,6 +2064,8 @@ def inference_loop(
                 if len(poly_session_entries) != n_poly:
                     poly_session_entries = [0] * n_poly
                     poly_session_exits = [0] * n_poly
+                    poly_session_vehicle_entries = [0] * n_poly
+                    poly_session_vehicle_exits = [0] * n_poly
                 if len(poly_heading_ema) != n_poly:
                     poly_heading_ema = [(0.0, 0.0)] * n_poly
                 with shared.lock:
@@ -2071,6 +2075,8 @@ def inference_loop(
                 if _do_reset:
                     poly_session_entries = [0] * n_poly
                     poly_session_exits = [0] * n_poly
+                    poly_session_vehicle_entries = [0] * n_poly
+                    poly_session_vehicle_exits = [0] * n_poly
                     poly_heading_ema = [(0.0, 0.0)] * n_poly
                     prev_inside_by_id.clear()
                     prev_inside_per_poly_by_id.clear()
@@ -2340,6 +2346,8 @@ def inference_loop(
                                         if _is_entry:
                                             if pi < len(poly_session_entries):
                                                 poly_session_entries[pi] += 1
+                                            if _is_veh and pi < len(poly_session_vehicle_entries):
+                                                poly_session_vehicle_entries[pi] += 1
                                             ept = zone_entered_per_poly_by_id.setdefault(
                                                 track_id, [None] * len(poly_pts_list)
                                             )
@@ -2349,6 +2357,8 @@ def inference_loop(
                                         elif _is_exit:
                                             if pi < len(poly_session_exits):
                                                 poly_session_exits[pi] += 1
+                                            if _is_veh and pi < len(poly_session_vehicle_exits):
+                                                poly_session_vehicle_exits[pi] += 1
                                 # Atualiza EMA de direcao por poligono: vetor de
                                 # deslocamento dos pes (px/frame) entre o frame
                                 # anterior e o atual, so para tracks confiaveis
@@ -2862,6 +2872,8 @@ def inference_loop(
                                 "title": _title,
                                 "entries": poly_session_entries[_pi] if _pi < len(poly_session_entries) else 0,
                                 "exits": poly_session_exits[_pi] if _pi < len(poly_session_exits) else 0,
+                                "vehicle_entries": poly_session_vehicle_entries[_pi] if _pi < len(poly_session_vehicle_entries) else 0,
+                                "vehicle_exits": poly_session_vehicle_exits[_pi] if _pi < len(poly_session_vehicle_exits) else 0,
                                 "occupancy_now": _poly_occ[_pi],
                                 "avg_dwell_s": round(_avg_d, 1),
                                 "inverted": bool(_e.get("inverted", False)),

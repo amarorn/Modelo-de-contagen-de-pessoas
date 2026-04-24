@@ -468,6 +468,102 @@ function VehicleZoneCard({ zone }: { zone: { id: number; name: string; zone_type
   );
 }
 
+/* ── Vehicle Polygon Card ─────────────────────────────────── */
+const POLY_CARD_COLORS = [
+  { accent: "#FF9500", dimBg: "rgba(255,149,0,0.06)", glow: "rgba(255,149,0,0.22)", glowSoft: "rgba(255,149,0,0.10)", shadow: "rgba(255,149,0,0.15)", topLine: "rgba(255,180,60,0.22)" },
+  { accent: "#00B4D8", dimBg: "rgba(0,180,216,0.06)", glow: "rgba(0,180,216,0.22)", glowSoft: "rgba(0,180,216,0.10)", shadow: "rgba(0,180,216,0.15)", topLine: "rgba(60,210,255,0.22)" },
+];
+
+function VehiclePolygonCard({ stat, colorIdx }: { stat: import("../types/api").PolygonStat; colorIdx: number }) {
+  const c = POLY_CARD_COLORS[colorIdx % POLY_CARD_COLORS.length];
+  const [hovered, setHovered] = useState(false);
+  const vEntries = stat.vehicle_entries ?? 0;
+  const vExits = stat.vehicle_exits ?? 0;
+  const vTotal = vEntries + vExits;
+
+  const elevation = hovered
+    ? [`inset 0 1px 0 rgba(255,255,255,0.10)`, `inset 0 -1px 0 rgba(0,0,0,0.5)`, `0 4px 12px rgba(0,0,0,0.6)`, `0 12px 32px rgba(0,0,0,0.45)`, `0 0 24px ${c.shadow}`].join(", ")
+    : [`inset 0 1px 0 rgba(255,255,255,0.06)`, `inset 0 -1px 0 rgba(0,0,0,0.40)`, `0 4px 14px rgba(0,0,0,0.5)`, `0 0 16px ${c.shadow}`].join(", ");
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        position: "relative",
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+        padding: "12px 14px 12px 15px",
+        background: "linear-gradient(160deg, rgba(26,26,40,0.98) 0%, rgba(15,15,24,0.98) 55%, rgba(9,9,15,0.98) 100%)",
+        borderTop: `1px solid ${c.topLine}`,
+        borderRight: "1px solid rgba(255,255,255,0.025)",
+        borderBottom: "1px solid rgba(0,0,0,0.55)",
+        borderLeft: `3px solid ${c.accent}`,
+        borderRadius: "0 7px 7px 0",
+        boxShadow: elevation,
+        transform: hovered ? "translateY(-2px)" : "translateY(-1px)",
+        transition: "transform 0.18s ease, box-shadow 0.18s ease",
+        overflow: "hidden",
+        flex: "1 1 auto",
+      }}
+    >
+      <div style={{ position: "absolute", top: 0, left: 0, width: 80, height: "100%", background: `radial-gradient(ellipse at 0% 50%, ${c.glowSoft} 0%, transparent 75%)`, pointerEvents: "none" }} />
+      <div style={{ position: "absolute", top: 0, left: 0, width: "100%", height: 1, background: `linear-gradient(90deg, ${c.topLine} 0%, rgba(255,255,255,0.04) 40%, transparent 100%)`, pointerEvents: "none" }} />
+
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "center", gap: 7, position: "relative" }}>
+        <svg width={10} height={10} viewBox="0 0 24 24" fill="none" stroke={c.accent} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M19 17H5a2 2 0 0 1-2-2V9l2-4h10l2 4" /><path d="M5 13h14" /><circle cx="7.5" cy="17" r="1.5" /><circle cx="16.5" cy="17" r="1.5" />
+        </svg>
+        <span style={{ fontFamily: "var(--font-display)", fontSize: 9.5, fontWeight: 800, letterSpacing: "0.18em", textTransform: "uppercase", color: c.accent, textShadow: `0 0 8px ${c.accent}44` }}>
+          {stat.title}
+        </span>
+        {vTotal > 0 && (
+          <span style={{ marginLeft: "auto", width: 5, height: 5, borderRadius: "50%", background: c.accent, boxShadow: `0 0 6px ${c.accent}`, animation: "pulse 2.2s infinite", flexShrink: 0 }} />
+        )}
+      </div>
+
+      {/* Separator */}
+      <div style={{ height: 1, background: `linear-gradient(90deg, ${c.glow} 0%, rgba(255,255,255,0.04) 50%, transparent 100%)`, margin: "-2px 0", position: "relative" }} />
+
+      {/* Metrics grid */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px 14px", position: "relative" }}>
+        {/* Entradas */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
+            <svg width={9} height={9} viewBox="0 0 24 24" fill="none" stroke="var(--green)" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.8 }}>
+              <line x1="12" y1="19" x2="12" y2="5" /><polyline points="5 12 12 5 19 12" />
+            </svg>
+            <span style={{ fontFamily: "var(--font-display)", fontSize: 7.5, fontWeight: 700, letterSpacing: "0.18em", textTransform: "uppercase", color: "rgba(255,255,255,0.32)" }}>Entradas</span>
+          </div>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 20, fontWeight: 700, lineHeight: 1, color: "var(--green)", textShadow: "0 0 14px rgba(46,184,122,0.5)" }}>{vEntries.toLocaleString("pt-BR")}</span>
+        </div>
+        {/* Saídas */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
+            <svg width={9} height={9} viewBox="0 0 24 24" fill="none" stroke="var(--red)" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.8 }}>
+              <line x1="12" y1="5" x2="12" y2="19" /><polyline points="19 12 12 19 5 12" />
+            </svg>
+            <span style={{ fontFamily: "var(--font-display)", fontSize: 7.5, fontWeight: 700, letterSpacing: "0.18em", textTransform: "uppercase", color: "rgba(255,255,255,0.32)" }}>Saídas</span>
+          </div>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 20, fontWeight: 700, lineHeight: 1, color: "var(--red)", textShadow: "0 0 14px rgba(224,78,78,0.5)" }}>{vExits.toLocaleString("pt-BR")}</span>
+        </div>
+        {/* Total */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
+            <svg width={9} height={9} viewBox="0 0 24 24" fill="none" stroke={c.accent} strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.8 }}>
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+            </svg>
+            <span style={{ fontFamily: "var(--font-display)", fontSize: 7.5, fontWeight: 700, letterSpacing: "0.18em", textTransform: "uppercase", color: "rgba(255,255,255,0.32)" }}>Total</span>
+          </div>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 20, fontWeight: 700, lineHeight: 1, color: c.accent, textShadow: `0 0 14px ${c.accent}66` }}>{vTotal.toLocaleString("pt-BR")}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ── Main component ────────────────────────────────────────── */
 export function VehiclesDashboard({ apiBase }: Props) {
   const { stats, status } = useStats();
@@ -728,6 +824,23 @@ export function VehiclesDashboard({ apiBase }: Props) {
                 ))}
               </div>
             </div>
+            {/* Vehicle polygon stats section */}
+            {stats.vehicle_tracking_available && (stats.polygon_stats?.length ?? 0) > 0 && (
+              <div className="card">
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                  <p className="section-label" style={{ marginBottom: 0 }}>Polígonos Ativos — Veículos</p>
+                  <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>
+                    {(stats.polygon_stats ?? []).reduce((s, p) => s + (p.vehicle_entries ?? 0) + (p.vehicle_exits ?? 0), 0)} passagens · {(stats.polygon_stats ?? []).length} zona{(stats.polygon_stats?.length ?? 0) !== 1 ? "s" : ""}
+                  </span>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {(stats.polygon_stats ?? []).map((stat, i) => (
+                    <VehiclePolygonCard key={stat.title + i} stat={stat} colorIdx={i} />
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Vehicle zones section */}
             {vehicleZones.length > 0 && (
               <div className="card">
