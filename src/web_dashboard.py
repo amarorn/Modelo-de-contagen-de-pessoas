@@ -2450,6 +2450,7 @@ def inference_loop(
                                             x_norm=_cx_n, y_norm=_cy_n,
                                             metadata={"mode": "line"},
                                         )
+                                        _emit("entry", int(track_id), cls_by_tid.get(track_id, _default_det_cls), _cx_n, _cy_n, track_conf_tracker.score_of(track_id), "line", "line", frame_ts)
                                     else:
                                         shared.suppressed_events += 1
                                 elif prev is not None and prev > 0 >= side:
@@ -2467,6 +2468,7 @@ def inference_loop(
                                             x_norm=_cx_n, y_norm=_cy_n,
                                             metadata={"mode": "line"},
                                         )
+                                        _emit("exit", int(track_id), cls_by_tid.get(track_id, _default_det_cls), _cx_n, _cy_n, track_conf_tracker.score_of(track_id), "line", "line", frame_ts)
                                     else:
                                         shared.suppressed_events += 1
                             last_side_by_id[track_id] = side
@@ -5040,9 +5042,12 @@ def main() -> None:
     drift_detector = CameraDriftDetector()
     audit_log.log(ts=0.0, session_id=shared.session_id, event_type="session_start")
 
+    analytics_worker = AggregatorWorker(get_session_factory)
+    analytics_worker.start()
+
     t = threading.Thread(
         target=inference_loop,
-        args=(args, shared, stop_event, audit_log, drift_detector),
+        args=(args, shared, stop_event, audit_log, drift_detector, analytics_worker),
         daemon=True,
     )
     t.start()
@@ -5051,9 +5056,6 @@ def main() -> None:
         session_id=shared.session_id,
         get_stats=lambda: build_stats_payload(shared),
     )
-
-    analytics_worker = AggregatorWorker(get_session_factory)
-    analytics_worker.start()
 
     app = create_app(shared, audit_log, drift_detector, analytics_worker=analytics_worker)
     print(
