@@ -82,6 +82,8 @@ export interface Stats {
    * Modo «Todos os veículos»: contagem global (entradas/saídas, velocidade média) sem alertas por cor.
    */
   all_vehicles_mode?: boolean;
+  /** Contagens por classe YOLO de veículo: class_id -> {entries, exits} */
+  vehicle_class_counts?: Record<string, { entries: number; exits: number }>;
   polygon_stats?: PolygonStat[];
   /**
    * Migracoes zona -> zona: total de transicoes entre poligonos distintos

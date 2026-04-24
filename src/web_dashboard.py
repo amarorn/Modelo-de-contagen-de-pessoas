@@ -152,10 +152,13 @@ def _configure_runtime_logging() -> None:
 
 @dataclass
 class CounterState:
-    entries: int = 0
-    exits: int = 0
-    vehicle_entries: int = 0
-    vehicle_exits: int = 0
+    def __init__(self) -> None:
+        self.entries: int = 0
+        self.exits: int = 0
+        self.vehicle_entries: int = 0
+        self.vehicle_exits: int = 0
+        self.vehicle_class_entries: dict[int, int] = {}
+        self.vehicle_class_exits: dict[int, int] = {}
 
     @property
     def total(self) -> int:
@@ -2274,6 +2277,8 @@ def inference_loop(
                                         shared.counter.entries += 1
                                         if _is_veh:
                                             shared.counter.vehicle_entries += 1
+                                            _vcls = cls_by_tid.get(track_id, _default_det_cls)
+                                            shared.counter.vehicle_class_entries[_vcls] = shared.counter.vehicle_class_entries.get(_vcls, 0) + 1
                                         _bump_hourly(shared, "entry")
                                         entry_boxes.append(
                                             (track_id, (x_min, y_min, x_max, y_max))
@@ -2292,6 +2297,8 @@ def inference_loop(
                                         shared.counter.exits += 1
                                         if _is_veh:
                                             shared.counter.vehicle_exits += 1
+                                            _vcls = cls_by_tid.get(track_id, _default_det_cls)
+                                            shared.counter.vehicle_class_exits[_vcls] = shared.counter.vehicle_class_exits.get(_vcls, 0) + 1
                                         _bump_hourly(shared, "exit")
                                         audit_log.log(
                                             ts=frame_ts, session_id=shared.session_id,
@@ -2378,6 +2385,8 @@ def inference_loop(
                                         shared.counter.entries += 1
                                         if _is_veh:
                                             shared.counter.vehicle_entries += 1
+                                            _vcls = cls_by_tid.get(track_id, _default_det_cls)
+                                            shared.counter.vehicle_class_entries[_vcls] = shared.counter.vehicle_class_entries.get(_vcls, 0) + 1
                                         _bump_hourly(shared, "entry")
                                         entry_boxes.append(
                                             (track_id, (x_min, y_min, x_max, y_max))
@@ -2396,6 +2405,8 @@ def inference_loop(
                                         shared.counter.exits += 1
                                         if _is_veh:
                                             shared.counter.vehicle_exits += 1
+                                            _vcls = cls_by_tid.get(track_id, _default_det_cls)
+                                            shared.counter.vehicle_class_exits[_vcls] = shared.counter.vehicle_class_exits.get(_vcls, 0) + 1
                                         _bump_hourly(shared, "exit")
                                         audit_log.log(
                                             ts=frame_ts, session_id=shared.session_id,
@@ -3273,6 +3284,11 @@ def build_stats_payload(shared: SharedState) -> dict:
             "vehicle_entries": shared.counter.vehicle_entries,
             "vehicle_exits": shared.counter.vehicle_exits,
             "vehicle_total": shared.counter.vehicle_total,
+            "vehicle_class_counts": {
+                str(k): {"entries": shared.counter.vehicle_class_entries.get(k, 0), "exits": shared.counter.vehicle_class_exits.get(k, 0)}
+                for k in shared.yolo_count_class_ids
+                if k != shared.yolo_person_class_id
+            },
             "vehicle_avg_speed_px_per_sec": shared.vehicle_avg_speed_px_per_sec,
             "occupancy_now": shared.occupancy_now,
             "moving_now": shared.moving_now,

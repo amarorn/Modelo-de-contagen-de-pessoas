@@ -150,25 +150,218 @@ function Sparkline({ data }: { data: DataPoint[] }) {
   );
 }
 
-/* ── KPI box ───────────────────────────────────────────────── */
-function KpiBox({ label, value, sub, color }: { label: string; value: number; sub: string; color: string }) {
+/* ── Portuguese vehicle label map ─────────────────────────── */
+const PT_VEHICLE_LABELS: Record<string, string> = {
+  car: "Carro", automobile: "Carro",
+  motorcycle: "Moto", motorbike: "Moto",
+  bus: "Ônibus",
+  truck: "Caminhão", lorry: "Caminhão",
+  van: "Van",
+  bicycle: "Bicicleta", bike: "Bicicleta",
+};
+
+function ptLabel(yoloName: string): string {
+  return PT_VEHICLE_LABELS[yoloName.toLowerCase()] ?? yoloName;
+}
+
+/* ── Vehicle type icons (inline SVG paths) ─────────────────── */
+function VehicleIcon({ name, size = 28, color }: { name: string; size?: number; color: string }) {
+  const n = name.toLowerCase();
+  const s = size;
+  if (n === "car" || n === "automobile") return (
+    <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M5 17H3v-5l2.5-6h11L19 12v5h-2" /><circle cx="7.5" cy="17.5" r="1.5" /><circle cx="16.5" cy="17.5" r="1.5" /><path d="M5 12h14" />
+    </svg>
+  );
+  if (n === "motorcycle" || n === "motorbike") return (
+    <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="5.5" cy="15.5" r="2.5" /><circle cx="18.5" cy="15.5" r="2.5" /><path d="M8 15.5h5l3-6h2l1.5 3" /><path d="M8 15.5 10 9h3" />
+    </svg>
+  );
+  if (n === "bus") return (
+    <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="13" rx="2" /><path d="M3 9h18M8 4v5M16 4v5M5 17v2M19 17v2" /><circle cx="8" cy="17.5" r=".8" fill={color} /><circle cx="16" cy="17.5" r=".8" fill={color} />
+    </svg>
+  );
+  if (n === "truck" || n === "lorry") return (
+    <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M1 3h15v13H1z" /><path d="M16 8h4l3 4v5h-7V8z" /><circle cx="5.5" cy="18.5" r="1.5" /><circle cx="18.5" cy="18.5" r="1.5" />
+    </svg>
+  );
+  if (n === "van") return (
+    <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 17V7a2 2 0 0 1 2-2h12l3 5v7" /><circle cx="7.5" cy="17.5" r="1.5" /><circle cx="16.5" cy="17.5" r="1.5" /><path d="M3 12h10M13 5v7" />
+    </svg>
+  );
+  if (n === "bicycle" || n === "bike") return (
+    <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="6" cy="15" r="4" /><circle cx="18" cy="15" r="4" /><path d="M6 15 9 6h6l3 9M9 6h3" />
+    </svg>
+  );
   return (
-    <div style={{
-      flex: 1,
-      background: "var(--bg-elevated)",
-      border: "1px solid var(--border)",
-      borderRadius: "var(--radius)",
-      padding: "14px 16px",
-      position: "relative",
-      overflow: "hidden",
-    }}>
+    <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round">
+      <rect x="3" y="8" width="18" height="10" rx="2" /><path d="M8 8V6a2 2 0 0 1 4 0v2" />
+    </svg>
+  );
+}
+
+/* ── Vehicle breakdown modal ───────────────────────────────── */
+const CLASS_COLORS = ["#F97316","#2EB87A","#3DAAC8","#A855F7","#F59E0B","#E04E4E","#10B981","#6366F1"];
+
+function VehicleBreakdownModal({
+  stats, onClose,
+}: {
+  stats: import("../types/api").Stats;
+  onClose: () => void;
+}) {
+  const counts = stats.vehicle_class_counts ?? {};
+  const labels = stats.yolo_class_labels ?? {};
+  const personId = String(stats.yolo_person_class_id ?? -1);
+
+  const rows = Object.entries(counts)
+    .filter(([id]) => id !== personId)
+    .map(([id, { entries, exits }], i) => ({
+      id,
+      yoloName: labels[id] ?? `class_${id}`,
+      entries,
+      exits,
+      total: entries + exits,
+      color: CLASS_COLORS[i % CLASS_COLORS.length],
+    }))
+    .sort((a, b) => b.total - a.total);
+
+  const grandTotal = rows.reduce((s, r) => s + r.total, 0);
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, zIndex: 1000,
+        background: "rgba(0,0,0,0.65)",
+        backdropFilter: "blur(4px)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        padding: 24,
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          background: "var(--bg-elevated)",
+          border: "1px solid var(--border)",
+          borderRadius: 12,
+          width: "100%", maxWidth: 520,
+          overflow: "hidden",
+          boxShadow: "0 24px 60px rgba(0,0,0,0.6)",
+        }}
+      >
+        {/* Header */}
+        <div style={{
+          padding: "18px 20px 16px",
+          borderBottom: "1px solid var(--border)",
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+        }}>
+          <div>
+            <div style={{ fontSize: 11, fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase", color: "#F97316", marginBottom: 4 }}>
+              Total · Passagens na Sessão
+            </div>
+            <div style={{ fontSize: 28, fontFamily: "var(--font-mono)", fontWeight: 700, color: "#F97316", lineHeight: 1 }}>
+              {(stats.vehicle_total ?? 0).toLocaleString("pt-BR")}
+              <span style={{ fontSize: 13, color: "var(--text-muted)", fontWeight: 400, marginLeft: 8 }}>passagens</span>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              background: "transparent", border: "1px solid var(--border)", borderRadius: 6,
+              color: "var(--text-muted)", cursor: "pointer", padding: "4px 10px",
+              fontFamily: "var(--font-mono)", fontSize: 12,
+            }}
+          >✕</button>
+        </div>
+
+        {/* Body */}
+        <div style={{ padding: "16px 20px 20px" }}>
+          {rows.length === 0 ? (
+            <div style={{ textAlign: "center", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12, padding: "24px 0" }}>
+              Nenhuma classe de veículo com dados ainda.
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {rows.map(row => {
+                const pct = grandTotal > 0 ? (row.total / grandTotal) * 100 : 0;
+                return (
+                  <div key={row.id} style={{
+                    background: "var(--bg-base, #0f0f14)",
+                    border: `1px solid ${row.color}28`,
+                    borderRadius: 8,
+                    padding: "12px 14px",
+                    position: "relative",
+                    overflow: "hidden",
+                  }}>
+                    {/* fill bar */}
+                    <div style={{
+                      position: "absolute", left: 0, top: 0, bottom: 0,
+                      width: `${pct}%`,
+                      background: `${row.color}12`,
+                      transition: "width 0.4s ease",
+                      pointerEvents: "none",
+                    }} />
+                    <div style={{ position: "relative", display: "flex", alignItems: "center", gap: 12 }}>
+                      <VehicleIcon name={row.yoloName} size={26} color={row.color} />
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 11, fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: row.color }}>
+                          {ptLabel(row.yoloName)}
+                        </div>
+                        <div style={{ display: "flex", gap: 14, marginTop: 3 }}>
+                          <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "#2EB87A" }}>↑ {row.entries.toLocaleString("pt-BR")} ent.</span>
+                          <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "#E04E4E" }}>↓ {row.exits.toLocaleString("pt-BR")} saí.</span>
+                        </div>
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{ fontSize: 22, fontFamily: "var(--font-mono)", fontWeight: 700, color: row.color, lineHeight: 1 }}>
+                          {row.total.toLocaleString("pt-BR")}
+                        </div>
+                        <div style={{ fontSize: 9, fontFamily: "var(--font-mono)", color: "var(--text-muted)", marginTop: 2 }}>
+                          {pct.toFixed(0)}%
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── KPI box ───────────────────────────────────────────────── */
+function KpiBox({ label, value, sub, color, onClick }: { label: string; value: number; sub: string; color: string; onClick?: () => void }) {
+  return (
+    <div
+      onClick={onClick}
+      style={{
+        flex: 1,
+        background: "var(--bg-elevated)",
+        border: `1px solid ${onClick ? `${color}40` : "var(--border)"}`,
+        borderRadius: "var(--radius)",
+        padding: "14px 16px",
+        position: "relative",
+        overflow: "hidden",
+        cursor: onClick ? "pointer" : "default",
+        transition: "border-color 0.15s",
+      }}
+    >
       <div style={{
         position: "absolute", inset: 0,
         background: `radial-gradient(ellipse at 90% 50%, ${color}10 0%, transparent 60%)`,
         pointerEvents: "none",
       }} />
-      <div style={{ fontSize: 9, fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 8 }}>
+      <div style={{ fontSize: 9, fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 8, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         {label}
+        {onClick && <span style={{ fontSize: 9, color: `${color}90`, letterSpacing: 0 }}>▼ detalhes</span>}
       </div>
       <div style={{ fontSize: 32, fontFamily: "var(--font-mono)", fontWeight: 700, color, lineHeight: 1, marginBottom: 4 }}>
         {value.toLocaleString("pt-BR")}
@@ -282,6 +475,7 @@ export function VehiclesDashboard({ apiBase }: Props) {
   const [history, setHistory] = useState<DataPoint[]>([]);
   const { cfg, setCfg, saving, saved, save } = useAlertConfig();
   const [allVehiclesPending, setAllVehiclesPending] = useState(false);
+  const [showBreakdown, setShowBreakdown] = useState(false);
   const vehicleZones = useVehicleZones(apiBase, true);
 
   const [sessionAlertCount, setSessionAlertCount] = useState<number>(() => {
@@ -348,6 +542,7 @@ export function VehiclesDashboard({ apiBase }: Props) {
 
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflow: "auto" }}>
+      {showBreakdown && <VehicleBreakdownModal stats={stats} onClose={() => setShowBreakdown(false)} />}
       <div style={{
         flex: 1,
         padding: "16px clamp(14px, 2.5vw, 28px) 24px",
@@ -421,7 +616,7 @@ export function VehiclesDashboard({ apiBase }: Props) {
 
         {/* ── KPI row — full width, sempre visível ─────────────── */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 10 }}>
-          <KpiBox label="Total" value={stats.vehicle_total ?? 0} sub="passagens na sessão" color="#F97316" />
+          <KpiBox label="Total" value={stats.vehicle_total ?? 0} sub="passagens na sessão" color="#F97316" onClick={() => setShowBreakdown(true)} />
           <KpiBox label="Entradas" value={stats.vehicle_entries ?? 0} sub="sentido A" color="#2EB87A" />
           <KpiBox label="Saídas" value={stats.vehicle_exits ?? 0} sub="sentido B" color="#E04E4E" />
           <KpiBox label="Taxa / min" value={ratePerMin} sub="últimos 60s" color="#3DAAC8" />
