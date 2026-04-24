@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 import ssl
+import sys
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 
@@ -156,10 +157,16 @@ def apply_opencv_ffmpeg_capture_env(
 
 def is_skylinewebcams_webcam_page(url: str) -> bool:
     u = url.strip().lower()
-    if "skylinewebcams.com" not in u or "/webcam/" not in u:
+    if "skylinewebcams.com" not in u:
         return False
     path_only = u.split("#", 1)[0].split("?", 1)[0].rstrip("/")
-    return path_only.endswith(".html") or path_only.endswith(".htm")
+    # Padrao classico: /webcam/<slug>.html
+    if "/webcam/" in u and (path_only.endswith(".html") or path_only.endswith(".htm")):
+        return True
+    # Padrao novo de listagem/player: /live-webcams/.../<slug>
+    if "/live-webcams/" in u and not path_only.endswith("/live-webcams"):
+        return True
+    return False
 
 
 def _extract_base_href(html: str) -> str | None:
@@ -262,6 +269,7 @@ def resolve_stream_source(raw: str) -> str:
             print(
                 "[skyline] YOLO_SKYLINE_WEBCAM_PAGE: a obter m3u8 novo a partir da pagina .html "
                 "(ignora o URL hd-auth do preset).",
+                file=sys.stderr,
                 flush=True,
             )
             return resolve_skylinewebcams_page(page_override)

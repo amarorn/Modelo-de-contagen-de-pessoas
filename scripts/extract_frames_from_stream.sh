@@ -52,6 +52,37 @@ if [ -z "${URL}" ]; then
   exit 1
 fi
 
+# Se YOLO_SKYLINE_WEBCAM_PAGE estiver definido, obter um m3u8 fresco da pagina HTML
+# (evita usar token caduco do preset). Usa src/stream_source_resolve.py do projeto.
+PYTHON_BIN_FOR_RESOLVE="${ROOT_DIR}/.venv/bin/python"
+if [ ! -x "${PYTHON_BIN_FOR_RESOLVE}" ]; then
+  PYTHON_BIN_FOR_RESOLVE="python3"
+fi
+if [ "${EXTRACT_SKIP_RESOLVE:-0}" != "1" ]; then
+  RESOLVED_URL="$(PYTHONPATH="${ROOT_DIR}/src:${PYTHONPATH:-}" \
+    "${PYTHON_BIN_FOR_RESOLVE}" -c '
+import sys
+raw = sys.argv[1]
+try:
+    from stream_source_resolve import resolve_stream_source
+except Exception as exc:
+    sys.stderr.write(f"[extract] aviso: resolve indisponivel ({exc}); usando URL original\n")
+    print(raw)
+    sys.exit(0)
+try:
+    print(resolve_stream_source(raw))
+except Exception as exc:
+    sys.stderr.write(f"[extract] aviso: resolve falhou ({exc}); usando URL original\n")
+    print(raw)
+' "${URL}")" || RESOLVED_URL="${URL}"
+  # Tomar apenas a ultima linha do stdout (blindagem caso alguma chamada imprima logs)
+  RESOLVED_URL="$(printf '%s\n' "${RESOLVED_URL}" | tail -n 1)"
+  if [ -n "${RESOLVED_URL}" ] && [ "${RESOLVED_URL}" != "${URL}" ]; then
+    echo "[extract] URL resolvido a partir de YOLO_SKYLINE_WEBCAM_PAGE (token renovado)." >&2
+    URL="${RESOLVED_URL}"
+  fi
+fi
+
 OUT_DIR="${2:-${OUT_DIR:-data/person_count/images/staging}}"
 FPS="${FPS:-1}"
 DURATION_SEC="${DURATION_SEC:-60}"
