@@ -12,6 +12,7 @@ from persistence.models import Base
 import persistence.heatmap_models  # noqa: F401 — registra HeatmapSlot e GridVersion no Base.metadata
 import persistence.dwell_models  # noqa: F401 — DwellSlot, ZoneStatsSlot
 import persistence.zone_models  # noqa: F401 — Zone, ZoneTemplate
+import persistence.analytics_models  # noqa: F401 — EventRawRow, EventAggregatedRow, TrajectoryRow
 
 
 def database_url() -> str:

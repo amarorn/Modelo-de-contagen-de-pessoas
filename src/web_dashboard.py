@@ -71,6 +71,7 @@ from env_settings import (
 )
 from persistence.emitter import emit_config_event, shutdown_emitter, start_stats_emitter_thread
 from persistence.db import get_session_factory
+from analytics import AggregatorWorker, bp as analytics_bp
 from persistence.dwell_store import DwellStore
 from persistence.heatmap_store import HeatmapStore
 from dwell_accumulator import DwellGridLive, ZoneSlotTracker
@@ -3378,6 +3379,7 @@ def create_app(
     shared: SharedState,
     audit_log: AuditLog,
     drift_detector: CameraDriftDetector,
+    analytics_worker: "AggregatorWorker | None" = None,
 ) -> Flask:
     app = Flask(__name__)
     CORS(
@@ -3389,6 +3391,8 @@ def create_app(
             r"/docs": {"origins": "*"},
         },
     )
+    app.config["ANALYTICS_WORKER"] = analytics_worker
+    app.register_blueprint(analytics_bp)
     env_file = Path(__file__).resolve().parent.parent / ".env"
     heatmap_store_api = HeatmapStore()
     dwell_store_api = DwellStore()
@@ -5007,7 +5011,10 @@ def main() -> None:
         get_stats=lambda: build_stats_payload(shared),
     )
 
-    app = create_app(shared, audit_log, drift_detector)
+    analytics_worker = AggregatorWorker(get_session_factory)
+    analytics_worker.start()
+
+    app = create_app(shared, audit_log, drift_detector, analytics_worker=analytics_worker)
     print(
         f"[web] Documentacao OpenAPI: http://{args.host}:{args.port}/docs "
         f"(YAML: http://{args.host}:{args.port}/openapi.yaml)",
