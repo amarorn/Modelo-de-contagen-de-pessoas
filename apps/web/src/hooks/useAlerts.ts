@@ -21,9 +21,14 @@ export type AlertsResponse = {
 };
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
-const POLL_INTERVAL_MS = 900;
+// 900ms era agressivo demais e inflacionava /api/alerts; 2000ms e suficiente
+// para toasts (cooldown do backend ja e 3s por alerta).
+const POLL_INTERVAL_MS = 2000;
 const MAX_TOASTS = 6;
 const TOAST_TTL_MS = 7000;
+
+const isHidden = (): boolean =>
+  typeof document !== "undefined" && document.visibilityState === "hidden";
 
 export function useAlerts() {
   const [enabled, setEnabled] = useState<{ cap: boolean; carColors: string[] }>({
@@ -52,6 +57,7 @@ export function useAlerts() {
     let cancelled = false;
 
     const poll = async () => {
+      if (isHidden()) return;
       try {
         const url = `${API_BASE}/api/alerts?since=${sinceRef.current}`;
         const res = await fetch(url);

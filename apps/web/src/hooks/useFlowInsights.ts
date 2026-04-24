@@ -8,7 +8,10 @@ export function useFlowInsights(apiBase: string, enabled: boolean) {
   useEffect(() => {
     if (!enabled) return;
     const base = apiBase.replace(/\/$/, "");
+    const isHidden = () =>
+      typeof document !== "undefined" && document.visibilityState === "hidden";
     const tick = async () => {
+      if (isHidden()) return;
       try {
         const r = await fetch(`${base}/api/insights/flow`);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -21,7 +24,12 @@ export function useFlowInsights(apiBase: string, enabled: boolean) {
     };
     tick();
     const id = setInterval(tick, 15000);
-    return () => clearInterval(id);
+    const onVis = () => { if (!isHidden()) void tick(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, [apiBase, enabled]);
 
   return { data, error };

@@ -63,8 +63,16 @@ export function AuditLogPanel({ apiBase }: Props) {
 
   useEffect(() => {
     if (!autoRefresh) return;
-    const id = setInterval(fetchEvents, 5000);
-    return () => clearInterval(id);
+    const isHidden = () =>
+      typeof document !== "undefined" && document.visibilityState === "hidden";
+    const safeTick = () => { if (!isHidden()) void fetchEvents(); };
+    const id = setInterval(safeTick, 5000);
+    const onVis = () => { if (!isHidden()) void fetchEvents(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, [autoRefresh, fetchEvents]);
 
   const EVENT_TYPES = ["", "entry", "exit", "zone_entry", "zone_exit", "alert", "drift_detected"];

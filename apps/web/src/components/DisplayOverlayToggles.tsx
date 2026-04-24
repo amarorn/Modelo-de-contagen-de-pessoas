@@ -25,35 +25,47 @@ export function DisplayOverlayToggles({ apiBase, variant = "default" }: Props) {
 
   const load = useCallback(async () => {
     setErr(null);
-    try {
-      const ac = new AbortController();
-      const t = window.setTimeout(() => ac.abort(), 15000);
-      const r = await fetch(`${apiBase}/api/config`, { signal: ac.signal });
-      window.clearTimeout(t);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const j = await r.json();
-      setTrail(Boolean(j.show_trail ?? false));
-      setHeading(Boolean(j.show_heading ?? false));
-      const hmAvail = Boolean(j.heatmap_available);
-      setHeatmapOk(hmAvail);
-      setHeatmap(hmAvail ? Boolean(j.show_heatmap ?? false) : false);
-      const sxAvail = Boolean(j.sex_overlay_available);
-      setSexOk(sxAvail);
-      setSexOn(sxAvail ? Boolean(j.show_sex_overlay ?? false) : false);
-      setShowRoi(Boolean(j.show_roi ?? false));
-      setReady(true);
-    } catch (e) {
-      const base = apiBase.trim() || window.location.origin;
-      if (e instanceof Error && e.name === "AbortError") {
-        setErr(
-          `Timeout (15s) ao ligar a ${base}/api/config. Confirme que scripts/run_web.sh esta a correr na mesma porta do proxy (WEB_PORT / VITE_DEV_API_TARGET).`,
-        );
-      } else {
-        setErr(
-          `Sem ligação a ${base}/api/config. Em desenvolvimento: na pasta apps/web execute pnpm dev (proxy /api → Flask). ` +
-            `Se abrir o build estático, defina VITE_API_BASE=http://127.0.0.1:PORT ao construir (PORT = WEB_PORT do .env, ex. 8081).`,
-        );
+    // Cobre bootstrap lento do Flask (CUDA/modelo ~10-30s) e 1 retry em caso
+    // de aborto/erro transitorio; evita falso alarme durante o arranque.
+    const TIMEOUT_MS = 30_000;
+    const MAX_ATTEMPTS = 2;
+    let lastErr: unknown = null;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        const ac = new AbortController();
+        const t = window.setTimeout(() => ac.abort(), TIMEOUT_MS);
+        const r = await fetch(`${apiBase}/api/config`, { signal: ac.signal });
+        window.clearTimeout(t);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const j = await r.json();
+        setTrail(Boolean(j.show_trail ?? false));
+        setHeading(Boolean(j.show_heading ?? false));
+        const hmAvail = Boolean(j.heatmap_available);
+        setHeatmapOk(hmAvail);
+        setHeatmap(hmAvail ? Boolean(j.show_heatmap ?? false) : false);
+        const sxAvail = Boolean(j.sex_overlay_available);
+        setSexOk(sxAvail);
+        setSexOn(sxAvail ? Boolean(j.show_sex_overlay ?? false) : false);
+        setShowRoi(Boolean(j.show_roi ?? false));
+        setReady(true);
+        return;
+      } catch (e) {
+        lastErr = e;
+        if (attempt < MAX_ATTEMPTS) {
+          await new Promise((res) => window.setTimeout(res, 1500));
+        }
       }
+    }
+    const base = apiBase.trim() || window.location.origin;
+    if (lastErr instanceof Error && lastErr.name === "AbortError") {
+      setErr(
+        `Timeout (${TIMEOUT_MS / 1000}s x${MAX_ATTEMPTS}) ao ligar a ${base}/api/config. Confirme que scripts/run_web.sh esta a correr na mesma porta do proxy (WEB_PORT / VITE_DEV_API_TARGET).`,
+      );
+    } else {
+      setErr(
+        `Sem ligação a ${base}/api/config. Em desenvolvimento: na pasta apps/web execute pnpm dev (proxy /api → Flask). ` +
+          `Se abrir o build estático, defina VITE_API_BASE=http://127.0.0.1:PORT ao construir (PORT = WEB_PORT do .env, ex. 8081).`,
+      );
     }
   }, [apiBase]);
 

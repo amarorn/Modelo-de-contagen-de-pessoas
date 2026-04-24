@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ReactApexChart from "react-apexcharts";
 import { useStats } from "../hooks/useStats";
 
@@ -78,14 +78,19 @@ function useAnalyticsFlow(cameraId: string, from: Date, to: Date, tick: number) 
   const [loading, setLoading] = useState(false);
   useEffect(() => {
     if (!cameraId) return;
+    // Cancela request anterior quando dependencias mudarem (evita race e
+    // acumular respostas tardias durante remount / troca de camera).
+    const ac = new AbortController();
     setLoading(true);
     fetch(
       `${API_BASE}/api/analytics/flow?camera_id=${encodeURIComponent(cameraId)}&from=${toISO(from)}&to=${toISO(to)}`,
+      { signal: ac.signal },
     )
       .then(r => r.json())
       .then(d => setSeries(Array.isArray(d.series) ? d.series : []))
       .catch(() => {})
       .finally(() => setLoading(false));
+    return () => ac.abort();
   }, [cameraId, from.getTime(), to.getTime(), tick]); // eslint-disable-line
   return { series, loading };
 }
@@ -94,10 +99,12 @@ function useActiveTrajectories(cameraId: string, tick: number) {
   const [trajectories, setTrajectories] = useState<Trajectory[]>([]);
   useEffect(() => {
     if (!cameraId) return;
-    fetch(`${API_BASE}/api/trajectories/active?camera_id=${encodeURIComponent(cameraId)}`)
+    const ac = new AbortController();
+    fetch(`${API_BASE}/api/trajectories/active?camera_id=${encodeURIComponent(cameraId)}`, { signal: ac.signal })
       .then(r => r.json())
       .then(d => setTrajectories(Array.isArray(d.trajectories) ? d.trajectories : []))
       .catch(() => {});
+    return () => ac.abort();
   }, [cameraId, tick]);
   return trajectories;
 }
@@ -105,10 +112,12 @@ function useActiveTrajectories(cameraId: string, tick: number) {
 function useAnalyticsMetrics(tick: number) {
   const [m, setM] = useState<Partial<AnalyticsMetrics>>({});
   useEffect(() => {
-    fetch(`${API_BASE}/api/analytics/metrics`)
+    const ac = new AbortController();
+    fetch(`${API_BASE}/api/analytics/metrics`, { signal: ac.signal })
       .then(r => r.json())
       .then(d => setM(d))
       .catch(() => {});
+    return () => ac.abort();
   }, [tick]);
   return m;
 }
@@ -234,13 +243,24 @@ export function AnalyticsDashboard({ onBack }: Props) {
     if (!cameraId && stats.active_preset_id) setCameraId(stats.active_preset_id);
   }, [stats.active_preset_id]); // eslint-disable-line
 
-  // auto-refresh every 30s
+  // auto-refresh every 30s; pausa quando a aba esta escondida e faz catch-up
+  // ao voltar, evitando 3 fetches desnecessarios (flow/active/metrics) por tick.
   useEffect(() => {
-    intervalRef.current = setInterval(() => setTick(t => t + 1), 30_000);
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+    const isHidden = () =>
+      typeof document !== "undefined" && document.visibilityState === "hidden";
+    const tickOnce = () => { if (!isHidden()) setTick(t => t + 1); };
+    intervalRef.current = setInterval(tickOnce, 30_000);
+    const onVis = () => { if (!isHidden()) setTick(t => t + 1); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, []);
 
-  const { from, to } = rangeFor(preset);
+  // Recalcula apenas quando preset ou tick mudam; evita loop de fetch
+  // (new Date() a cada render faz o useEffect disparar indefinidamente).
+  const { from, to } = useMemo(() => rangeFor(preset), [preset, tick]);
   const { series, loading } = useAnalyticsFlow(cameraId, from, to, tick);
   const trajectories = useActiveTrajectories(cameraId, tick);
   const sysMetrics = useAnalyticsMetrics(tick);

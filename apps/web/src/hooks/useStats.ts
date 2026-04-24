@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import type { ConnectionStatus, Stats } from "../types/api";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
@@ -65,30 +65,77 @@ const EMPTY_STATS: Stats = {
   all_vehicles_mode: false,
 };
 
-export function useStats() {
-  const [stats, setStats] = useState<Stats>(EMPTY_STATS);
-  const [status, setStatus] = useState<ConnectionStatus>("connecting");
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+// Singleton module-level store: 1 poller global para toda a app.
+// Consumidores multiplos (App + AnalyticsDashboard + VehiclesDashboard)
+// compartilham este estado em vez de manter cada um o seu setInterval.
+let cachedStats: Stats = EMPTY_STATS;
+let cachedStatus: ConnectionStatus = "connecting";
+const listeners = new Set<() => void>();
+let timer: ReturnType<typeof setInterval> | null = null;
+let inflight = false;
+let refCount = 0;
 
-  const fetchStats = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/api/stats`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data: Stats = await res.json();
-      setStats(data);
-      setStatus("connected");
-    } catch {
-      setStatus("error");
+const isHidden = (): boolean =>
+  typeof document !== "undefined" && document.visibilityState === "hidden";
+
+async function fetchOnce(): Promise<void> {
+  if (inflight) return;
+  if (isHidden()) return;
+  inflight = true;
+  try {
+    const res = await fetch(`${API_BASE}/api/stats`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    cachedStats = (await res.json()) as Stats;
+    cachedStatus = "connected";
+  } catch {
+    cachedStatus = "error";
+  } finally {
+    inflight = false;
+    listeners.forEach((fn) => fn());
+  }
+}
+
+function startPolling(): void {
+  if (timer !== null) return;
+  void fetchOnce();
+  timer = setInterval(() => {
+    void fetchOnce();
+  }, POLL_INTERVAL_MS);
+}
+
+function stopPolling(): void {
+  if (timer !== null) {
+    clearInterval(timer);
+    timer = null;
+  }
+}
+
+let visibilityWired = false;
+function ensureVisibilityHandler(): void {
+  if (visibilityWired || typeof document === "undefined") return;
+  visibilityWired = true;
+  document.addEventListener("visibilitychange", () => {
+    if (!isHidden() && refCount > 0) {
+      void fetchOnce();
     }
-  };
+  });
+}
+
+export function useStats() {
+  const [, setVersion] = useState(0);
 
   useEffect(() => {
-    fetchStats();
-    timer.current = setInterval(fetchStats, POLL_INTERVAL_MS);
+    ensureVisibilityHandler();
+    refCount += 1;
+    if (refCount === 1) startPolling();
+    const sub = () => setVersion((v) => v + 1);
+    listeners.add(sub);
     return () => {
-      if (timer.current) clearInterval(timer.current);
+      listeners.delete(sub);
+      refCount -= 1;
+      if (refCount === 0) stopPolling();
     };
   }, []);
 
-  return { stats, status };
+  return { stats: cachedStats, status: cachedStatus };
 }

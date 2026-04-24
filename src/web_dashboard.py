@@ -5042,7 +5042,7 @@ def main() -> None:
     drift_detector = CameraDriftDetector()
     audit_log.log(ts=0.0, session_id=shared.session_id, event_type="session_start")
 
-    analytics_worker = AggregatorWorker(get_session_factory)
+    analytics_worker = AggregatorWorker(get_session_factory())
     analytics_worker.start()
 
     t = threading.Thread(
