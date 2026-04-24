@@ -72,6 +72,7 @@ from env_settings import (
 from persistence.emitter import emit_config_event, shutdown_emitter, start_stats_emitter_thread
 from persistence.db import get_session_factory
 from analytics import AggregatorWorker, bp as analytics_bp
+from analytics.models import EventRaw as _AnalyticsEventRaw
 from persistence.dwell_store import DwellStore
 from persistence.heatmap_store import HeatmapStore
 from dwell_accumulator import DwellGridLive, ZoneSlotTracker
@@ -1629,7 +1630,44 @@ def inference_loop(
     stop_event: threading.Event,
     audit_log: AuditLog,
     drift_detector: CameraDriftDetector,
+    analytics_worker: "AggregatorWorker | None" = None,
 ) -> None:
+    import uuid as _uuid_mod
+    from datetime import datetime as _dt, timezone as _tz
+
+    def _emit(
+        event_type: str,
+        track_id_int: int,
+        cls_id: int,
+        cx_n: float,
+        cy_n: float,
+        confidence: float,
+        roi_id: str,
+        mode: str,
+        frame_ts: float,
+    ) -> None:
+        if analytics_worker is None:
+            return
+        try:
+            with shared.lock:
+                cam_id = str(shared.active_preset_id or shared.session_id)
+                cls_name = shared.yolo_class_names.get(cls_id, f"class_{cls_id}")
+            analytics_worker.submit(_AnalyticsEventRaw(
+                id=str(_uuid_mod.uuid4()),
+                timestamp=_dt.fromtimestamp(frame_ts, tz=_tz.utc),
+                camera_id=cam_id,
+                roi_id=roi_id,
+                track_id=str(track_id_int),
+                cls=cls_name,
+                event_type=event_type,
+                x=round(cx_n, 6),
+                y=round(cy_n, 6),
+                confidence=round(confidence, 4),
+                metadata={"mode": mode},
+            ))
+        except Exception:
+            pass
+
     try:
         model = YOLO(args.model)
         count_class_ids, person_class_id = resolve_yolo_classes_and_person_id(
@@ -2279,6 +2317,7 @@ def inference_loop(
                             inside = inside_for_presence
                             with shared.lock:
                                 prev_b = prev_inside_by_id.get(track_id)
+                                _poly_roi = (named_clamped[0].get("title") or "polygon") if named_clamped else "polygon"
                                 if prev_b is not None and not prev_b and inside:
                                     if _track_reliable:
                                         shared.counter.entries += 1
@@ -2297,6 +2336,7 @@ def inference_loop(
                                             x_norm=_cx_n, y_norm=_cy_n,
                                             metadata={"mode": "polygon"},
                                         )
+                                        _emit("entry", int(track_id), cls_by_tid.get(track_id, _default_det_cls), _cx_n, _cy_n, track_conf_tracker.score_of(track_id), _poly_roi, "polygon", frame_ts)
                                     else:
                                         shared.suppressed_events += 1
                                 elif prev_b is not None and prev_b and not inside:
@@ -2314,6 +2354,7 @@ def inference_loop(
                                             x_norm=_cx_n, y_norm=_cy_n,
                                             metadata={"mode": "polygon"},
                                         )
+                                        _emit("exit", int(track_id), cls_by_tid.get(track_id, _default_det_cls), _cx_n, _cy_n, track_conf_tracker.score_of(track_id), _poly_roi, "polygon", frame_ts)
                                     else:
                                         shared.suppressed_events += 1
                             prev_inside_by_id[track_id] = inside
