@@ -56,6 +56,23 @@ function fmtDuration(secs: number | null) {
 }
 
 /* ── hooks ──────────────────────────────────────────────────── */
+interface SourcePreset { id: string; label: string; url: string }
+
+function useSourcePresets() {
+  const [presets, setPresets] = useState<SourcePreset[]>([]);
+  const [activeId, setActiveId] = useState<string>("");
+  useEffect(() => {
+    fetch(`${API_BASE}/api/source`)
+      .then(r => r.json())
+      .then(d => {
+        setPresets(Array.isArray(d.presets) ? d.presets : []);
+        setActiveId(d.active_preset_id ?? "");
+      })
+      .catch(() => {});
+  }, []);
+  return { presets, activeId };
+}
+
 function useAnalyticsFlow(cameraId: string, from: Date, to: Date, tick: number) {
   const [series, setSeries] = useState<FlowPoint[]>([]);
   const [loading, setLoading] = useState(false);
@@ -203,16 +220,18 @@ interface Props { onBack: () => void }
 
 export function AnalyticsDashboard({ onBack }: Props) {
   const { stats } = useStats();
+  const { presets, activeId } = useSourcePresets();
   const [cameraId, setCameraId] = useState<string>("");
   const [preset, setPreset] = useState<Preset>("1h");
   const [tick, setTick] = useState(0);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // seed camera_id from active preset
+  // seed camera_id: prefer presets activeId, fallback to stats
   useEffect(() => {
-    if (!cameraId && stats.active_preset_id) {
-      setCameraId(stats.active_preset_id);
-    }
+    if (!cameraId && activeId) setCameraId(activeId);
+  }, [activeId]); // eslint-disable-line
+  useEffect(() => {
+    if (!cameraId && stats.active_preset_id) setCameraId(stats.active_preset_id);
   }, [stats.active_preset_id]); // eslint-disable-line
 
   // auto-refresh every 30s
@@ -318,19 +337,43 @@ export function AnalyticsDashboard({ onBack }: Props) {
           </div>
 
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            {/* camera_id input */}
+            {/* camera selector */}
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>câmera</span>
-              <input
-                value={cameraId}
-                onChange={e => setCameraId(e.target.value.trim())}
-                placeholder="camera_id"
-                style={{
-                  background: "var(--bg-elevated)", border: "1px solid var(--border)",
-                  borderRadius: 5, color: "var(--text-primary)", fontFamily: "var(--font-mono)",
-                  fontSize: 11, padding: "4px 10px", width: 160, outline: "none",
-                }}
-              />
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+              </svg>
+              {presets.length > 0 ? (
+                <select
+                  value={cameraId}
+                  onChange={e => setCameraId(e.target.value)}
+                  style={{
+                    background: "var(--bg-elevated)", border: "1px solid var(--border)",
+                    borderRadius: 5, color: "var(--text-primary)", fontFamily: "var(--font-mono)",
+                    fontSize: 11, padding: "4px 10px", outline: "none", cursor: "pointer",
+                    appearance: "none", WebkitAppearance: "none",
+                    backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%2372728A'/%3E%3C/svg%3E")`,
+                    backgroundRepeat: "no-repeat", backgroundPosition: "right 8px center",
+                    paddingRight: 26, minWidth: 160,
+                  }}
+                >
+                  {presets.map(p => (
+                    <option key={p.id} value={p.id}>
+                      {p.label || p.id}{p.id === activeId ? " ●" : ""}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  value={cameraId}
+                  onChange={e => setCameraId(e.target.value.trim())}
+                  placeholder="camera_id"
+                  style={{
+                    background: "var(--bg-elevated)", border: "1px solid var(--border)",
+                    borderRadius: 5, color: "var(--text-primary)", fontFamily: "var(--font-mono)",
+                    fontSize: 11, padding: "4px 10px", width: 160, outline: "none",
+                  }}
+                />
+              )}
             </div>
 
             {/* time range presets */}
