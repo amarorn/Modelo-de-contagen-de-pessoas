@@ -1051,6 +1051,3 @@ Documentação técnica detalhada em `docs/` (em português):
 **API interativa:** `http://localhost:8080/docs` (Swagger UI)
 
 **OpenAPI spec:** `http://localhost:8080/openapi.yaml`
-
----
-
