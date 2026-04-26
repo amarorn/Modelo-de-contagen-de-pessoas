@@ -7,6 +7,7 @@ from flask import Blueprint, current_app, jsonify, make_response, request
 from analytics.metrics import log_event, metrics
 from analytics.models import EventRaw, ValidationError
 from analytics.store import AnalyticsStore
+from flow_insights import compute_flow_insights_payload
 from persistence.db import get_session_factory
 
 bp = Blueprint("analytics", __name__)
@@ -158,6 +159,105 @@ def analytics_hourly():
         **bins,
     }
     return _json_cached(payload)
+
+
+@bp.get("/api/analytics/reports/summary")
+def analytics_reports_summary():
+    camera_id = request.args.get("camera_id", "").strip()
+    if not camera_id:
+        return jsonify({"error": "camera_id is required"}), 400
+
+    now = datetime.now(timezone.utc)
+    try:
+        from_dt = _parse_dt(request.args.get("from"), now - timedelta(hours=24))
+        to_dt = _parse_dt(request.args.get("to"), now)
+        from_dt, to_dt = _clamp_range(from_dt, to_dt)
+    except ValueError as exc:
+        return jsonify({"error": f"invalid date: {exc}"}), 400
+
+    roi_id = request.args.get("roi_id") or None
+    cls = request.args.get("class") or None
+
+    factory = get_session_factory()
+    session = factory()
+    try:
+        store = AnalyticsStore(session)
+        series = store.list_aggregations(camera_id, from_dt, to_dt, roi_id=roi_id, cls=cls)
+        hourly = store.hourly_bins_from_aggregations(camera_id, from_dt, to_dt, roi_id=roi_id, cls=cls)
+        trajectories = store.get_trajectories_in_range(camera_id, from_dt, to_dt)
+    finally:
+        session.close()
+
+    entries = 0
+    exits = 0
+    peak_occupancy = 0
+    latest_occupancy = 0
+    latest_bucket_iso: str | None = None
+    occupancy_by_bucket: dict[datetime, int] = {}
+    for row in series:
+        entries += int(row.get("entries") or 0)
+        exits += int(row.get("exits") or 0)
+        occ = max(0, int(row.get("occupancy") or 0))
+        peak_occupancy = max(peak_occupancy, occ)
+        try:
+            bucket = datetime.fromisoformat(str(row["minute_bucket"]).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        # Se existirem várias ROIs/classe no mesmo minuto, preferimos o maior valor
+        # persistido para evitar somas que dupliquem a ocupação visual do espaço.
+        occupancy_by_bucket[bucket] = max(occupancy_by_bucket.get(bucket, 0), occ)
+
+    if occupancy_by_bucket:
+        latest_bucket = max(occupancy_by_bucket.keys())
+        latest_bucket_iso = latest_bucket.isoformat()
+        latest_occupancy = occupancy_by_bucket[latest_bucket]
+
+    dwell_values = [
+        max(0, int(t.duration_seconds))
+        for t in trajectories
+        if t.duration_seconds is not None
+    ]
+    avg_dwell_s = (sum(dwell_values) / len(dwell_values)) if dwell_values else 0.0
+    max_dwell_s = max(dwell_values, default=0)
+
+    flow_insights = compute_flow_insights_payload(
+        hourly_entries=list(hourly.get("hourly_entries") or [0] * 24),
+        hourly_exits=list(hourly.get("hourly_exits") or [0] * 24),
+        entries=entries,
+        exits=exits,
+        occupancy_now=latest_occupancy,
+        queue_size=0,
+        queue_saturated=False,
+        queue_avg_wait_s=0.0,
+        loitering_now=0,
+        started_at=from_dt,
+        now=to_dt,
+    )
+    flow_insights["method"] = f"analytics_{flow_insights.get('method', 'session_rate')}"
+    flow_insights["disclaimer_pt"] = (
+        "Projeção baseada em agregados persistidos no banco para o período consultado; "
+        "não usa métricas instantâneas da sessão ao vivo."
+    )
+
+    return _json_cached(
+        {
+            "camera_id": camera_id,
+            "from": from_dt.isoformat(),
+            "to": to_dt.isoformat(),
+            "entries": entries,
+            "exits": exits,
+            "total_passages": entries + exits,
+            "latest_occupancy": latest_occupancy,
+            "peak_occupancy": peak_occupancy,
+            "latest_minute_bucket": latest_bucket_iso,
+            "avg_dwell_s": round(avg_dwell_s, 2),
+            "max_dwell_s": int(max_dwell_s),
+            "closed_trajectories": len(dwell_values),
+            "demographics_available": False,
+            "live_motion_available": False,
+            "flow_insights": flow_insights,
+        }
+    )
 
 
 @bp.post("/api/analytics/rebuild")

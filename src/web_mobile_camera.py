@@ -595,6 +595,8 @@ def create_app(args: argparse.Namespace) -> Flask:
       let stream = null;
       let running = false;
       let timer = null;
+      let frameRequestInFlight = false;
+      let frameRequestCtrl = null;
       const line = [{lx1}, {ly1}, {lx2}, {ly2}];
 
       function setMsg(t) {{ document.getElementById('msg').innerHTML = '<small>' + t + '</small>'; }}
@@ -644,34 +646,73 @@ def create_app(args: argparse.Namespace) -> Flask:
         ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
       }}
 
-      async function sendFrame() {{
+      function scheduleNextFrame(delay = 250) {{
         if (!running) return;
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        drawLine();
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
-        const r = await fetch('/api/process_frame', {{
-          method: 'POST',
-          headers: {{ 'Content-Type': 'application/json' }},
-          body: JSON.stringify({{ session_id: sessionId, image: dataUrl }})
-        }});
-        const j = await r.json();
-        if (!r.ok) {{ setMsg(j.error || 'erro'); return; }}
-        setCounts(j);
-        if (j.boxes) {{
-          for (const b of j.boxes) {{
-            let col = '#22c55e';
-            let tag = (b.cls ? (b.cls + ' ') : '') + 'id=' + b.id;
-            if (j.sex_overlay_available && j.show_sex_overlay && b.sex) {{
-              if (b.sex === 'female') {{ col = '#e11d8c'; tag += ' F'; }}
-              else if (b.sex === 'male') {{ col = '#2563eb'; tag += ' M'; }}
-              else {{ col = '#94a3b8'; tag += ' ?'; }}
-            }}
-            ctx.strokeStyle = col;
-            ctx.lineWidth = 2;
-            ctx.strokeRect(b.x1, b.y1, b.w, b.h);
-            ctx.fillStyle = col;
-            ctx.fillText(tag, b.x1 + 2, Math.max(12, b.y1 - 4));
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {{
+          timer = null;
+          void sendFrame();
+        }}, delay);
+      }}
+
+      async function sendFrame() {{
+        if (!running || frameRequestInFlight) return;
+        let nextDelay = 250;
+        frameRequestInFlight = true;
+        frameRequestCtrl = new AbortController();
+        try {{
+          if (!video.videoWidth || !video.videoHeight) {{
+            nextDelay = 120;
+            return;
           }}
+          if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {{
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+          }}
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          drawLine();
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+          const startedAt = performance.now();
+          const r = await fetch('/api/process_frame', {{
+            method: 'POST',
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: JSON.stringify({{ session_id: sessionId, image: dataUrl }}),
+            signal: frameRequestCtrl.signal,
+          }});
+          const j = await r.json().catch(() => ({{}}));
+          if (!running) return;
+          if (!r.ok) {{
+            nextDelay = 500;
+            setMsg(j.error || 'erro');
+            return;
+          }}
+          setCounts(j);
+          if (j.boxes) {{
+            for (const b of j.boxes) {{
+              let col = '#22c55e';
+              let tag = (b.cls ? (b.cls + ' ') : '') + 'id=' + b.id;
+              if (j.sex_overlay_available && j.show_sex_overlay && b.sex) {{
+                if (b.sex === 'female') {{ col = '#e11d8c'; tag += ' F'; }}
+                else if (b.sex === 'male') {{ col = '#2563eb'; tag += ' M'; }}
+                else {{ col = '#94a3b8'; tag += ' ?'; }}
+              }}
+              ctx.strokeStyle = col;
+              ctx.lineWidth = 2;
+              ctx.strokeRect(b.x1, b.y1, b.w, b.h);
+              ctx.fillStyle = col;
+              ctx.fillText(tag, b.x1 + 2, Math.max(12, b.y1 - 4));
+            }}
+          }}
+          const elapsed = performance.now() - startedAt;
+          nextDelay = Math.max(40, 250 - elapsed);
+        }} catch (e) {{
+          if (e && e.name === 'AbortError') return;
+          nextDelay = 700;
+          setMsg('Falha ao processar frame: ' + (e && e.message ? e.message : e));
+        }} finally {{
+          frameRequestCtrl = null;
+          frameRequestInFlight = false;
+          if (running) scheduleNextFrame(nextDelay);
         }}
       }}
 
@@ -695,7 +736,8 @@ def create_app(args: argparse.Namespace) -> Flask:
           canvas.width = video.videoWidth || 640;
           canvas.height = video.videoHeight || 480;
           running = true;
-          timer = setInterval(sendFrame, 250);
+          frameRequestInFlight = false;
+          scheduleNextFrame(0);
           setMsg('Camera ativa');
         }} catch (e) {{
           const protocol = location.protocol;
@@ -709,8 +751,13 @@ def create_app(args: argparse.Namespace) -> Flask:
 
       function stopCam() {{
         running = false;
-        if (timer) clearInterval(timer);
+        if (timer) clearTimeout(timer);
+        timer = null;
+        if (frameRequestCtrl) frameRequestCtrl.abort();
+        frameRequestCtrl = null;
+        frameRequestInFlight = false;
         if (stream) stream.getTracks().forEach(t => t.stop());
+        video.srcObject = null;
         stream = null;
         setMsg('Parado');
       }}

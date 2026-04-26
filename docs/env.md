@@ -125,7 +125,8 @@ YOLO_WEB_SOURCE=0
 # Skyline falham. Reactiva apenas se apontares a uma pagina .html valida da Skyline.
 # YOLO_SKYLINE_WEBCAM_PAGE=https://www.skylinewebcams.com/en/webcam/united-states/new-york/new-york/duffy-square-times-square.html
 
-YOLO_WEB_SOURCE_PRESETS=[{"id":"sky-1","label":"Skyline (m3u8)","url":"https://hd-auth.skylinewebcams.com/live.m3u8?a=dpcp0gh54eia46tcq5ip94gck7"}]
+# Preset Skyline: use pagina .html (o servidor obtem m3u8/token novo). NAO use hd-auth.../live.m3u8?a=... (expira).
+YOLO_WEB_SOURCE_PRESETS=[{"id":"sky-1","label":"Skyline — Plaza Mayor (Cusco)","url":"https://www.skylinewebcams.com/en/webcam/peru/cusco/cusco/plaza-mayor.html"}]
 # DVR Intelbras (exemplo): comente Skyline acima e descomente as linhas abaixo.
 # OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp|fflags;nobuffer|max_delay;500000
 # YOLO_WEB_SOURCE=rtsp://user:258258@192.168.20.220:554/cam/realmonitor?channel=1&subtype=1

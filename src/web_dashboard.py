@@ -266,10 +266,26 @@ def _resolve_initial_video_source(args: argparse.Namespace, presets: list[dict[s
     if s != "0":
         return s
     if presets:
-        u = (presets[0].get("url") or "").strip()
+        chosen = presets[0]
+        # Presets Skyline com .html sao mais estaveis que hd-auth...m3u8?a=TOKEN,
+        # que costuma expirar entre reinicios. Se houver pagina da Skyline guardada,
+        # preferi-la evita arrancar o painel ja em "Fonte offline".
+        first_url = str(chosen.get("url") or "").strip()
+        if is_skyline_hls_url(first_url):
+            for candidate in presets:
+                cand_url = str(candidate.get("url") or "").strip()
+                if is_skylinewebcams_webcam_page(cand_url):
+                    chosen = candidate
+                    print(
+                        "[web] Preset inicial Skyline: a preferir a pagina .html "
+                        "em vez do m3u8 temporario hd-auth.",
+                        flush=True,
+                    )
+                    break
+        u = str(chosen.get("url") or "").strip()
         if u:
             print(
-                "[web] YOLO_WEB_SOURCE/--source=0: a usar a URL do primeiro preset "
+                "[web] YOLO_WEB_SOURCE/--source=0: a usar um preset guardado "
                 "(webcam: ./scripts/run_web.sh <indice> ou remova/vazio YOLO_WEB_SOURCE_PRESETS).",
                 flush=True,
             )
@@ -2058,6 +2074,20 @@ def inference_loop(
                 "vid_stride": max(1, args.vid_stride),
                 "stream_buffer": args.stream_buffer,
             }
+            _is_http_hls = (
+                isinstance(source, str)
+                and source.lower().startswith(("http://", "https://"))
+                and ".m3u8" in source.lower()
+            )
+            if _is_http_hls and track_kw["stream_buffer"]:
+                # Em HLS ao vivo (especialmente Skyline), deixar o dataloader do
+                # Ultralytics enfileirar segmentos pode levar a stalls longos:
+                # a URL abre, mas o loop deixa de receber `result.orig_img`.
+                track_kw["stream_buffer"] = False
+                print(
+                    "[web] HLS ao vivo detectado: stream_buffer=False para reduzir stalls no tracker.",
+                    flush=True,
+                )
             if not _omit_track_classes_kw:
                 track_kw["classes"] = effective_class_ids
             if use_half:

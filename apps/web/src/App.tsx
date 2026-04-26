@@ -32,16 +32,17 @@ import { PolygonMetricsStrip } from "./components/PolygonMetricsStrip";
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
 export default function App() {
-  const { stats, status } = useStats();
-  const { data: flowInsights, error: flowInsightsErr } = useFlowInsights(
-    API_BASE,
-    status === "connected",
-  );
-  const config = useConfig();
   const [roiOpen, setRoiOpen]       = useState(false);
   const [sourceOpen, setSourceOpen] = useState(false);
   const [view, setView]             = useState<AppView>("pessoas");
   const [resetting, setResetting]   = useState(false);
+  const liveEnabled = view !== "relatorios";
+  const { stats, status } = useStats(liveEnabled);
+  const { data: flowInsights, error: flowInsightsErr } = useFlowInsights(
+    API_BASE,
+    liveEnabled && status === "connected",
+  );
+  const config = useConfig();
 
   const handleResetCounters = async () => {
     if (resetting) return;
@@ -478,7 +479,7 @@ export default function App() {
         />
       )}
 
-      <AlertsLayer />
+      {liveEnabled && <AlertsLayer />}
 
       {/* ── Footer ──────────────────────────────────────────────── */}
       <footer

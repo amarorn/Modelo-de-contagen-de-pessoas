@@ -275,4 +275,16 @@ def resolve_stream_source(raw: str) -> str:
             return resolve_skylinewebcams_page(page_override)
     if is_skylinewebcams_webcam_page(s):
         return resolve_skylinewebcams_page(s)
-    return _normalize_skyline_m3u8(s)
+    out = _normalize_skyline_m3u8(s)
+    if is_skyline_hls_url(out):
+        ok, msg = probe_skyline_hls_url(out, timeout=10.0)
+        if not ok:
+            print(
+                "[skyline] URL m3u8 directo (hd-auth...?a=...) invalido ou expirado"
+                + (f": {msg}" if msg else "")
+                + ". Em YOLO_WEB_SOURCE_PRESETS use a pagina .html da camara, ou defina "
+                "YOLO_SKYLINE_WEBCAM_PAGE com essa pagina.",
+                file=sys.stderr,
+                flush=True,
+            )
+    return out

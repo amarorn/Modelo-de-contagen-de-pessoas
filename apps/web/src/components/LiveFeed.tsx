@@ -14,9 +14,13 @@ interface Props {
   hero?: boolean;
 }
 
+function normalizeApiBase(raw: string): string {
+  return raw.trim().replace(/\/+$/, "");
+}
+
 function LiveFeedComponent({ apiBase, hero = false }: Props) {
   const [error, setError]           = useState(false);
-  const [loading, setLoading]       = useState(true);
+  const [loading, setLoading]       = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [reloadKey, setReloadKey]   = useState(() => Date.now());
 
@@ -25,6 +29,10 @@ function LiveFeedComponent({ apiBase, hero = false }: Props) {
   const [currentSource, setCurrentSource] = useState<string>("");
   const [activePresetId, setActivePresetId] = useState<string>("");
   const [switching, setSwitching]       = useState(false);
+  const [presetsReady, setPresetsReady] = useState(false);
+  /** Com lista de presets: não pedir /video_feed até o utilizador escolher uma câmera. */
+  const [feedEngaged, setFeedEngaged]   = useState(false);
+  const [sourceBootstrapErr, setSourceBootstrapErr] = useState<string | null>(null);
 
   const [showHeatmap, setShowHeatmap]             = useState(false);
   const [heatmapOpacity, setHeatmapOpacity]       = useState(0.6);
@@ -45,30 +53,79 @@ function LiveFeedComponent({ apiBase, hero = false }: Props) {
     if (import.meta.env.DEV && import.meta.env.VITE_DEV_FLASK_ORIGIN) {
       return String(import.meta.env.VITE_DEV_FLASK_ORIGIN).replace(/\/$/, "");
     }
-    return apiBase.replace(/\/$/, "");
+    return normalizeApiBase(apiBase);
   })();
   const src = `${feedOrigin}/video_feed?t=${reloadKey}`;
+  const resolvedApiBase = normalizeApiBase(apiBase);
+  const apiSourceDisplayUrl = resolvedApiBase ? `${resolvedApiBase}/api/source` : "/api/source";
 
-  /* ── Load presets on mount ─────────────────────────────────── */
+  /* ── Load presets on mount (timeout evita ficar preso se a API nao responder) ─ */
   useEffect(() => {
-    fetch(`${apiBase}/api/source`)
-      .then((r) => r.json())
-      .then((d) => {
-        setCurrentSource(d.source ?? "");
+    const base = normalizeApiBase(apiBase);
+    const url = base ? `${base}/api/source` : "/api/source";
+    const rawMs = import.meta.env.VITE_API_SOURCE_TIMEOUT_MS;
+    const timeoutMs =
+      Number.isFinite(Number(rawMs)) && Number(rawMs) > 2000 ? Number(rawMs) : 15000;
+    const ctrl = new AbortController();
+    const tid = window.setTimeout(() => ctrl.abort(), timeoutMs);
+    let discarded = false;
+
+    (async () => {
+      setSourceBootstrapErr(null);
+      try {
+        const r = await fetch(url, { signal: ctrl.signal, credentials: "omit" });
+        window.clearTimeout(tid);
+        if (discarded) return;
+        if (!r.ok) {
+          throw new Error(`HTTP ${r.status} em /api/source`);
+        }
+        const d = (await r.json()) as Record<string, unknown>;
+        setCurrentSource(typeof d.source === "string" ? d.source : "");
         setActivePresetId(typeof d.active_preset_id === "string" ? d.active_preset_id : "");
-        if (Array.isArray(d.presets)) setPresets(d.presets);
-      })
-      .catch(() => {});
+        const list = Array.isArray(d.presets) ? (d.presets as SourcePreset[]) : [];
+        setPresets(list);
+        const multi = list.length > 0;
+        setFeedEngaged(!multi);
+      } catch (e) {
+        window.clearTimeout(tid);
+        if (discarded) return;
+        const aborted =
+          (e instanceof DOMException && e.name === "AbortError") ||
+          (e instanceof Error && e.name === "AbortError");
+        if (aborted) {
+          setSourceBootstrapErr(
+            `Sem resposta de ${url} em ${Math.round(timeoutMs / 1000)}s. ` +
+              "Confirme `bash scripts/run_web.sh`, a porta WEB_PORT no .env da raiz e " +
+              "`VITE_API_BASE` em apps/web/.env (ou deixe vazio para usar o proxy do Vite na porta 5173).",
+          );
+        } else {
+          setSourceBootstrapErr(
+            e instanceof Error ? e.message : "Falha ao obter /api/source",
+          );
+        }
+        setPresets([]);
+        setFeedEngaged(true);
+      } finally {
+        if (!discarded) setPresetsReady(true);
+      }
+    })();
+
+    return () => {
+      discarded = true;
+      window.clearTimeout(tid);
+      ctrl.abort();
+    };
   }, [apiBase]);
 
   useEffect(() => {
+    if (!feedEngaged) return;
     setError(false);
     setLoading(true);
-  }, [src]);
+  }, [src, feedEngaged]);
 
   /* Se a inferencia nunca enviar JPEG (stream HLS preso) ou onLoad falhar, nao ficar eternamente a carregar. */
   useEffect(() => {
-    if (error || !loading) return;
+    if (!feedEngaged || error || !loading) return;
     const raw = import.meta.env.VITE_VIDEO_FEED_LOAD_TIMEOUT_MS;
     const ms = raw ? Number(raw) : 120000;
     const t = window.setTimeout(() => {
@@ -76,7 +133,7 @@ function LiveFeedComponent({ apiBase, hero = false }: Props) {
       setLoading(false);
     }, Number.isFinite(ms) && ms > 0 ? ms : 120000);
     return () => window.clearTimeout(t);
-  }, [src, loading, error]);
+  }, [src, loading, error, feedEngaged]);
 
   /* ── Active preset index ───────────────────────────────────── */
   const activeIdx = (() => {
@@ -105,6 +162,7 @@ function LiveFeedComponent({ apiBase, hero = false }: Props) {
         } else {
           setActivePresetId(presets[idx].id);
         }
+        setFeedEngaged(true);
         setReloadKey(Date.now());
       }
     } catch { /* ignore */ } finally {
@@ -124,10 +182,11 @@ function LiveFeedComponent({ apiBase, hero = false }: Props) {
 
   /* ── Reload ────────────────────────────────────────────────── */
   const handleReload = useCallback(() => {
+    if (!feedEngaged) return;
     setError(false);
     setLoading(true);
     setReloadKey(Date.now());
-  }, []);
+  }, [feedEngaged]);
 
   /* ── Fullscreen ────────────────────────────────────────────── */
   const toggleFullscreen = useCallback(async () => {
@@ -153,8 +212,6 @@ function LiveFeedComponent({ apiBase, hero = false }: Props) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [toggleFullscreen]);
-
-  const activeLabel = activeIdx >= 0 ? presets[activeIdx].label : null;
 
   return (
     <div
@@ -223,14 +280,16 @@ function LiveFeedComponent({ apiBase, hero = false }: Props) {
           {/* ── Reload button ── */}
           <button
             onClick={handleReload}
-            title="Recarregar stream"
+            title={feedEngaged ? "Recarregar stream" : "Seleccione uma câmera para iniciar o vídeo"}
+            disabled={!feedEngaged}
             style={{
               background: "var(--bg-surface)",
               border: "1px solid var(--border)",
               borderRadius: "var(--radius-sm)",
-              cursor: "pointer",
+              cursor: feedEngaged ? "pointer" : "not-allowed",
               padding: "4px 8px",
-              color: "var(--text-muted)",
+              color: feedEngaged ? "var(--text-muted)" : "var(--text-muted)",
+              opacity: feedEngaged ? 1 : 0.4,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -352,19 +411,32 @@ function LiveFeedComponent({ apiBase, hero = false }: Props) {
             />
           )}
 
-          {/* ── LIVE badge ── */}
-          <div className="badge badge-red" style={{ fontSize: 10, padding: "2px 7px" }}>
+          {/* ── LIVE / STANDBY badge ── */}
+          <div
+            className={feedEngaged ? "badge badge-red" : "badge"}
+            style={{
+              fontSize: 10,
+              padding: "2px 7px",
+              ...(feedEngaged
+                ? {}
+                : {
+                    border: "1px solid var(--border)",
+                    background: "var(--bg-surface)",
+                    color: "var(--text-secondary)",
+                  }),
+            }}
+          >
             <span
               style={{
                 width: 5,
                 height: 5,
                 borderRadius: "50%",
-                background: "var(--red)",
+                background: feedEngaged ? "var(--red)" : "var(--text-muted)",
                 display: "inline-block",
-                animation: "pulse 0.9s infinite",
+                animation: feedEngaged ? "pulse 0.9s infinite" : "none",
               }}
             />
-            LIVE
+            {feedEngaged ? "LIVE" : "STANDBY"}
           </div>
 
           {/* ── Fullscreen toggle ── */}
@@ -435,8 +507,20 @@ function LiveFeedComponent({ apiBase, hero = false }: Props) {
           overflow: "hidden",
         }}
       >
-        {/* Loading state */}
-        {loading && !error && (
+        {(!presetsReady || sourceBootstrapErr) && (
+          <PresetsBootstrapPlaceholder
+            error={sourceBootstrapErr}
+            apiUrl={apiSourceDisplayUrl}
+            onDismiss={sourceBootstrapErr ? () => setSourceBootstrapErr(null) : undefined}
+          />
+        )}
+
+        {presetsReady && !feedEngaged && presets.length > 0 && (
+          <IdleStandbyPlaceholder presetCount={presets.length} />
+        )}
+
+        {/* Loading state (só após escolha de câmera ou fonte única) */}
+        {feedEngaged && loading && !error && (
           <div
             style={{
               position: "absolute",
@@ -464,9 +548,9 @@ function LiveFeedComponent({ apiBase, hero = false }: Props) {
           </div>
         )}
 
-        {error ? (
+        {feedEngaged && error ? (
           <ErrorState onRetry={handleReload} />
-        ) : (
+        ) : feedEngaged ? (
           <img
             ref={imgRef}
             src={src}
@@ -481,20 +565,20 @@ function LiveFeedComponent({ apiBase, hero = false }: Props) {
               ...(isFullscreen ? { maxHeight: "100vh" } : {}),
             }}
           />
-        )}
+        ) : null}
 
         {/* Heatmap canvas overlay — pessoas */}
-        {showHeatmap && !loading && !error && (
+        {feedEngaged && showHeatmap && !loading && !error && (
           <HeatmapCanvas payload={heatmapPayload} opacity={heatmapOpacity} />
         )}
 
         {/* Heatmap canvas overlay — veículos */}
-        {showVehicleHeatmap && !loading && !error && (
+        {feedEngaged && showVehicleHeatmap && !loading && !error && (
           <HeatmapCanvas payload={vehicleHeatmapPayload} opacity={vehicleHeatmapOpacity} />
         )}
 
         {/* Corner bracket decorations */}
-        {!isFullscreen && !loading && !error && (
+        {feedEngaged && !isFullscreen && !loading && !error && (
           <>
             <div className="corner-bracket" />
             <div className="corner-bracket-br" />
@@ -859,6 +943,255 @@ function CameraPicker({ presets, activeIdx, switching, onSwitch, onPrev, onNext 
 
 export const LiveFeed = memo(LiveFeedComponent);
 LiveFeed.displayName = "LiveFeed";
+
+function PresetsBootstrapPlaceholder({
+  error,
+  apiUrl,
+  onDismiss,
+}: {
+  error: string | null;
+  apiUrl: string;
+  onDismiss?: () => void;
+}) {
+  return (
+    <div
+      style={{
+        position: "absolute",
+        inset: 0,
+        zIndex: 12,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 20,
+        background:
+          "radial-gradient(ellipse 85% 70% at 50% 42%, rgba(255,149,0,0.07) 0%, transparent 55%), radial-gradient(ellipse 60% 50% at 50% 100%, rgba(0,180,216,0.05) 0%, transparent 45%), #050507",
+      }}
+    >
+      {!error && (
+        <div
+          style={{
+            width: 48,
+            height: 48,
+            borderRadius: "50%",
+            border: "2px solid rgba(255,255,255,0.06)",
+            borderTopColor: "var(--amber)",
+            animation: "spin 0.85s linear infinite",
+          }}
+        />
+      )}
+      <div style={{ textAlign: "center", maxWidth: 420, padding: "0 24px" }}>
+        <div
+          style={{
+            fontFamily: "var(--font-display)",
+            fontSize: 11,
+            fontWeight: 700,
+            letterSpacing: "0.2em",
+            textTransform: "uppercase",
+            color: "var(--text-secondary)",
+            marginBottom: 8,
+          }}
+        >
+          VisionCount
+        </div>
+        <div style={{ fontFamily: "var(--font-sans)", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.55 }}>
+          {error ? (
+            <>
+              <span style={{ color: "var(--red)", fontWeight: 600 }}>API inacessível</span>
+              <div
+                style={{
+                  marginTop: 12,
+                  padding: "12px 14px",
+                  borderRadius: "var(--radius-md)",
+                  border: "1px solid rgba(239,68,68,0.35)",
+                  background: "var(--red-dim)",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 11,
+                  color: "var(--text-secondary)",
+                  textAlign: "left",
+                  wordBreak: "break-word",
+                }}
+              >
+                {error}
+              </div>
+              <div style={{ marginTop: 14, fontSize: 12, color: "var(--text-secondary)" }}>
+                Pedido: <span style={{ color: "var(--amber)" }}>{apiUrl}</span>
+              </div>
+              {onDismiss && (
+                <button
+                  type="button"
+                  onClick={onDismiss}
+                  style={{
+                    marginTop: 18,
+                    padding: "10px 22px",
+                    borderRadius: "var(--radius-sm)",
+                    border: "1px solid var(--border-accent)",
+                    background: "var(--amber-dim)",
+                    color: "var(--amber)",
+                    fontFamily: "var(--font-display)",
+                    fontSize: 12,
+                    fontWeight: 700,
+                    letterSpacing: "0.1em",
+                    textTransform: "uppercase",
+                    cursor: "pointer",
+                  }}
+                >
+                  Fechar e tentar o vídeo
+                </button>
+              )}
+            </>
+          ) : (
+            "A preparar o painel de fontes…"
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function IdleStandbyPlaceholder({ presetCount }: { presetCount: number }) {
+  return (
+    <div
+      style={{
+        position: "absolute",
+        inset: 0,
+        zIndex: 1,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 28,
+        textAlign: "center",
+        overflow: "hidden",
+        background: `
+          radial-gradient(ellipse 100% 80% at 50% -10%, rgba(255,149,0,0.12) 0%, transparent 50%),
+          radial-gradient(ellipse 70% 55% at 80% 60%, rgba(0,180,216,0.06) 0%, transparent 42%),
+          radial-gradient(ellipse 55% 45% at 15% 75%, rgba(129,140,248,0.05) 0%, transparent 40%),
+          linear-gradient(165deg, #0a0a0f 0%, #050507 48%, #08080e 100%)
+        `,
+      }}
+    >
+      <div
+        aria-hidden
+        style={{
+          position: "absolute",
+          inset: "12% 8%",
+          border: "1px solid rgba(255,149,0,0.12)",
+          borderRadius: 12,
+          pointerEvents: "none",
+          boxShadow: "inset 0 0 80px rgba(0,0,0,0.35)",
+        }}
+      />
+      <div
+        aria-hidden
+        style={{
+          position: "absolute",
+          width: 220,
+          height: 220,
+          borderRadius: "50%",
+          border: "1px solid rgba(255,255,255,0.04)",
+          top: "50%",
+          left: "50%",
+          transform: "translate(-50%, -52%)",
+          pointerEvents: "none",
+        }}
+      />
+      <div
+        aria-hidden
+        style={{
+          position: "absolute",
+          width: 140,
+          height: 140,
+          borderRadius: "50%",
+          border: "1px solid rgba(255,149,0,0.08)",
+          top: "50%",
+          left: "50%",
+          transform: "translate(-50%, -52%)",
+          pointerEvents: "none",
+        }}
+      />
+
+      <div
+        style={{
+          position: "relative",
+          width: 72,
+          height: 72,
+          marginBottom: 26,
+          borderRadius: 18,
+          background: "linear-gradient(145deg, rgba(255,149,0,0.18) 0%, rgba(255,149,0,0.04) 100%)",
+          border: "1px solid rgba(255,149,0,0.25)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          boxShadow: "0 20px 48px rgba(0,0,0,0.45), 0 0 0 1px rgba(255,255,255,0.04)",
+        }}
+      >
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="var(--amber)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M23 7l-7 5 7 5V7z" />
+          <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+          <path d="M5 12h6" opacity="0.45" />
+        </svg>
+      </div>
+
+      <h2
+        style={{
+          position: "relative",
+          fontFamily: "var(--font-display)",
+          fontSize: "clamp(1.05rem, 2.2vw, 1.35rem)",
+          fontWeight: 700,
+          letterSpacing: "0.12em",
+          textTransform: "uppercase",
+          color: "var(--text-primary)",
+          marginBottom: 12,
+          lineHeight: 1.35,
+        }}
+      >
+        Monitor em espera
+      </h2>
+      <p
+        style={{
+          position: "relative",
+          fontFamily: "var(--font-sans)",
+          fontSize: 14,
+          color: "var(--text-secondary)",
+          maxWidth: 400,
+          lineHeight: 1.65,
+          marginBottom: 22,
+        }}
+      >
+        O vídeo só liga depois de escolher uma câmera. Use o menu <strong style={{ color: "var(--amber)" }}>acima</strong>{" "}
+        (ícone de câmera) e seleccione uma das {presetCount} fonte{presetCount !== 1 ? "s" : ""} disponíve{presetCount !== 1 ? "is" : "l"}.
+      </p>
+      <div
+        style={{
+          position: "relative",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 10,
+          padding: "10px 18px",
+          borderRadius: "var(--radius-md)",
+          background: "rgba(255,149,0,0.06)",
+          border: "1px solid rgba(255,149,0,0.2)",
+          fontFamily: "var(--font-mono)",
+          fontSize: 11,
+          color: "var(--text-muted)",
+          letterSpacing: "0.04em",
+        }}
+      >
+        <span
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: "50%",
+            background: "var(--cyan)",
+            opacity: 0.85,
+          }}
+        />
+        Nenhum pedido ao servidor de vídeo até confirmar a fonte
+      </div>
+    </div>
+  );
+}
 
 function LoadingSpinner() {
   return (

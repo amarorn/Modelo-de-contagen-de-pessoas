@@ -136,10 +136,11 @@ function ensureVisibilityHandler(): void {
   });
 }
 
-export function useStats() {
+export function useStats(enabled: boolean = true) {
   const [, setVersion] = useState(0);
 
   useEffect(() => {
+    if (!enabled) return;
     ensureVisibilityHandler();
     refCount += 1;
     if (refCount === 1) startPolling();
@@ -150,7 +151,7 @@ export function useStats() {
       refCount -= 1;
       if (refCount === 0) stopPolling();
     };
-  }, []);
+  }, [enabled]);
 
   return { stats: cachedStats, status: cachedStatus };
 }
