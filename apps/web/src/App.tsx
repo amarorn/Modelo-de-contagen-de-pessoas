@@ -22,6 +22,7 @@ import { HeatmapCard } from "./components/HeatmapCard";
 import { ZonesPage } from "./pages/Zones";
 import { VehiclesDashboard } from "./pages/VehiclesDashboard";
 import { AnalyticsDashboard } from "./pages/AnalyticsDashboard";
+import { ReportsDashboard } from "./pages/ReportsDashboard";
 import { ProfileSelector } from "./components/ProfileSelector";
 import { AuditLogPanel } from "./components/AuditLogPanel";
 import { FlowInsightsCard } from "./components/FlowInsightsCard";
@@ -89,6 +90,8 @@ export default function App() {
         <VehiclesDashboard apiBase={API_BASE} />
       ) : view === "analytics" ? (
         <AnalyticsDashboard onBack={() => setView("pessoas")} />
+      ) : view === "relatorios" ? (
+        <ReportsDashboard apiBase={API_BASE} />
       ) : (
         <main
           style={{

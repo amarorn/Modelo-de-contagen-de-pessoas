@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sqlite3 data/contagem.db \".tables\")",
+      "Bash(python3 -c ' *)",
+      "Bash(xargs ls *)"
+    ]
+  }
+}
