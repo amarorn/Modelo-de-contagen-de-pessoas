@@ -21,6 +21,7 @@ import { AlertsLayer } from "./components/AlertToast";
 import { HeatmapCard } from "./components/HeatmapCard";
 import { ZonesPage } from "./pages/Zones";
 import { VehiclesDashboard } from "./pages/VehiclesDashboard";
+import { ReportsDashboard } from "./pages/ReportsDashboard";
 import { ProfileSelector } from "./components/ProfileSelector";
 import { AuditLogPanel } from "./components/AuditLogPanel";
 import { FlowInsightsCard } from "./components/FlowInsightsCard";
@@ -86,6 +87,8 @@ export default function App() {
         <SettingsDashboard apiBase={API_BASE} onBack={() => setView("pessoas")} />
       ) : view === "veiculos" ? (
         <VehiclesDashboard apiBase={API_BASE} />
+      ) : view === "relatorios" ? (
+        <ReportsDashboard apiBase={API_BASE} />
       ) : (
         <main
           style={{
