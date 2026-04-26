@@ -23,7 +23,7 @@ export type AlertsResponse = {
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 // 900ms era agressivo demais e inflacionava /api/alerts; 2000ms e suficiente
 // para toasts (cooldown do backend ja e 3s por alerta).
-const POLL_INTERVAL_MS = 2000;
+const POLL_INTERVAL_MS = 2500;
 const MAX_TOASTS = 6;
 const TOAST_TTL_MS = 7000;
 

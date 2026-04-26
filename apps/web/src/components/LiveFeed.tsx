@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { HeatmapCanvas } from "./HeatmapCanvas";
 import { useHeatmap } from "../hooks/useHeatmap";
 import { useVehicleHeatmap } from "../hooks/useVehicleHeatmap";
@@ -14,7 +14,7 @@ interface Props {
   hero?: boolean;
 }
 
-export function LiveFeed({ apiBase, hero = false }: Props) {
+function LiveFeedComponent({ apiBase, hero = false }: Props) {
   const [error, setError]           = useState(false);
   const [loading, setLoading]       = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -856,6 +856,8 @@ function CameraPicker({ presets, activeIdx, switching, onSwitch, onPrev, onNext 
     </div>
   );
 }
+
+export const LiveFeed = memo(LiveFeedComponent);
 
 function LoadingSpinner() {
   return (

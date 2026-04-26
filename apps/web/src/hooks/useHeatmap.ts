@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { HeatmapPayload } from "../types/api";
 
-const POLL_MS = 2000;
+const POLL_MS = 3000;
 
 export function useHeatmap(apiBase: string, enabled: boolean) {
   const [payload, setPayload] = useState<HeatmapPayload | null>(null);

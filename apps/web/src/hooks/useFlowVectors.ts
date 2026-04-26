@@ -23,7 +23,7 @@ export function useFlowVectors(apiBase: string, enabled: boolean) {
         // silently ignore — transient network error
       } finally {
         if (!cancelled) {
-          timerRef.current = setTimeout(poll, 2000);
+          timerRef.current = setTimeout(poll, 3500);
         }
       }
     };

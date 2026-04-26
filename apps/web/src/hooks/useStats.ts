@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import type { ConnectionStatus, Stats } from "../types/api";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
-const POLL_INTERVAL_MS = 2000;
+const _pollRaw = Number(import.meta.env.VITE_STATS_POLL_MS);
+const POLL_INTERVAL_MS =
+  Number.isFinite(_pollRaw) && _pollRaw >= 1500 ? _pollRaw : 3000;
 
 export const EMPTY_STATS: Stats = {
   entries: 0,
@@ -74,6 +76,7 @@ const listeners = new Set<() => void>();
 let timer: ReturnType<typeof setInterval> | null = null;
 let inflight = false;
 let refCount = 0;
+let lastStatsSnapshot = "";
 
 const isHidden = (): boolean =>
   typeof document !== "undefined" && document.visibilityState === "hidden";
@@ -82,16 +85,28 @@ async function fetchOnce(): Promise<void> {
   if (inflight) return;
   if (isHidden()) return;
   inflight = true;
+  let notify = false;
   try {
     const res = await fetch(`${API_BASE}/api/stats`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    cachedStats = (await res.json()) as Stats;
+    const next = (await res.json()) as Stats;
+    const snap = JSON.stringify(next);
+    if (snap !== lastStatsSnapshot || cachedStatus !== "connected") {
+      lastStatsSnapshot = snap;
+      cachedStats = next;
+      notify = true;
+    }
     cachedStatus = "connected";
   } catch {
+    if (cachedStatus !== "error") {
+      notify = true;
+    }
     cachedStatus = "error";
   } finally {
     inflight = false;
-    listeners.forEach((fn) => fn());
+    if (notify) {
+      listeners.forEach((fn) => fn());
+    }
   }
 }
 
