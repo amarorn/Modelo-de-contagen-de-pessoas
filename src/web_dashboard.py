@@ -41,6 +41,16 @@ try:
 except ImportError:
     pass
 
+
+def _configure_opencv_videoio_priorities() -> None:
+    """Antes de importar cv2: no Linux, Obsensor pode ser escolhido antes de V4L2 e spammar o stderr."""
+    if not sys.platform.startswith("linux"):
+        return
+    os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_OBSENSOR", "0")
+
+
+_configure_opencv_videoio_priorities()
+
 # Antes de cv2: FFmpeg/libav em streams HLS pode imprimir "non-existing SPS" (join a meio do GOP); nao e fatal.
 if os.environ.get("YOLO_WEB_VERBOSE", "").strip() != "1":
     os.environ.setdefault("AV_LOG_LEVEL", "error")
@@ -423,6 +433,8 @@ class SharedState:
         self.last_frame_jpeg: bytes | None = None
         # time.monotonic() do ultimo frame JPEG escrito pelo inference_loop (watchdog + MJPEG stale).
         self.last_frame_mono: float = 0.0
+        # Ultimo avanco do iterador model.track (incl. orig_img None entre segmentos HLS). Watchdog usa max(mono, tick).
+        self.last_track_tick_mono: float = 0.0
         # Lock dedicado ao JPEG: o inference_loop segura `lock` durante processamento pesado por frame;
         # /video_feed e o watchdog leem `last_frame_*` sem competir com esse lock (evita MJPEG "congelado").
         self.frame_output_lock = threading.Lock()
@@ -533,6 +545,12 @@ class SharedState:
         self.cam_drift_score: float = 0.0  # 0-1 severity
         self.cam_drift_reason: str = ""
         self.cam_drift_baseline_ready: bool = False
+        # Smooth display (YOLO_SMOOTH_DISPLAY=1): segundo VideoCapture lê à FPS nativa da câmera
+        # e composta o último diff de overlay (int16) do YOLO por cima de cada frame bruto.
+        # O loop YOLO NÃO escreve em last_frame_jpeg quando smooth display está activo —
+        # só a thread de display escreve, evitando o tremido causado por dois fundos alternados.
+        self.smooth_display_overlay_i16: "np.ndarray | None" = None
+        self.smooth_display_overlay_lock = threading.Lock()
 
 
 def _sync_track_flags_from_active(
@@ -1222,12 +1240,16 @@ def _overlay_text(
     live_text: str,
     fw: int,
     fh: int,
+    infer_fps: float = 0.0,
 ) -> None:
     """Textos de contagem no canto superior esquerdo com fundo escuro."""
     pad = 10
+    # Hershey nao desenha acentos (aparecem como "?"); manter ASCII.
+    _fps = f"FPS infer. {infer_fps:.1f}" if infer_fps > 0.05 else "FPS infer. --"
     for i, (line, scale, thick) in enumerate([
-        (text,      0.85, 2),
+        (text, 0.85, 2),
         (live_text, 0.58, 1),
+        (_fps, 0.62, 1),
     ]):
         (tw, th), _ = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, scale, thick)
         y = pad + (i * (th + 10)) + th
@@ -1627,9 +1649,18 @@ def _camera_unavailable_message() -> str:
 
 def validate_source(source: str | int) -> None:
     if isinstance(source, int):
-        cap = cv2.VideoCapture(source)
-        ok = cap.isOpened()
-        cap.release()
+        cap: cv2.VideoCapture | None = None
+        try:
+            if sys.platform.startswith("linux") and hasattr(cv2, "CAP_V4L2"):
+                cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
+            if cap is None or not cap.isOpened():
+                if cap is not None:
+                    cap.release()
+                cap = cv2.VideoCapture(source)
+            ok = bool(cap.isOpened())
+        finally:
+            if cap is not None:
+                cap.release()
         if not ok:
             raise ConnectionError(_camera_unavailable_message())
 
@@ -1981,7 +2012,9 @@ def inference_loop(
             except Exception as exc:
                 with shared.lock:
                     shared.last_error = f"Fonte inválida: {exc}"
-                time.sleep(2.0)
+                # Indice de camara inexistente: validate_source falha em loop curto -> Obsensor/OpenCV no stderr.
+                _retry_s = 15.0 if isinstance(source, int) else 2.0
+                time.sleep(_retry_s)
                 continue
 
             print(f"[web] Abrindo fonte: {source!r}")
@@ -2097,6 +2130,94 @@ def inference_loop(
             if args.agnostic_nms:
                 track_kw["agnostic_nms"] = True
 
+            # ── Smooth display: interpolação temporal entre frames YOLO consecutivos ─────────
+            # Com YOLO a 12.5 fps o MJPEG atualiza só 12.5×/s. Quando YOLO_SMOOTH_DISPLAY=1,
+            # uma thread faz addWeighted entre os dois últimos frames brutos YOLO (já em memória)
+            # e composta o diff de overlay por cima — ~30 fps sem abrir segundo VideoCapture,
+            # sem problemas de sincronia em HLS, sem consumo extra de banda.
+            # A exibição fica 1 intervalo YOLO atrás (≈80 ms) para poder interpolar "para frente".
+            _smooth_disp: bool = os.environ.get("YOLO_SMOOTH_DISPLAY", "0").strip().lower() in (
+                "1", "true", "yes", "on",
+            )
+            _smooth_disp_stop = threading.Event()
+            _smooth_disp_thread: threading.Thread | None = None
+            if _smooth_disp:
+                try:
+                    _jpeg_q_smooth = max(40, min(95, int(
+                        os.environ.get("YOLO_WEB_JPEG_QUALITY", "80").strip() or "80"
+                    )))
+                except ValueError:
+                    _jpeg_q_smooth = 80
+
+                def _make_smooth_fn(
+                    _src=source,
+                    _stop=_smooth_disp_stop,
+                    _jq=_jpeg_q_smooth,
+                ):
+                    def _fn() -> None:
+                        try:
+                            if (
+                                isinstance(_src, int)
+                                and sys.platform.startswith("linux")
+                                and hasattr(cv2, "CAP_V4L2")
+                            ):
+                                _cap = cv2.VideoCapture(_src, cv2.CAP_V4L2)
+                                if not _cap.isOpened():
+                                    _cap.release()
+                                    _cap = cv2.VideoCapture(_src)
+                            else:
+                                _cap = cv2.VideoCapture(_src)
+                        except Exception:
+                            return
+                        if not _cap.isOpened():
+                            print(
+                                f"[web] smooth-display: nao foi possivel abrir {_src!r}",
+                                flush=True,
+                            )
+                            return
+                        print(
+                            f"[web] smooth-display: capture aberto ({_src!r})",
+                            flush=True,
+                        )
+                        # cap.read() bloqueia naturalmente à FPS do stream — não precisamos de
+                        # sleep extra; a câmera/HLS controla o ritmo de entrega de frames.
+                        while not _stop.is_set():
+                            _ok_r, _raw = _cap.read()
+                            if not _ok_r:
+                                time.sleep(0.05)
+                                continue
+                            with shared.smooth_display_overlay_lock:
+                                _ov = shared.smooth_display_overlay_i16
+                            if _ov is not None:
+                                try:
+                                    if _ov.shape[:2] == _raw.shape[:2]:
+                                        _disp = np.clip(
+                                            _raw.astype(np.int16) + _ov, 0, 255
+                                        ).astype(np.uint8)
+                                    else:
+                                        _disp = _raw
+                                except Exception:
+                                    _disp = _raw
+                            else:
+                                _disp = _raw
+                            _ok_e, _enc = cv2.imencode(
+                                ".jpg", _disp, [int(cv2.IMWRITE_JPEG_QUALITY), _jq]
+                            )
+                            if _ok_e:
+                                with shared.frame_output_lock:
+                                    shared.last_frame_jpeg = _enc.tobytes()
+                                    shared.last_frame_mono = time.monotonic()
+                        _cap.release()
+                        print("[web] smooth-display: encerrado.", flush=True)
+                    return _fn
+
+                _smooth_disp_thread = threading.Thread(
+                    target=_make_smooth_fn(),
+                    daemon=True,
+                    name="smooth-display",
+                )
+                _smooth_disp_thread.start()
+
             stream = model.track(**track_kw)
             try:
                 _np_h_frac = float(os.environ.get("YOLO_NONPERSON_MIN_H_FRAC", "0.20").strip() or "0.20")
@@ -2115,10 +2236,29 @@ def inference_loop(
             blur_ema: float = 0.0
             _frames_received = 0
             _synthetic_id_warned = False
+            try:
+                _blur_sample_every = int(os.environ.get("YOLO_BLUR_SAMPLE_EVERY", "1").strip() or "1")
+            except ValueError:
+                _blur_sample_every = 1
+            _blur_sample_every = max(1, min(30, _blur_sample_every))
+            try:
+                _sex_ui_stride = int(os.environ.get("YOLO_SEX_UI_STRIDE", "1").strip() or "1")
+            except ValueError:
+                _sex_ui_stride = 1
+            _sex_ui_stride = max(1, min(12, _sex_ui_stride))
+            if _blur_sample_every > 1 or _sex_ui_stride > 1:
+                print(
+                    f"[web] Desempenho: YOLO_BLUR_SAMPLE_EVERY={_blur_sample_every} "
+                    f"YOLO_SEX_UI_STRIDE={_sex_ui_stride} (1=desligado)",
+                    flush=True,
+                )
 
             for result in stream:
                 if stop_event.is_set():
                     break
+                _tick_now = time.monotonic()
+                with shared.frame_output_lock:
+                    shared.last_track_tick_mono = _tick_now
                 with shared.lock:
                     if shared.source_changed or shared.track_classes_changed:
                         break
@@ -2126,6 +2266,9 @@ def inference_loop(
                 frame = result.orig_img
                 if frame is None:
                     continue
+                # Cópia do frame antes do desenho — usada para calcular o diff de overlay.
+                # Feita apenas quando smooth display está activo para evitar custo desnecessário.
+                _smooth_orig: "np.ndarray | None" = frame.copy() if _smooth_disp else None
 
                 _frames_received += 1
                 fh, fw = frame.shape[:2]
@@ -2133,9 +2276,10 @@ def inference_loop(
                     with shared.lock:
                         shared.frame_w = fw
                         shared.frame_h = fh
-                _blur_gray = cv2.cvtColor(cv2.resize(frame, (160, 90)), cv2.COLOR_BGR2GRAY)
-                _blur_score = float(cv2.Laplacian(_blur_gray, cv2.CV_64F).var())
-                blur_ema = blur_ema * 0.9 + _blur_score * 0.1 if blur_ema > 0 else _blur_score
+                if _frames_received % _blur_sample_every == 0 or blur_ema <= 0.0:
+                    _blur_gray = cv2.cvtColor(cv2.resize(frame, (160, 90)), cv2.COLOR_BGR2GRAY)
+                    _blur_score = float(cv2.Laplacian(_blur_gray, cv2.CV_64F).var())
+                    blur_ema = blur_ema * 0.9 + _blur_score * 0.1 if blur_ema > 0 else _blur_score
                 with shared.lock:
                     _hm_cam_id = shared.active_preset_id or "default"
                 if _hm_cam_id != _last_hotspot_cam:
@@ -2675,14 +2819,18 @@ def inference_loop(
                         and sex_clf.enabled
                         and det_cls == person_class_id
                     ):
-                        raw_sx = sex_clf.classify_crop(
-                            frame, (float(xa), float(ya), float(xb), float(yb))
-                        )
-                        sex_bucket = (
-                            sex_smoother.update(track_id, raw_sx)
-                            if sex_smoother is not None
-                            else raw_sx
-                        )
+                        if _frames_received % _sex_ui_stride == 0:
+                            raw_sx = sex_clf.classify_crop(
+                                frame, (float(xa), float(ya), float(xb), float(yb))
+                            )
+                            sex_bucket = (
+                                sex_smoother.update(track_id, raw_sx)
+                                if sex_smoother is not None
+                                else raw_sx
+                            )
+                        elif sex_smoother is not None:
+                            _lb = sex_smoother.last(track_id)
+                            sex_bucket = _lb if _lb != "unknown" else None
 
                     if (
                         is_person
@@ -3175,7 +3323,7 @@ def inference_loop(
                                         fw, fh,
                                         inverted=_inv,
                                     )
-                    _overlay_text(frame, text, live_text, fw, fh)
+                    _overlay_text(frame, text, live_text, fw, fh, ema_infer_fps)
                 elif count_mode == "polygon":
                     cv2.putText(
                         frame,
@@ -3187,18 +3335,36 @@ def inference_loop(
                         2,
                         lineType=cv2.LINE_AA,
                     )
-                    _overlay_text(frame, text, live_text, fw, fh)
+                    _overlay_text(frame, text, live_text, fw, fh, ema_infer_fps)
                 else:
                     if show_roi_ui:
                         _draw_count_line(frame, x1, y1, x2, y2)
-                    _overlay_text(frame, text, live_text, fw, fh)
+                    _overlay_text(frame, text, live_text, fw, fh, ema_infer_fps)
 
-                ok, encoded = cv2.imencode(".jpg", frame)
-                if ok:
-                    _jpeg = encoded.tobytes()
-                    with shared.frame_output_lock:
-                        shared.last_frame_jpeg = _jpeg
-                        shared.last_frame_mono = time.monotonic()
+                # Calcula e armazena o diff int16 (frame anotado − frame original) para a
+                # thread de display suave. Isso captura TODOS os desenhos (caixas, texto, ROI)
+                # e permite compô-los sobre frames brutos mais recentes a 30 fps.
+                if _smooth_disp and _smooth_orig is not None and _smooth_orig.shape == frame.shape:
+                    try:
+                        _ov_i16 = frame.astype(np.int16) - _smooth_orig.astype(np.int16)
+                        with shared.smooth_display_overlay_lock:
+                            shared.smooth_display_overlay_i16 = _ov_i16
+                    except Exception:
+                        pass
+
+                # Quando smooth display está activo, só a thread de display escreve em
+                # last_frame_jpeg — evita tremido causado por dois fundos alternados.
+                if not _smooth_disp:
+                    ok, encoded = cv2.imencode(".jpg", frame)
+                    if ok:
+                        _jpeg = encoded.tobytes()
+                        with shared.frame_output_lock:
+                            shared.last_frame_jpeg = _jpeg
+                            shared.last_frame_mono = time.monotonic()
+            # Para a thread de display suave antes de reconectar a fonte.
+            _smooth_disp_stop.set()
+            if _smooth_disp_thread is not None and _smooth_disp_thread.is_alive():
+                _smooth_disp_thread.join(timeout=3.0)
 
             # Fim do for: se saímos sem nenhum frame e a fonte não foi trocada,
             # a URL/câmera falhou ao abrir. Registra erro e faz backoff para não
@@ -5050,18 +5216,40 @@ def create_app(
         except ValueError:
             stale_s = 8.0
         stale_s = max(2.0, stale_s)
+        _burst_new = os.environ.get("YOLO_MJPEG_BURST_NEW", "1").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        try:
+            _burst_cap = float(os.environ.get("YOLO_MJPEG_BURST_CAP_FPS", "35").strip() or "35")
+        except ValueError:
+            _burst_cap = 35.0
+        _burst_cap = max(10.0, min(60.0, _burst_cap))
+        _min_burst = 1.0 / _burst_cap
 
         def gen() -> bytes:
             _last_emit = 0.0
+            _last_sent_mono = 0.0
             while True:
                 now = time.perf_counter()
-                wait = _min_interval - (now - _last_emit)
-                if wait > 0:
-                    time.sleep(wait)
                 with shared.frame_output_lock:
                     frame = shared.last_frame_jpeg
                     last_mono = shared.last_frame_mono
                 is_stale = last_mono > 0.0 and (time.monotonic() - last_mono) >= stale_s
+                _fresh = (
+                    _burst_new
+                    and not is_stale
+                    and frame is not None
+                    and last_mono > _last_sent_mono + 1e-6
+                )
+                if _fresh:
+                    wait = max(0.0, _min_burst - (now - _last_emit))
+                else:
+                    wait = max(0.0, _min_interval - (now - _last_emit))
+                if wait > 0:
+                    time.sleep(wait)
                 if frame is None or is_stale:
                     out = _offline_jpeg if (is_stale or frame is None) and _offline_jpeg else frame
                     if out is None:
@@ -5080,6 +5268,7 @@ def create_app(
                     b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
                 )
                 _last_emit = time.perf_counter()
+                _last_sent_mono = last_mono
 
         return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
@@ -5197,21 +5386,29 @@ def main() -> None:
         _last_recover_mono = 0.0
         while not stop_event.is_set():
             time.sleep(2.0)
+            _now = time.monotonic()
             with shared.frame_output_lock:
-                last = shared.last_frame_mono
+                _lf = shared.last_frame_mono
+                _lt = shared.last_track_tick_mono
+                last = max(_lf, _lt)
             if last <= 0.0:
                 continue
-            idle = time.monotonic() - last
+            idle = _now - last
+            _idle_jpeg = _now - _lf if _lf > 0.0 else -1.0
+            _idle_tick = _now - _lt if _lt > 0.0 else -1.0
             if idle >= _hard:
                 print(
-                    f"[watchdog] FATAL: sem frames ha {idle:.1f}s >= {_hard:.0f}s; "
+                    f"[watchdog] FATAL: sem actividade ha {idle:.1f}s >= {_hard:.0f}s "
+                    f"(idle JPEG={_idle_jpeg:.1f}s, idle iterador={_idle_tick:.1f}s); "
                     "os._exit(3) para restart (run_web.sh em loop).",
                     flush=True,
                 )
                 os._exit(3)
-            if idle >= _soft and (time.monotonic() - _last_recover_mono) >= 20.0:
+            if idle >= _soft and (_now - _last_recover_mono) >= 20.0:
                 print(
-                    f"[watchdog] stream parado ha {idle:.1f}s; source_changed=True (reabrir fonte).",
+                    f"[watchdog] stream parado ha {idle:.1f}s (SOFT={_soft:.0f}s); "
+                    f"idle JPEG={_idle_jpeg:.1f}s idle iterador YOLO={_idle_tick:.1f}s; "
+                    "source_changed=True (reabrir fonte).",
                     flush=True,
                 )
                 with shared.lock:

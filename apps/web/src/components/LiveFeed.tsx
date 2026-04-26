@@ -12,13 +12,15 @@ interface SourcePreset {
 interface Props {
   apiBase: string;
   hero?: boolean;
+  /** FPS do loop de inferência (/api/stats); opcional, mostrado no canto do vídeo. */
+  inferFpsEma?: number;
 }
 
 function normalizeApiBase(raw: string): string {
   return raw.trim().replace(/\/+$/, "");
 }
 
-function LiveFeedComponent({ apiBase, hero = false }: Props) {
+function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
   const [error, setError]           = useState(false);
   const [loading, setLoading]       = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -575,6 +577,30 @@ function LiveFeedComponent({ apiBase, hero = false }: Props) {
         {/* Heatmap canvas overlay — veículos */}
         {feedEngaged && showVehicleHeatmap && !loading && !error && (
           <HeatmapCanvas payload={vehicleHeatmapPayload} opacity={vehicleHeatmapOpacity} />
+        )}
+
+        {feedEngaged && !loading && !error && typeof inferFpsEma === "number" && (
+          <div
+            title="FPS médio do processamento YOLO (não é o FPS do ficheiro/stream)"
+            style={{
+              position: "absolute",
+              top: isFullscreen ? 52 : 12,
+              right: 12,
+              zIndex: 4,
+              padding: "5px 10px",
+              borderRadius: 6,
+              background: "rgba(0,0,0,0.62)",
+              border: "1px solid rgba(255,255,255,0.12)",
+              fontFamily: "var(--font-mono)",
+              fontSize: 12,
+              fontWeight: 700,
+              letterSpacing: "0.04em",
+              color: inferFpsEma > 0.05 ? "var(--cyan)" : "var(--text-muted)",
+              pointerEvents: "none",
+            }}
+          >
+            {inferFpsEma > 0.05 ? `${inferFpsEma.toFixed(1)} FPS` : "— FPS"}
+          </div>
         )}
 
         {/* Corner bracket decorations */}

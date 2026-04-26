@@ -58,10 +58,11 @@ YOLO_INFER_IOU=0.45
 YOLO_MAX_DET=250
 YOLO_AUGMENT=0
 YOLO_AGNOSTIC_NMS=1
-# Stride 1 = cada frame. 2/3 = mais FPS, menos frames. Valor 0 no .env vira 1 no codigo.
-YOLO_VID_STRIDE=1
+# Stride 2/3 = mais FPS (1 em N frames na inferencia). Valor 0 no .env vira 1 no codigo.
+YOLO_VID_STRIDE=2
 # 0 = menor latencia; 1 = fila se aparecer "Waiting for stream".
 YOLO_STREAM_BUFFER=1
+# Opcional (web_dashboard): YOLO_BLUR_SAMPLE_EVERY=2, YOLO_SEX_UI_STRIDE=3 para aliviar CPU/GPU em multidao.
 
 # =============================================================================
 # 4. Webcam mobile (run_web_mobile.sh) — conf separada do dashboard
@@ -151,9 +152,10 @@ CAP_PROP_BUFFERSIZE=1
 # Detecta stall (HLS com token expirado, RTSP com disconnect silencioso, etc).
 # SOFT (s): sem frame novo ha >=SOFT -> forca reopen (source_changed=True).
 # HARD (s): sem frame novo ha >=HARD -> os._exit(3), scripts/run_web.sh reinicia.
-# HLS/Skyline: buracos longos entre segmentos; valores baixos disparam reopen a mais (ver web_dashboard).
-YOLO_WATCHDOG_SOFT_S=120
-YOLO_WATCHDOG_HARD_S=220
+# HLS Skyline: watchdog usa max(JPEG, tick do iterador). Se ambos ~parados, model.track() ficou bloqueado em read().
+# Valores baixos (ex. 300s) disparam reopen com CDN lenta; 720s+ e mais tolerante.
+YOLO_WATCHDOG_SOFT_S=720
+YOLO_WATCHDOG_HARD_S=820
 # Placeholder "FONTE OFFLINE" no /video_feed quando frame ficar mais velho que N s.
 YOLO_FEED_STALE_S=15
 # Limite de FPS do MJPEG no /video_feed (evita saturar threads Flask + GIL).

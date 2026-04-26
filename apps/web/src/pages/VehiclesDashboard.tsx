@@ -784,7 +784,7 @@ export function VehiclesDashboard({ apiBase }: Props) {
 
             {/* Camera */}
             <div className="card" style={{ padding: 0, overflow: "hidden" }}>
-              <LiveFeed apiBase={apiBase} hero />
+              <LiveFeed apiBase={apiBase} hero inferFpsEma={stats.infer_fps_ema} />
               <div style={{
                 padding: "8px 14px",
                 borderTop: "1px solid var(--border)",

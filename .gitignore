@@ -12,3 +12,7 @@ data/*.db-shm
 data/gender_classify_7k_view/
 /*.pt
 weights/**/*.pt
+
+# Gravações de ecrã / vídeos locais (não versionar binários grandes)
+artifacts/*.mov
+artifacts/*.mp4

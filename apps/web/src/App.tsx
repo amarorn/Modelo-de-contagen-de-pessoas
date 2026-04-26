@@ -115,7 +115,7 @@ export default function App() {
 
             {/* Center column: video + action bar */}
             <div className="ops-video-col">
-              <LiveFeed apiBase={API_BASE} hero />
+              <LiveFeed apiBase={API_BASE} hero inferFpsEma={stats.infer_fps_ema} />
 
               {/* Action bar */}
               <div
@@ -361,7 +361,7 @@ export default function App() {
                 >
                   Inferência
                 </div>
-                <DataRow label="FPS (EMA)" value={stats.infer_fps_ema?.toFixed(1) ?? "—"} />
+                <DataRow label="FPS inferência" value={stats.infer_fps_ema?.toFixed(1) ?? "—"} />
                 <DataRow label="Em movimento" value={String(stats.moving_now)} />
                 <DataRow label="Parados" value={String(stats.stationary_now)} />
                 <DataRow label="Loitering" value={String(stats.loitering_now)} />
