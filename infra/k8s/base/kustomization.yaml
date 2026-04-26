@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - app/serviceaccount.yaml
+  - app/configmap.yaml
+  - app/secrets.yaml
+  - app/backend-deployment.yaml
+  - app/backend-service.yaml
+  - app/frontend-deployment.yaml
+  - app/frontend-service.yaml
+  - app/networkpolicy.yaml
+  - data/postgres.yaml
+  - data/redis.yaml
+  - data/redpanda.yaml
+  - data/minio.yaml
+  - observability/prometheus.yaml
+  - observability/loki.yaml
+  - observability/promtail-rbac.yaml
+  - observability/promtail.yaml
+  - observability/grafana.yaml

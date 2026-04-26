@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: visioncount-backend
+  labels:
+    app.kubernetes.io/name: visioncount-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: visioncount-backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: visioncount-backend
+    spec:
+      serviceAccountName: visioncount-backend
+      containers:
+        - name: backend
+          image: ghcr.io/amarorn/visioncount-backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: visioncount-app-config
+            - secretRef:
+                name: visioncount-app-secrets
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          livenessProbe:
+            httpGet:
+              path: /api/stats
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /openapi.yaml
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5

@@ -1012,8 +1012,13 @@ Modelo-de-contagen-de-pessoas/
 │   └── model_config.yaml             # Hiperparâmetros YOLO
 │
 ├── scripts/                          # Scripts de automação (bash/python)
-├── docker/                           # Dockerfiles
-│   └── Dockerfile.train              # Imagem de treino (pytorch + CUDA 12.4)
+├── docker/                           # Dockerfiles e runtime
+│   ├── Dockerfile.train              # Imagem de treino (pytorch + CUDA 12.4)
+│   ├── Dockerfile.backend            # Imagem backend Flask/YOLO
+│   ├── Dockerfile.frontend           # Imagem frontend React/Nginx
+│   ├── start-backend.sh              # Entry point backend no container
+│   └── nginx.frontend.conf           # Config Nginx do frontend
+├── infra/k8s/                        # Base e overlays Kubernetes (dev/prod)
 ├── docs/                             # Documentação técnica (PT-BR)
 ├── data/                             # Bancos SQLite
 │   ├── contagem.db                   # Banco principal (~8 MB)
@@ -1051,3 +1056,70 @@ Documentação técnica detalhada em `docs/` (em português):
 **API interativa:** `http://localhost:8080/docs` (Swagger UI)
 
 **OpenAPI spec:** `http://localhost:8080/openapi.yaml`
+
+---
+
+## Kubernetes (dev/prod)
+
+Foi adicionada uma estrutura de infraestrutura Kubernetes com separação de ambientes:
+
+- `infra/k8s/base`: recursos compartilhados (app, dados e observabilidade).
+- `infra/k8s/overlays/dev`: namespace `dev`, Gateway API e ajustes de desenvolvimento.
+- `infra/k8s/overlays/prod`: namespace `prod`, Gateway API com TLS e ajustes de produção.
+
+### Componentes provisionados
+
+- Aplicação:
+  - `visioncount-backend` (Flask/YOLO) como `Deployment` + `Service`
+  - `visioncount-frontend` (Nginx) como `Deployment` + `Service`
+  - `Gateway` + `HTTPRoute` com roteamento `/api` para backend e `/` para frontend
+- Dados:
+  - PostgreSQL (`StatefulSet`)
+  - Redis (`Deployment` + PVC)
+  - Redpanda/Kafka (`StatefulSet`)
+  - MinIO (`Deployment` + PVC)
+- Observabilidade:
+  - Prometheus
+  - Loki + Promtail
+  - Grafana
+
+### Comandos operacionais
+
+```bash
+# Subir ambiente dev
+make k8s-dev-up
+
+# Ver diff do ambiente prod (planejamento)
+make k8s-prod-plan
+
+# Aplicar em ambiente específico
+make k8s-apply ENV=dev
+make k8s-apply ENV=prod
+
+# Validar básico
+make k8s-smoke ENV=dev
+```
+
+### Configuração por ambiente
+
+- `infra/k8s/overlays/dev/app-config.env`: configuração não sensível de dev.
+- `infra/k8s/overlays/prod/app-config.env`: configuração não sensível de prod.
+- `infra/k8s/overlays/prod/app-secrets.sops.yaml`: template para segredos com SOPS (não versionar segredos em claro).
+
+### Pré-requisito do cluster
+
+- O cluster precisa de suporte ao **Gateway API**:
+  - CRDs `gateway.networking.k8s.io` instaladas
+  - um controller compatível (ex.: NGINX Gateway, Envoy Gateway, Cilium Gateway)
+  - `GatewayClass` nomeada `nginx` (ou ajuste `gatewayClassName` nos manifests)
+
+### Rollback
+
+```bash
+# Histórico de revisões
+kubectl -n prod rollout history deploy/visioncount-backend
+
+# Voltar para revisão anterior
+kubectl -n prod rollout undo deploy/visioncount-backend
+kubectl -n prod rollout undo deploy/visioncount-frontend
+```

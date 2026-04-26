@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: visioncount-app-config
+data:
+  WEB_HOST: "0.0.0.0"
+  WEB_PORT: "8080"
+  YOLO_WEB_SOURCE: "0"
+  YOLO_INFER_CONF: "0.25"
+  YOLO_INFER_IMGSZ: "1280"
+  YOLO_INFER_IOU: "0.70"
+  YOLO_MAX_DET: "600"
+  COUNT_LINE: "640,50,640,700"
+  KAFKA_BOOTSTRAP_SERVERS: "redpanda:9092"
+  KAFKA_TOPIC_PERSIST: "contagem.persist"
+  REDIS_URL: "redis://redis:6379/0"
+  MINIO_ENDPOINT: "http://minio:9000"
+  MINIO_BUCKET_EXPORTS: "visioncount-exports"

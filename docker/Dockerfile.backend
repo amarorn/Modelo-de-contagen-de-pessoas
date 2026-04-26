@@ -1,0 +1,27 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libgl1 \
+    libglib2.0-0 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt ./
+RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+
+COPY src ./src
+COPY docs ./docs
+COPY configs ./configs
+COPY docker/start-backend.sh ./docker/start-backend.sh
+
+RUN chmod +x ./docker/start-backend.sh && mkdir -p /app/data
+
+EXPOSE 8080
+
+CMD ["./docker/start-backend.sh"]

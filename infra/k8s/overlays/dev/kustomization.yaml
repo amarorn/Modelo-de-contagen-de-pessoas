@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: dev
+resources:
+  - ../../base
+  - namespace.yaml
+  - ingress.yaml
+  - hpa-backend.yaml
+  - pdb.yaml
+configMapGenerator:
+  - name: visioncount-app-config
+    behavior: merge
+    envs:
+      - app-config.env
+secretGenerator:
+  - name: visioncount-app-secrets
+    behavior: merge
+    literals:
+      - DATABASE_URL=postgresql+psycopg2://visioncount:visioncount@postgres:5432/visioncount
+      - MINIO_ACCESS_KEY=visioncount
+      - MINIO_SECRET_KEY=visioncount123
+patches:
+  - path: patch-backend-dev.yaml
+  - path: patch-frontend-dev.yaml
