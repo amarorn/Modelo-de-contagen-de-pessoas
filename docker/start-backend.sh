@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export PYTHONPATH="${PYTHONPATH:-/app/src}"
+python -c "from persistence.db import init_db; init_db()"
+
 MODEL_PATH="${YOLO_INFER_MODEL:-runs/people_count/yolov8m-door-counter/weights/best.pt}"
 SOURCE="${YOLO_WEB_SOURCE:-0}"
 LINE_DEF="${COUNT_LINE:-960,300,960,900}"

@@ -43,7 +43,7 @@ def _handle_message(sess: object, data: dict) -> None:
 
 
 def run_consumer() -> None:
-    bs = strip_env_comment(os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:9092"))
+    bs = strip_env_comment(os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:19092"))
     if not bs:
         print("Defina KAFKA_BOOTSTRAP_SERVERS", file=sys.stderr)
         raise SystemExit(2)

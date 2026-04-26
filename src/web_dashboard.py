@@ -33,6 +33,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+try:
+    from dotenv import load_dotenv
+
+    _repo_root = Path(__file__).resolve().parents[1]
+    load_dotenv(_repo_root / ".env", override=False)
+except ImportError:
+    pass
+
 # Antes de cv2: FFmpeg/libav em streams HLS pode imprimir "non-existing SPS" (join a meio do GOP); nao e fatal.
 if os.environ.get("YOLO_WEB_VERBOSE", "").strip() != "1":
     os.environ.setdefault("AV_LOG_LEVEL", "error")
@@ -376,6 +384,9 @@ class SharedState:
         self.last_frame_jpeg: bytes | None = None
         # time.monotonic() do ultimo frame JPEG escrito pelo inference_loop (watchdog + MJPEG stale).
         self.last_frame_mono: float = 0.0
+        # Lock dedicado ao JPEG: o inference_loop segura `lock` durante processamento pesado por frame;
+        # /video_feed e o watchdog leem `last_frame_*` sem competir com esse lock (evita MJPEG "congelado").
+        self.frame_output_lock = threading.Lock()
         self.last_error: str | None = None
         self.lock = threading.Lock()
         self.line_default = line_default
@@ -2871,6 +2882,7 @@ def inference_loop(
                     frame_ts, saturation_threshold=shared.thr_queue_saturation,
                 )
                 _flow_vec_counter += 1
+                _drift = drift_detector.update(frame)
                 with shared.lock:
                     text = f"in={shared.counter.entries} out={shared.counter.exits} total={shared.counter.total}"
                     live_text = (
@@ -2955,7 +2967,6 @@ def inference_loop(
                     shared.reid_revisited = _rs["revisited_persons"]
                     shared.reid_avg_dwell_s = _rs["avg_total_dwell_s"]
                     shared.low_conf_tracks = track_conf_tracker.low_confidence_count()
-                    _drift = drift_detector.update(frame)
                     shared.cam_drift_level = _drift.level
                     shared.cam_drift_score = _drift.score
                     shared.cam_drift_reason = _drift.reason
@@ -3132,7 +3143,7 @@ def inference_loop(
                 ok, encoded = cv2.imencode(".jpg", frame)
                 if ok:
                     _jpeg = encoded.tobytes()
-                    with shared.lock:
+                    with shared.frame_output_lock:
                         shared.last_frame_jpeg = _jpeg
                         shared.last_frame_mono = time.monotonic()
 
@@ -4994,7 +5005,7 @@ def create_app(
                 wait = _min_interval - (now - _last_emit)
                 if wait > 0:
                     time.sleep(wait)
-                with shared.lock:
+                with shared.frame_output_lock:
                     frame = shared.last_frame_jpeg
                     last_mono = shared.last_frame_mono
                 is_stale = last_mono > 0.0 and (time.monotonic() - last_mono) >= stale_s
@@ -5118,16 +5129,20 @@ def main() -> None:
         except ValueError:
             _hard = 60.0
         _soft = max(5.0, _soft)
-        _hard = max(_soft + 10.0, _hard)
+        # Margem minima soft->hard: HLS (segmentos, buffer) pode ficar >30s sem frame sem ser falha;
+        # com HARD perto de SOFT o processo morria (os._exit) durante reconexao lenta.
+        _min_margin = 50.0
+        _hard = max(_soft + _min_margin, _hard)
         print(
-            f"[watchdog] stream stall soft={_soft:.0f}s (recover) hard={_hard:.0f}s (os._exit). "
-            "Override: YOLO_WATCHDOG_SOFT_S / YOLO_WATCHDOG_HARD_S",
+            f"[watchdog] stream stall soft={_soft:.0f}s (recover) hard={_hard:.0f}s (os._exit); "
+            f"margem min. soft->hard={_min_margin:.0f}s. Override: YOLO_WATCHDOG_SOFT_S / YOLO_WATCHDOG_HARD_S",
             flush=True,
         )
         _last_recover_mono = 0.0
         while not stop_event.is_set():
             time.sleep(2.0)
-            last = shared.last_frame_mono
+            with shared.frame_output_lock:
+                last = shared.last_frame_mono
             if last <= 0.0:
                 continue
             idle = time.monotonic() - last

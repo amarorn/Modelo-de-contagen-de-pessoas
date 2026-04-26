@@ -5,6 +5,7 @@ opencv-python>=4.8.0
 pyyaml>=6.0.1
 flask>=3.0.0
 flask-cors>=4.0.0
+python-dotenv>=1.0.0
 sqlalchemy>=2.0.0
 kafka-python>=2.0.2
 # Necessario se DATABASE_URL usar postgresql+psycopg2:// (servidor Postgres a parte).

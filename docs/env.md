@@ -117,6 +117,7 @@ YOLO_AGE_ABSTAIN=0.15
 # 10. Fonte de video e OpenCV + FFmpeg
 # =============================================================================
 OPENCV_FFMPEG_CAPTURE_OPTIONS=fflags;nobuffer|max_delay;500000
+# 0 = webcam; sem USB use URL ou preset. run_web.sh sem args: 0 + PRESETS -> 1. URL do JSON.
 YOLO_WEB_SOURCE=0
 # YOLO_SKYLINE_WEBCAM_PAGE desactivado: quando definido, o resolver IGNORA o .m3u8 directo
 # e tenta sempre ir buscar token novo a esta pagina. Se a pagina der 404, TODAS as fontes
@@ -148,11 +149,11 @@ CAP_PROP_BUFFERSIZE=1
 # Detecta stall (HLS com token expirado, RTSP com disconnect silencioso, etc).
 # SOFT (s): sem frame novo ha >=SOFT -> forca reopen (source_changed=True).
 # HARD (s): sem frame novo ha >=HARD -> os._exit(3), scripts/run_web.sh reinicia.
-# HLS/Skyline (.m3u8) costuma ter buracos >15s entre frames uteis; 30 reduz falsos positivos.
-YOLO_WATCHDOG_SOFT_S=30
-YOLO_WATCHDOG_HARD_S=60
+# HLS/Skyline: buracos longos entre segmentos; valores baixos disparam reopen a mais (ver web_dashboard).
+YOLO_WATCHDOG_SOFT_S=120
+YOLO_WATCHDOG_HARD_S=220
 # Placeholder "FONTE OFFLINE" no /video_feed quando frame ficar mais velho que N s.
-YOLO_FEED_STALE_S=8
+YOLO_FEED_STALE_S=15
 # Limite de FPS do MJPEG no /video_feed (evita saturar threads Flask + GIL).
 YOLO_MJPEG_MAX_FPS=10
 

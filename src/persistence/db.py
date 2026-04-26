@@ -35,7 +35,7 @@ def make_engine() -> Engine:
             future=True,
         )
     try:
-        return create_engine(url, future=True)
+        return create_engine(url, future=True, pool_pre_ping=True)
     except ImportError as exc:
         if "psycopg2" in str(exc).lower():
             raise ImportError(

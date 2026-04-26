@@ -5,30 +5,52 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${ROOT_DIR}"
 
-if [ -f .env ]; then
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      ''|\#*) continue ;;
-    esac
-    if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
-      export "$line"
-    fi
-  done < .env
-fi
-
-# OpenCV+FFmpeg: ler antes de importar cv2 no Python. Reduz buffer em HLS/HTTP (menos atraso vs. live).
-# Sobrescreva no .env se o stream falhar (ex.: rtsp_transport;tcp para RTSP).
-if [ -z "${OPENCV_FFMPEG_CAPTURE_OPTIONS:-}" ]; then
-  export OPENCV_FFMPEG_CAPTURE_OPTIONS="fflags;nobuffer|max_delay;500000"
-fi
-
-# Preferir venv (yt-dlp/python do sistema podem ser 3.6 e falhar no YouTube).
+# Preferir venv antes de carregar .env (parser Python com shlex para JSON e valores com '=').
 if [ -x "${ROOT_DIR}/.venv/bin/python" ]; then
   PYTHON="${ROOT_DIR}/.venv/bin/python"
   YT_DLP="${ROOT_DIR}/.venv/bin/yt-dlp"
 else
   PYTHON="python3"
   YT_DLP="yt-dlp"
+fi
+
+if [ -f .env ]; then
+  eval "$("${PYTHON}" - <<'PY'
+import re
+from pathlib import Path
+from shlex import quote
+
+def main() -> None:
+    p = Path(".env")
+    if not p.is_file():
+        return
+    text = p.read_text(encoding="utf-8", errors="replace")
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.lower().startswith("export "):
+            s = s[7:].strip()
+        if "=" not in s:
+            continue
+        k, _, rest = s.partition("=")
+        k = k.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k):
+            continue
+        v = rest
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+            v = v[1:-1]
+        print(f"export {k}={quote(v)}")
+
+main()
+PY
+)"
+fi
+
+# OpenCV+FFmpeg: ler antes de importar cv2 no Python. Reduz buffer em HLS/HTTP (menos atraso vs. live).
+# Sobrescreva no .env se o stream falhar (ex.: rtsp_transport;tcp para RTSP).
+if [ -z "${OPENCV_FFMPEG_CAPTURE_OPTIONS:-}" ]; then
+  export OPENCV_FFMPEG_CAPTURE_OPTIONS="fflags;nobuffer|max_delay;500000"
 fi
 
 # Opcional: ./scripts/run_web.sh --youtube 'https://www.youtube.com/watch?v=...'
@@ -74,6 +96,30 @@ if [ -n "${YOLO_WEB_YOUTUBE_URL}" ]; then
   fi
 else
   SOURCE="${1:-${YOLO_WEB_SOURCE:-0}}"
+fi
+
+# Sem URL na CLI: YOLO_WEB_SOURCE=0 tenta webcam; sem USB falha. Usar 1. URL de YOLO_WEB_SOURCE_PRESETS.
+if [ -z "${1:-}" ] && [ "${SOURCE}" = "0" ]; then
+  _preset_url="$("${PYTHON}" - <<'PY'
+import json
+import os
+
+raw = os.environ.get("YOLO_WEB_SOURCE_PRESETS", "")
+try:
+    presets = json.loads(raw)
+    if isinstance(presets, list) and presets and isinstance(presets[0], dict):
+        u = (presets[0].get("url") or "").strip()
+        if u:
+            print(u)
+except Exception:
+    pass
+PY
+)"
+  if [ -n "${_preset_url}" ]; then
+    export YOLO_WEB_SOURCE="${_preset_url}"
+    SOURCE="${_preset_url}"
+    echo "[run_web] Fonte era 0 sem argumento na CLI: a usar a primeira URL de YOLO_WEB_SOURCE_PRESETS. Webcam USB: ./scripts/run_web.sh 0" >&2
+  fi
 fi
 
 # Linha em 720p (ex. stream YouTube): ajuste COUNT_LINE no .env se o video for 1280x720.
@@ -221,6 +267,10 @@ fi
 WEB_ARGS+=(--host "${WEB_HOST}" --port "${WEB_PORT}")
 
 echo "[run_web] model=${MODEL_PATH} conf=${CONF_THRES} YOLO_DEVICE=${YOLO_DEVICE} YOLO_STREAM_BUFFER=${YOLO_STREAM_BUFFER} YOLO_VID_STRIDE=${YOLO_VID_STRIDE} OPENCV_FFMPEG_CAPTURE_OPTIONS=${OPENCV_FFMPEG_CAPTURE_OPTIONS:0:60}..."
+echo "[run_web] watchdog soft=${YOLO_WATCHDOG_SOFT_S:-} hard=${YOLO_WATCHDOG_HARD_S:-} (definir no .env; vazio herda defaults do Python)"
+if [ "${SOURCE:-0}" = "0" ] || [ -z "${SOURCE:-}" ]; then
+  echo "[run_web] Aviso: fonte numerica 0 (webcam). Sem dispositivo USB valido o OpenCV emite 'obsensor_uvc' / Camera index out of range; use URL no .env ou preset na UI." >&2
+fi
 echo "[run_web] Se vir 'Waiting for stream' em loop: YOLO_STREAM_BUFFER=1, ou aumente YOLO_VID_STRIDE, GPU (newgrp video), ou URL HLS valida (yt-dlp -g)."
 echo "[run_web] Logs OpenCV/Ultralytics reduzidos por defeito; export YOLO_WEB_VERBOSE=1 para avisos completos."
 echo "[run_web] MJPEG: limite de FPS em YOLO_MJPEG_MAX_FPS (default 10) para nao saturar a API Flask."

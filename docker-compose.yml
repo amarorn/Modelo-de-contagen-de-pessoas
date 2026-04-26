@@ -1,23 +1,24 @@
-# Stack unificada: PostgreSQL (analytics / SQLAlchemy), Redpanda (Kafka API) opcional,
-# e imagem de treino YOLO com GPU opcional.
+# Stack unificada (um unico ficheiro)
 #
-# Base de dados (só Postgres no host):
+# Infra padrao (Postgres + Redpanda/Kafka + Redis + MinIO):
 #   docker compose up -d
 #
-# Postgres + Redpanda (KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:9092 no .env):
-#   docker compose --profile kafka up -d
+# Dashboard web (Nginx + API Flask no mesmo compose; CPU no container):
+#   docker compose --profile app up -d --build
+#   Abrir: http://localhost:8888
 #
-# Treino reproduzível com GPU (NVIDIA Container Toolkit no host):
+# Treino YOLO com GPU (opcional):
 #   docker compose --profile train build train
 #   docker compose --profile train run --rm --gpus all train
-# CPU apenas (lento):
-#   docker compose --profile train run --rm train
 #
-# No .env (raiz do repo), típico com Postgres na porta host 5433:
+# Variaveis uteis no .env (raiz do repo):
 #   DATABASE_URL=postgresql+psycopg2://contagem:contagem@127.0.0.1:5433/contagem
-#   POSTGRES_PORT=5433
+#   KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:19092
+#   REDIS_PUBLISHED_PORT=16379  (host; evita colisao com Redis local na 6379)
+#   REDIS_URL=redis://127.0.0.1:16379/0
+#   MINIO_ENDPOINT=http://127.0.0.1:9000
 #
-# Requisitos Python no host: pip install psycopg2-binary (e kafka-python se usar Kafka).
+# Dentro dos containers Docker, use os hostnames dos servicos (postgres, redpanda:9092, redis, minio).
 
 services:
   postgres:
@@ -39,7 +40,6 @@ services:
       start_period: 10s
 
   redpanda:
-    profiles: ["kafka"]
     image: docker.redpanda.com/redpandadata/redpanda:v24.2.11
     container_name: contagem-redpanda
     command:
@@ -56,11 +56,106 @@ services:
       - "0"
       - --check=false
       - --kafka-addr
-      - PLAINTEXT://0.0.0.0:9092
+      - internal://0.0.0.0:9092,external://0.0.0.0:19092
       - --advertise-kafka-addr
-      - PLAINTEXT://127.0.0.1:9092
+      - internal://redpanda:9092,external://127.0.0.1:19092
     ports:
       - "9092:9092"
+      - "19092:19092"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health --exit-when-healthy --kafka-api-brokers 127.0.0.1:9092 || exit 0"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    container_name: contagem-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PUBLISHED_PORT:-16379}:6379"
+    volumes:
+      - contagem_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  minio:
+    image: minio/minio:RELEASE.2024-10-13T13-34-11Z
+    container_name: contagem-minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-visioncount}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-visioncount123}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - contagem_miniodata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  backend:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    image: contagem-backend:local
+    container_name: contagem-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redpanda:
+        condition: service_started
+    environment:
+      WEB_HOST: "0.0.0.0"
+      WEB_PORT: "8080"
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-contagem}:${POSTGRES_PASSWORD:-contagem}@postgres:5432/${POSTGRES_DB:-contagem}
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: http://minio:9000
+      YOLO_WEB_SOURCE: ${YOLO_WEB_SOURCE:-0}
+      YOLO_INFER_MODEL: ${YOLO_INFER_MODEL:-runs/people_count/yolov8m-door-counter/weights/best.pt}
+    volumes:
+      - ./runs:/app/runs:ro
+      - ./weights:/app/weights:ro
+      - ./data:/app/data
+      - ./configs:/app/configs:ro
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/openapi.yaml"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  web:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+      args:
+        VITE_API_BASE: ""
+        NGINX_CONF: docker/nginx.compose.conf
+    image: contagem-web:local
+    container_name: contagem-web
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${WEB_UI_PORT:-8888}:8080"
 
   train:
     profiles: ["train"]
@@ -77,3 +172,5 @@ services:
 
 volumes:
   contagem_pgdata:
+  contagem_redisdata:
+  contagem_miniodata:

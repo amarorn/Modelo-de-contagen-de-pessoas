@@ -15,7 +15,7 @@ if [ -f .env ]; then
   done < .env
 fi
 
-export KAFKA_BOOTSTRAP_SERVERS="${KAFKA_BOOTSTRAP_SERVERS:-127.0.0.1:9092}"
+export KAFKA_BOOTSTRAP_SERVERS="${KAFKA_BOOTSTRAP_SERVERS:-127.0.0.1:19092}"
 export ANALYTICS_KAFKA_TOPIC="${ANALYTICS_KAFKA_TOPIC:-vision.analytics.events}"
 export ANALYTICS_KAFKA_GROUP="${ANALYTICS_KAFKA_GROUP:-contagem-analytics-vision}"
 

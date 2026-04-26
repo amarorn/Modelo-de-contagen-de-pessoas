@@ -15,8 +15,8 @@ if [ -f .env ]; then
   done < .env
 fi
 
-# Compativel com Redpanda: docker compose --profile kafka up -d (porta 9092 no host).
-export KAFKA_BOOTSTRAP_SERVERS="${KAFKA_BOOTSTRAP_SERVERS:-127.0.0.1:9092}"
+# Redpanda (docker compose up -d): clientes no host usam listener externo 19092.
+export KAFKA_BOOTSTRAP_SERVERS="${KAFKA_BOOTSTRAP_SERVERS:-127.0.0.1:19092}"
 
 if [ -x "${ROOT_DIR}/.venv/bin/python" ]; then
   PYTHON="${ROOT_DIR}/.venv/bin/python"

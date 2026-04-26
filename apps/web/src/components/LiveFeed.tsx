@@ -858,6 +858,7 @@ function CameraPicker({ presets, activeIdx, switching, onSwitch, onPrev, onNext 
 }
 
 export const LiveFeed = memo(LiveFeedComponent);
+LiveFeed.displayName = "LiveFeed";
 
 function LoadingSpinner() {
   return (
