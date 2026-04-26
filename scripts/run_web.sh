@@ -122,6 +122,11 @@ PY
   fi
 fi
 
+unset YOLO_WEB_FORCE_WEBCAM 2>/dev/null || true
+if [ -n "${1:-}" ] && [[ "$1" =~ ^[0-9]+$ ]]; then
+  export YOLO_WEB_FORCE_WEBCAM=1
+fi
+
 # Linha em 720p (ex. stream YouTube): ajuste COUNT_LINE no .env se o video for 1280x720.
 LINE_DEF="${COUNT_LINE:-960,300,960,900}"
 # Limiar de confianca: por omissao YOLO_INFER_CONF (ex. 0.25 em RTSP). Para camera local (webcam) com poucas caixas,
@@ -268,8 +273,8 @@ WEB_ARGS+=(--host "${WEB_HOST}" --port "${WEB_PORT}")
 
 echo "[run_web] model=${MODEL_PATH} conf=${CONF_THRES} YOLO_DEVICE=${YOLO_DEVICE} YOLO_STREAM_BUFFER=${YOLO_STREAM_BUFFER} YOLO_VID_STRIDE=${YOLO_VID_STRIDE} OPENCV_FFMPEG_CAPTURE_OPTIONS=${OPENCV_FFMPEG_CAPTURE_OPTIONS:0:60}..."
 echo "[run_web] watchdog soft=${YOLO_WATCHDOG_SOFT_S:-} hard=${YOLO_WATCHDOG_HARD_S:-} (definir no .env; vazio herda defaults do Python)"
-if [ "${SOURCE:-0}" = "0" ] || [ -z "${SOURCE:-}" ]; then
-  echo "[run_web] Aviso: fonte numerica 0 (webcam). Sem dispositivo USB valido o OpenCV emite 'obsensor_uvc' / Camera index out of range; use URL no .env ou preset na UI." >&2
+if [[ "${SOURCE:-}" =~ ^[0-9]+$ ]]; then
+  echo "[run_web] Aviso: fonte por indice (${SOURCE}) (webcam). Sem dispositivo valido o OpenCV emite 'obsensor_uvc' / Camera index out of range; use URL no .env ou preset na UI." >&2
 fi
 echo "[run_web] Se vir 'Waiting for stream' em loop: YOLO_STREAM_BUFFER=1, ou aumente YOLO_VID_STRIDE, GPU (newgrp video), ou URL HLS valida (yt-dlp -g)."
 echo "[run_web] Logs OpenCV/Ultralytics reduzidos por defeito; export YOLO_WEB_VERBOSE=1 para avisos completos."

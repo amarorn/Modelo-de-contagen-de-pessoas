@@ -118,6 +118,7 @@ YOLO_AGE_ABSTAIN=0.15
 # =============================================================================
 OPENCV_FFMPEG_CAPTURE_OPTIONS=fflags;nobuffer|max_delay;500000
 # 0 = webcam; sem USB use URL ou preset. run_web.sh sem args: 0 + PRESETS -> 1. URL do JSON.
+# Webcam com presets no .env: ./scripts/run_web.sh 0 (define YOLO_WEB_FORCE_WEBCAM=1).
 YOLO_WEB_SOURCE=0
 # YOLO_SKYLINE_WEBCAM_PAGE desactivado: quando definido, o resolver IGNORA o .m3u8 directo
 # e tenta sempre ir buscar token novo a esta pagina. Se a pagina der 404, TODAS as fontes

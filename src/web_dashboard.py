@@ -255,6 +255,29 @@ def _load_source_presets_from_env() -> list[dict[str, str]]:
     return out[:_MAX_SOURCE_PRESETS]
 
 
+def _resolve_initial_video_source(args: argparse.Namespace, presets: list[dict[str, str]]) -> str:
+    """Fonte inicial: respeita YOLO_WEB_FORCE_WEBCAM (CLI numerica via run_web.sh), .env, depois 1. preset se source=0."""
+    if os.environ.get("YOLO_WEB_FORCE_WEBCAM", "").strip() == "1":
+        return str(args.source).strip()
+    env_w = os.environ.get("YOLO_WEB_SOURCE", "").strip()
+    s = str(args.source).strip()
+    if env_w and env_w != "0":
+        return env_w
+    if s != "0":
+        return s
+    if presets:
+        u = (presets[0].get("url") or "").strip()
+        if u:
+            print(
+                "[web] YOLO_WEB_SOURCE/--source=0: a usar a URL do primeiro preset "
+                "(webcam: ./scripts/run_web.sh <indice> ou remova/vazio YOLO_WEB_SOURCE_PRESETS).",
+                flush=True,
+            )
+            os.environ["YOLO_WEB_SOURCE"] = u
+            return u
+    return s
+
+
 def _load_source_presets_from_file() -> list[dict[str, str]]:
     try:
         if not _SOURCE_PRESETS_FILE.exists():
@@ -5089,6 +5112,9 @@ def main() -> None:
     presets = _load_source_presets_from_file()
     if not presets:
         presets = _load_source_presets_from_env()
+    _src_resolved = _resolve_initial_video_source(args, presets)
+    if _src_resolved != str(args.source).strip():
+        args.source = _src_resolved
     with shared.lock:
         shared.source_presets = presets
         shared.active_preset_id = _preset_id_for_url(presets, str(args.source).strip())
