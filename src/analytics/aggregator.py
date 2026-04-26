@@ -5,9 +5,13 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+from analytics.kafka_vision import publish_vision_analytics_event
 from analytics.metrics import log_event, metrics
 from analytics.models import EventRaw
 from analytics.store import AnalyticsStore
+
+# Processa vários eventos por transação para reduzir round-trips à BD.
+BATCH_MAX_EVENTS = 32
 
 # How long (seconds) without updates before a track is closed
 TRACK_TIMEOUT_SECONDS = int(300)
@@ -60,6 +64,7 @@ class AggregatorWorker:
         """Non-blocking submit. Drops event and logs if queue is full."""
         try:
             self._queue.put_nowait(event)
+            publish_vision_analytics_event(event)
             metrics.set_gauge("vision_queue_size", self._queue.qsize())
         except queue.Full:
             metrics.inc("vision_events_ingestion_errors_total")
@@ -78,33 +83,43 @@ class AggregatorWorker:
         log_event("info", "analytics_worker_ready")
 
         while not self._stop.is_set():
+            batch: list[EventRaw] = []
             try:
-                event = self._queue.get(timeout=0.5)
+                first = self._queue.get(timeout=0.5)
+                batch.append(first)
+                while len(batch) < BATCH_MAX_EVENTS:
+                    try:
+                        batch.append(self._queue.get_nowait())
+                    except queue.Empty:
+                        break
             except queue.Empty:
                 continue
 
             t0 = time.perf_counter()
             try:
-                store.update_aggregation(event)
-                store.upsert_trajectory(event)
-                metrics.inc("vision_aggregated_rows_updated_total")
+                for event in batch:
+                    store.update_aggregation(event, commit=False)
+                    store.upsert_trajectory(event, commit=False)
+                session.commit()
+                metrics.inc("vision_aggregated_rows_updated_total", len(batch))
                 elapsed_ms = (time.perf_counter() - t0) * 1000
                 metrics.set_gauge("vision_event_processing_duration_ms", elapsed_ms)
-                # rough lag = now - event timestamp
-                lag = (datetime.now(timezone.utc) - event.timestamp).total_seconds()
+                last = batch[-1]
+                lag = (datetime.now(timezone.utc) - last.timestamp).total_seconds()
                 metrics.set_gauge("vision_aggregator_lag_seconds", max(0.0, lag))
             except Exception as exc:
                 try:
                     session.rollback()
                 except Exception:
                     pass
-                log_event(
-                    "error",
-                    "aggregation_error",
-                    camera_id=event.camera_id,
-                    event_id=event.id,
-                    error=str(exc),
-                )
+                for event in batch:
+                    log_event(
+                        "error",
+                        "aggregation_error",
+                        camera_id=event.camera_id,
+                        event_id=event.id,
+                        error=str(exc),
+                    )
 
         try:
             session.close()

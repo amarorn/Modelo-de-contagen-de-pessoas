@@ -223,4 +223,39 @@ WEB_ARGS+=(--host "${WEB_HOST}" --port "${WEB_PORT}")
 echo "[run_web] model=${MODEL_PATH} conf=${CONF_THRES} YOLO_DEVICE=${YOLO_DEVICE} YOLO_STREAM_BUFFER=${YOLO_STREAM_BUFFER} YOLO_VID_STRIDE=${YOLO_VID_STRIDE} OPENCV_FFMPEG_CAPTURE_OPTIONS=${OPENCV_FFMPEG_CAPTURE_OPTIONS:0:60}..."
 echo "[run_web] Se vir 'Waiting for stream' em loop: YOLO_STREAM_BUFFER=1, ou aumente YOLO_VID_STRIDE, GPU (newgrp video), ou URL HLS valida (yt-dlp -g)."
 echo "[run_web] Logs OpenCV/Ultralytics reduzidos por defeito; export YOLO_WEB_VERBOSE=1 para avisos completos."
-"${WEB_ARGS[@]}"
+echo "[run_web] MJPEG: limite de FPS em YOLO_MJPEG_MAX_FPS (default 10) para nao saturar a API Flask."
+
+if [ "${RUN_WEB_NO_RESTART:-0}" = "1" ]; then
+  "${WEB_ARGS[@]}"
+  exit $?
+fi
+
+RESTART_DELAY_S="${RUN_WEB_RESTART_DELAY_S:-3}"
+MAX_RESTART_PER_MIN="${RUN_WEB_MAX_RESTART_PER_MIN:-8}"
+_restart_ts_start=$(date +%s)
+_restart_count=0
+while true; do
+  set +e
+  "${WEB_ARGS[@]}"
+  status=$?
+  set -e
+  case "${status}" in
+    0|130|143)
+      echo "[run_web] saida ${status}; encerrando."
+      exit ${status}
+      ;;
+  esac
+  now=$(date +%s)
+  elapsed=$(( now - _restart_ts_start ))
+  if [ ${elapsed} -ge 60 ]; then
+    _restart_ts_start=${now}
+    _restart_count=0
+  fi
+  _restart_count=$(( _restart_count + 1 ))
+  if [ ${_restart_count} -gt ${MAX_RESTART_PER_MIN} ]; then
+    echo "[run_web] >${MAX_RESTART_PER_MIN} reinicios/min (exit=${status}); abortando." >&2
+    exit ${status}
+  fi
+  echo "[run_web] exit=${status}; reinicio em ${RESTART_DELAY_S}s (#${_restart_count})..."
+  sleep "${RESTART_DELAY_S}"
+done

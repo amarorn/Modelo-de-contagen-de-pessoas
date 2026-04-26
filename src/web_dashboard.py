@@ -150,6 +150,8 @@ def _configure_runtime_logging() -> None:
         ulog.setLevel(logging.ERROR)
     except Exception:
         pass
+    # Avisos repetidos do Hub (CLIP etc.); definir HF_TOKEN no .env se precisares de downloads rápidos.
+    logging.getLogger("huggingface_hub.utils._http").setLevel(logging.ERROR)
 
 
 @dataclass
@@ -372,6 +374,8 @@ class SharedState:
         self.all_vehicles_mode: bool = False
         self.started_at = datetime.now()
         self.last_frame_jpeg: bytes | None = None
+        # time.monotonic() do ultimo frame JPEG escrito pelo inference_loop (watchdog + MJPEG stale).
+        self.last_frame_mono: float = 0.0
         self.last_error: str | None = None
         self.lock = threading.Lock()
         self.line_default = line_default
@@ -3127,8 +3131,10 @@ def inference_loop(
 
                 ok, encoded = cv2.imencode(".jpg", frame)
                 if ok:
+                    _jpeg = encoded.tobytes()
                     with shared.lock:
-                        shared.last_frame_jpeg = encoded.tobytes()
+                        shared.last_frame_jpeg = _jpeg
+                        shared.last_frame_mono = time.monotonic()
 
             # Fim do for: se saímos sem nenhum frame e a fonte não foi trocada,
             # a URL/câmera falhou ao abrir. Registra erro e faz backoff para não
@@ -4950,19 +4956,66 @@ def create_app(
         out.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return jsonify({"ok": True, "path": str(out)})
 
+    def _build_offline_jpeg() -> bytes:
+        canvas = np.zeros((540, 960, 3), dtype=np.uint8)
+        canvas[:] = (18, 22, 28)
+        cv2.putText(
+            canvas, "FONTE OFFLINE / A RECONECTAR", (120, 260),
+            cv2.FONT_HERSHEY_SIMPLEX, 1.35, (230, 230, 230), 3, cv2.LINE_AA,
+        )
+        cv2.putText(
+            canvas, "Verifique URL da camera ou aguarde o watchdog",
+            (100, 320),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (160, 160, 160), 1, cv2.LINE_AA,
+        )
+        ok, enc = cv2.imencode(".jpg", canvas, [int(cv2.IMWRITE_JPEG_QUALITY), 72])
+        return enc.tobytes() if ok else b""
+
+    _offline_jpeg = _build_offline_jpeg()
+
     @app.get("/video_feed")
     def video_feed() -> Response:
+        try:
+            _max_fps = float(os.environ.get("YOLO_MJPEG_MAX_FPS", "10").strip() or "10")
+        except ValueError:
+            _max_fps = 10.0
+        _max_fps = max(1.0, min(30.0, _max_fps))
+        _min_interval = 1.0 / _max_fps
+        try:
+            stale_s = float(os.environ.get("YOLO_FEED_STALE_S", "8").strip() or "8")
+        except ValueError:
+            stale_s = 8.0
+        stale_s = max(2.0, stale_s)
+
         def gen() -> bytes:
+            _last_emit = 0.0
             while True:
+                now = time.perf_counter()
+                wait = _min_interval - (now - _last_emit)
+                if wait > 0:
+                    time.sleep(wait)
                 with shared.lock:
                     frame = shared.last_frame_jpeg
-                if frame is None:
-                    time.sleep(0.05)
+                    last_mono = shared.last_frame_mono
+                is_stale = last_mono > 0.0 and (time.monotonic() - last_mono) >= stale_s
+                if frame is None or is_stale:
+                    out = _offline_jpeg if (is_stale or frame is None) and _offline_jpeg else frame
+                    if out is None:
+                        time.sleep(0.08)
+                        continue
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n" + out + b"\r\n"
+                    )
+                    _last_emit = time.perf_counter()
+                    if frame is None:
+                        time.sleep(0.35)
                     continue
                 yield (
                     b"--frame\r\n"
                     b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
                 )
+                _last_emit = time.perf_counter()
 
         return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
@@ -5030,6 +5083,9 @@ def main() -> None:
         shared.active_preset_id = _preset_id_for_url(presets, str(args.source).strip())
     try:
         get_session_factory()
+    except Exception as exc:
+        print(f"[web] Falha ao inicializar a base de dados (DATABASE_URL): {exc}", flush=True)
+    try:
         ap_boot = ""
         with shared.lock:
             ap_boot = str(shared.active_preset_id or "").strip()
@@ -5052,6 +5108,51 @@ def main() -> None:
     )
     t.start()
 
+    def _stream_watchdog() -> None:
+        try:
+            _soft = float(os.environ.get("YOLO_WATCHDOG_SOFT_S", "15").strip() or "15")
+        except ValueError:
+            _soft = 15.0
+        try:
+            _hard = float(os.environ.get("YOLO_WATCHDOG_HARD_S", "60").strip() or "60")
+        except ValueError:
+            _hard = 60.0
+        _soft = max(5.0, _soft)
+        _hard = max(_soft + 10.0, _hard)
+        print(
+            f"[watchdog] stream stall soft={_soft:.0f}s (recover) hard={_hard:.0f}s (os._exit). "
+            "Override: YOLO_WATCHDOG_SOFT_S / YOLO_WATCHDOG_HARD_S",
+            flush=True,
+        )
+        _last_recover_mono = 0.0
+        while not stop_event.is_set():
+            time.sleep(2.0)
+            last = shared.last_frame_mono
+            if last <= 0.0:
+                continue
+            idle = time.monotonic() - last
+            if idle >= _hard:
+                print(
+                    f"[watchdog] FATAL: sem frames ha {idle:.1f}s >= {_hard:.0f}s; "
+                    "os._exit(3) para restart (run_web.sh em loop).",
+                    flush=True,
+                )
+                os._exit(3)
+            if idle >= _soft and (time.monotonic() - _last_recover_mono) >= 20.0:
+                print(
+                    f"[watchdog] stream parado ha {idle:.1f}s; source_changed=True (reabrir fonte).",
+                    flush=True,
+                )
+                with shared.lock:
+                    shared.last_error = (
+                        f"Stream sem frames ha {idle:.0f}s; a reconectar. "
+                        "URLs HLS com token expiram; valide o URL ou use pagina .html Skyline."
+                    )
+                    shared.source_changed = True
+                _last_recover_mono = time.monotonic()
+
+    threading.Thread(target=_stream_watchdog, daemon=True).start()
+
     start_stats_emitter_thread(
         session_id=shared.session_id,
         get_stats=lambda: build_stats_payload(shared),
@@ -5063,6 +5164,8 @@ def main() -> None:
         f"(YAML: http://{args.host}:{args.port}/openapi.yaml)",
         flush=True,
     )
+    # Evita access log duplicado (mesma linha em stdout e via logger raiz).
+    logging.getLogger("werkzeug").propagate = False
     try:
         app.run(
             host=args.host,

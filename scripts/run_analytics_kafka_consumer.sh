@@ -15,8 +15,9 @@ if [ -f .env ]; then
   done < .env
 fi
 
-# Compativel com Redpanda: docker compose --profile kafka up -d (porta 9092 no host).
 export KAFKA_BOOTSTRAP_SERVERS="${KAFKA_BOOTSTRAP_SERVERS:-127.0.0.1:9092}"
+export ANALYTICS_KAFKA_TOPIC="${ANALYTICS_KAFKA_TOPIC:-vision.analytics.events}"
+export ANALYTICS_KAFKA_GROUP="${ANALYTICS_KAFKA_GROUP:-contagem-analytics-vision}"
 
 if [ -x "${ROOT_DIR}/.venv/bin/python" ]; then
   PYTHON="${ROOT_DIR}/.venv/bin/python"
@@ -26,4 +27,4 @@ fi
 
 export PYTHONPATH="${ROOT_DIR}/src:${PYTHONPATH:-}"
 
-exec "${PYTHON}" -m persistence.consumer_service
+exec "${PYTHON}" -m analytics.kafka_vision_consumer

@@ -9,6 +9,10 @@ from sqlalchemy.orm import Session
 from analytics.models import EventRaw, Trajectory, TrajectoryPoint
 from persistence.analytics_models import EventAggregatedRow, EventRawRow, TrajectoryRow
 
+# Limite defensivo de linhas devolvidas por consultas de agregados (evita scans enormes).
+MAX_AGGREGATION_QUERY_ROWS = 50_000
+MAX_TRAJECTORY_RANGE_ROWS = 5_000
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -136,7 +140,7 @@ class AnalyticsStore:
 
     # ── events_aggregated ──────────────────────────────────────────────────
 
-    def update_aggregation(self, event: EventRaw) -> None:
+    def update_aggregation(self, event: EventRaw, *, commit: bool = True) -> None:
         """Incrementally update minute bucket. Idempotent by event.id."""
         if not event.roi_id:
             return
@@ -190,7 +194,8 @@ class AnalyticsStore:
         processed.add(event.id)
         row.processed_event_ids_json = json.dumps(list(processed))
         row.updated_at = _utcnow()
-        self._s.commit()
+        if commit:
+            self._s.commit()
 
     def list_aggregations(
         self,
@@ -199,7 +204,9 @@ class AnalyticsStore:
         to_dt: datetime,
         roi_id: str | None = None,
         cls: str | None = None,
+        limit: int = MAX_AGGREGATION_QUERY_ROWS,
     ) -> list[dict[str, Any]]:
+        cap = min(max(1, limit), MAX_AGGREGATION_QUERY_ROWS)
         q = (
             self._s.query(EventAggregatedRow)
             .filter(
@@ -213,7 +220,41 @@ class AnalyticsStore:
             q = q.filter(EventAggregatedRow.roi_id == roi_id)
         if cls:
             q = q.filter(EventAggregatedRow.cls == cls)
-        return [_agg_to_dict(r) for r in q.all()]
+        return [_agg_to_dict(r) for r in q.limit(cap).all()]
+
+    def hourly_bins_from_aggregations(
+        self,
+        camera_id: str,
+        from_dt: datetime,
+        to_dt: datetime,
+        roi_id: str | None = None,
+        cls: str | None = None,
+    ) -> dict[str, Any]:
+        """Soma entradas/saídas por hora (0–23 UTC) a partir de events_aggregated."""
+        series = self.list_aggregations(camera_id, from_dt, to_dt, roi_id=roi_id, cls=cls)
+        hourly_entries = [0] * 24
+        hourly_exits = [0] * 24
+        for row in series:
+            raw = row["minute_bucket"]
+            try:
+                ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            h = int(ts.hour)
+            hourly_entries[h] += int(row.get("entries") or 0)
+            hourly_exits[h] += int(row.get("exits") or 0)
+        peak_hour = 0
+        peak_val = -1
+        for h in range(24):
+            v = hourly_entries[h] + hourly_exits[h]
+            if v > peak_val:
+                peak_val = v
+                peak_hour = h
+        return {
+            "hourly_entries": hourly_entries,
+            "hourly_exits": hourly_exits,
+            "peak_hour": peak_hour,
+        }
 
     def rebuild_aggregations(self, camera_id: str, from_dt: datetime, to_dt: datetime) -> int:
         """Drop and recompute aggregation rows for a camera/range from events_raw."""
@@ -231,7 +272,7 @@ class AnalyticsStore:
 
     # ── trajectories ───────────────────────────────────────────────────────
 
-    def upsert_trajectory(self, event: EventRaw) -> None:
+    def upsert_trajectory(self, event: EventRaw, *, commit: bool = True) -> None:
         if not event.track_id:
             return
 
@@ -274,7 +315,8 @@ class AnalyticsStore:
             row.exit_count += 1
 
         row.updated_at = _utcnow()
-        self._s.commit()
+        if commit:
+            self._s.commit()
 
     def close_inactive_trajectories(self, before: datetime) -> int:
         rows = (
@@ -317,6 +359,7 @@ class AnalyticsStore:
                 TrajectoryRow.started_at <= to_dt,
             )
             .order_by(TrajectoryRow.started_at)
+            .limit(MAX_TRAJECTORY_RANGE_ROWS)
             .all()
         )
         return [_row_to_trajectory(r) for r in rows]

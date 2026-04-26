@@ -1,21 +1,27 @@
 import { useState } from "react";
-import { useStats } from "../hooks/useStats";
+import { useConfig } from "../hooks/useConfig";
 import { HourlyFlowChart } from "../components/HourlyFlowChart";
 import { DemographicsChart } from "../components/DemographicsChart";
 import { OccupancyGauge } from "../components/OccupancyGauge";
 import { FlowInsightsCard } from "../components/FlowInsightsCard";
 import { HeatmapCard } from "../components/HeatmapCard";
 import { useFlowInsights } from "../hooks/useFlowInsights";
+import { useReportsHourly } from "../hooks/useReportsHourly";
+import { useReportsSessionStats } from "../hooks/useReportsSessionStats";
 
 interface Props {
   apiBase: string;
 }
 
 export function ReportsDashboard({ apiBase }: Props) {
-  const { stats, status } = useStats();
+  const config = useConfig(apiBase);
+  const cameraId = config?.active_preset_id?.trim() || "default";
+  const hourly = useReportsHourly(apiBase, cameraId);
+  const { stats, status } = useReportsSessionStats(apiBase);
   const { data: flowInsights, error: flowInsightsErr } = useFlowInsights(
     apiBase,
     status === "connected",
+    45_000,
   );
   const [exporting, setExporting] = useState(false);
 
@@ -54,7 +60,8 @@ export function ReportsDashboard({ apiBase }: Props) {
         <div>
           <p className="section-label" style={{ marginBottom: 4 }}>Relatórios</p>
           <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-muted)" }}>
-            Sessão atual · status {status}
+            BD + sessão (polling lento) · {cameraId} · status {status}
+            {hourly.status === "error" ? " · fluxo horário: erro" : ""}
           </span>
         </div>
         <button
@@ -68,9 +75,9 @@ export function ReportsDashboard({ apiBase }: Props) {
       </div>
 
       <HourlyFlowChart
-        hourlyEntries={stats.hourly_entries}
-        hourlyExits={stats.hourly_exits}
-        peakHour={stats.peak_hour}
+        hourlyEntries={hourly.hourlyEntries}
+        hourlyExits={hourly.hourlyExits}
+        peakHour={hourly.peakHour}
       />
 
       <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 14 }}>

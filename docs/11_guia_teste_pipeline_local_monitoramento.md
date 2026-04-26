@@ -51,13 +51,15 @@ bash scripts/run_train.sh
 Util quando queres **mesma stack PyTorch/CUDA** em qualquer maquina com **NVIDIA Container Toolkit** instalado, sem depender do venv local. O compose monta o repositorio em `/workspace`; artefatos (`runs/`, pesos) ficam no host.
 
 ```bash
-docker compose build train
-docker compose run --rm --gpus all train
+docker compose --profile train build train
+docker compose --profile train run --rm --gpus all train
 ```
+
+O serviço `train` usa o perfil Compose `train` (não arranca com `docker compose up` só com Postgres).
 
 Requisitos no host: Docker, `nvidia-container-toolkit`, GPU visivel com `nvidia-smi`. Opcional: copiar `.env.example` para `.env` antes do treino (variaveis `YOLO_*`, dataset, etc.).
 
-Ficheiros: `docker-compose.yml`, `docker/Dockerfile.train`, `.dockerignore`.
+Ficheiros: `docker-compose.yml` (Postgres por defeito; perfis `kafka` e `train`), `docker/Dockerfile.train`, `.dockerignore`.
 
 ### 3.5 Treino com tracking de experimento (MLflow)
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, current_app, jsonify, make_response, request
 
 from analytics.metrics import log_event, metrics
 from analytics.models import EventRaw, ValidationError
@@ -10,6 +10,11 @@ from analytics.store import AnalyticsStore
 from persistence.db import get_session_factory
 
 bp = Blueprint("analytics", __name__)
+
+# Intervalo máximo permitido em consultas analytics (alinhado ao plano de query guards).
+MAX_QUERY_RANGE = timedelta(days=31)
+
+_CACHE_FLOW = "private, max-age=5"
 
 
 def _get_worker():
@@ -22,11 +27,25 @@ def _parse_dt(value: str | None, default: datetime) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _clamp_range(from_dt: datetime, to_dt: datetime) -> tuple[datetime, datetime]:
+    if from_dt > to_dt:
+        from_dt, to_dt = to_dt, from_dt
+    if to_dt - from_dt > MAX_QUERY_RANGE:
+        from_dt = to_dt - MAX_QUERY_RANGE
+    return from_dt, to_dt
+
+
 def _dt_args() -> tuple[datetime, datetime]:
     now = datetime.now(timezone.utc)
     from_dt = _parse_dt(request.args.get("from"), now - timedelta(hours=1))
     to_dt = _parse_dt(request.args.get("to"), now)
-    return from_dt, to_dt
+    return _clamp_range(from_dt, to_dt)
+
+
+def _json_cached(data: dict, status: int = 200):
+    resp = make_response(jsonify(data), status)
+    resp.headers["Cache-Control"] = _CACHE_FLOW
+    return resp
 
 
 # ── Event ingest ────────────────────────────────────────────────────────────
@@ -98,13 +117,47 @@ def analytics_flow():
     finally:
         session.close()
 
-    return jsonify({
+    return _json_cached({
         "camera_id": camera_id,
         "bucket": "minute",
         "from": from_dt.isoformat(),
         "to": to_dt.isoformat(),
         "series": series,
     })
+
+
+@bp.get("/api/analytics/hourly")
+def analytics_hourly():
+    camera_id = request.args.get("camera_id", "").strip()
+    if not camera_id:
+        return jsonify({"error": "camera_id is required"}), 400
+
+    now = datetime.now(timezone.utc)
+    try:
+        from_dt = _parse_dt(request.args.get("from"), now - timedelta(hours=24))
+        to_dt = _parse_dt(request.args.get("to"), now)
+        from_dt, to_dt = _clamp_range(from_dt, to_dt)
+    except ValueError as exc:
+        return jsonify({"error": f"invalid date: {exc}"}), 400
+
+    roi_id = request.args.get("roi_id") or None
+    cls = request.args.get("class") or None
+
+    factory = get_session_factory()
+    session = factory()
+    try:
+        store = AnalyticsStore(session)
+        bins = store.hourly_bins_from_aggregations(camera_id, from_dt, to_dt, roi_id=roi_id, cls=cls)
+    finally:
+        session.close()
+
+    payload = {
+        "camera_id": camera_id,
+        "from": from_dt.isoformat(),
+        "to": to_dt.isoformat(),
+        **bins,
+    }
+    return _json_cached(payload)
 
 
 @bp.post("/api/analytics/rebuild")
@@ -120,6 +173,8 @@ def analytics_rebuild():
         to_dt = _parse_dt(data.get("to"), now)
     except ValueError as exc:
         return jsonify({"error": f"invalid date: {exc}"}), 400
+
+    from_dt, to_dt = _clamp_range(from_dt, to_dt)
 
     factory = get_session_factory()
     session = factory()

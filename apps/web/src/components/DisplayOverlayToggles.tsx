@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 interface Props {
   apiBase: string;
@@ -22,20 +22,25 @@ export function DisplayOverlayToggles({ apiBase, variant = "default" }: Props) {
   const [ready, setReady] = useState(false);
   const [pending, setPending] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const cancelLoadRef = useRef(false);
 
   const load = useCallback(async () => {
+    cancelLoadRef.current = false;
     setErr(null);
-    // Cobre bootstrap lento do Flask (CUDA/modelo ~10-30s) e 1 retry em caso
-    // de aborto/erro transitorio; evita falso alarme durante o arranque.
-    const TIMEOUT_MS = 30_000;
-    const MAX_ATTEMPTS = 2;
-    let lastErr: unknown = null;
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const base = apiBase.trim() || window.location.origin;
+    const TIMEOUT_MS = 45_000;
+    const MAX_TOTAL_MS = 300_000;
+    const t0 = Date.now();
+    let attempt = 0;
+    while (Date.now() - t0 < MAX_TOTAL_MS) {
+      if (cancelLoadRef.current) return;
+      attempt += 1;
       try {
         const ac = new AbortController();
-        const t = window.setTimeout(() => ac.abort(), TIMEOUT_MS);
+        const timer = window.setTimeout(() => ac.abort(), TIMEOUT_MS);
         const r = await fetch(`${apiBase}/api/config`, { signal: ac.signal });
-        window.clearTimeout(t);
+        window.clearTimeout(timer);
+        if (cancelLoadRef.current) return;
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const j = await r.json();
         setTrail(Boolean(j.show_trail ?? false));
@@ -49,28 +54,25 @@ export function DisplayOverlayToggles({ apiBase, variant = "default" }: Props) {
         setShowRoi(Boolean(j.show_roi ?? false));
         setReady(true);
         return;
-      } catch (e) {
-        lastErr = e;
-        if (attempt < MAX_ATTEMPTS) {
-          await new Promise((res) => window.setTimeout(res, 1500));
-        }
+      } catch {
+        const backoff = Math.min(10_000, 1200 + attempt * 500);
+        await new Promise((res) => window.setTimeout(res, backoff));
       }
     }
-    const base = apiBase.trim() || window.location.origin;
-    if (lastErr instanceof Error && lastErr.name === "AbortError") {
+    if (!cancelLoadRef.current) {
       setErr(
-        `Timeout (${TIMEOUT_MS / 1000}s x${MAX_ATTEMPTS}) ao ligar a ${base}/api/config. Confirme que scripts/run_web.sh esta a correr na mesma porta do proxy (WEB_PORT / VITE_DEV_API_TARGET).`,
-      );
-    } else {
-      setErr(
-        `Sem ligação a ${base}/api/config. Em desenvolvimento: na pasta apps/web execute pnpm dev (proxy /api → Flask). ` +
-          `Se abrir o build estático, defina VITE_API_BASE=http://127.0.0.1:PORT ao construir (PORT = WEB_PORT do .env, ex. 8081).`,
+        `Sem resposta de ${base}/api/config apos ${MAX_TOTAL_MS / 60_000} min (GPU/modelo a demorar ou servidor parado). ` +
+          `Confirme: bash scripts/run_web.sh na porta WEB_PORT; em dev, pnpm dev com proxy para essa porta.`,
       );
     }
   }, [apiBase]);
 
   useEffect(() => {
+    cancelLoadRef.current = false;
     void load();
+    return () => {
+      cancelLoadRef.current = true;
+    };
   }, [load]);
 
   const push = async (next: {

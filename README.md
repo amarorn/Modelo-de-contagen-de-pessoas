@@ -740,8 +740,8 @@ O backend expõe **52 endpoints** REST. Documentação interativa disponível em
 ### PostgreSQL (produção)
 
 ```bash
-# Subir com Docker
-docker compose -f docker-compose.kafka.yml up -d
+# Subir PostgreSQL (ficheiro único docker-compose.yml na raiz)
+docker compose up -d
 
 # Configurar no .env
 DATABASE_URL=postgresql+psycopg2://contagem:contagem@127.0.0.1:5433/contagem
@@ -838,23 +838,26 @@ Pesos ficam em `runs/detect/<experimento>/weights/best.pt`.
 ### Treino com GPU
 
 ```bash
-# Build da imagem de treino
-docker compose build train
+# Build da imagem de treino (perfil train — não arranca com "docker compose up" simples)
+docker compose --profile train build train
 
 # Executar treino (com GPU)
-docker compose run --rm --gpus all train
+docker compose --profile train run --rm --gpus all train
 ```
 
 O `docker/Dockerfile.train` usa `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime` como base.
 
-### Stack completa com Kafka + PostgreSQL
+### Stack com Redpanda (Kafka API) + PostgreSQL
 
 ```bash
-# Subir Redpanda (Kafka-compatible) + PostgreSQL
-docker compose -f docker-compose.kafka.yml up -d
+# PostgreSQL + Redpanda (perfil kafka)
+docker compose --profile kafka up -d
 
-# Parar
-docker compose -f docker-compose.kafka.yml down
+# Só PostgreSQL (sem broker)
+docker compose up -d
+
+# Parar tudo o que este compose geriu
+docker compose --profile kafka down
 ```
 
 Serviços:
@@ -1029,8 +1032,7 @@ Modelo-de-contagen-de-pessoas/
 ├── requirements.txt                  # Dependências Python
 ├── package.json                      # Monorepo root (pnpm)
 ├── pnpm-workspace.yaml               # Workspace: apps/*
-├── docker-compose.yml                # Treino GPU
-└── docker-compose.kafka.yml          # Kafka (Redpanda) + PostgreSQL
+└── docker-compose.yml                # Postgres (+ Redpanda opcional, treino GPU opcional)
 ```
 
 ---

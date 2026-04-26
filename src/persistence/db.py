@@ -40,7 +40,7 @@ def make_engine() -> Engine:
         if "psycopg2" in str(exc).lower():
             raise ImportError(
                 "Driver PostgreSQL em falta: pip install psycopg2-binary\n"
-                "Ou, sem servidor Postgres (ex.: so Redpanda no docker-compose.kafka.yml), use no .env:\n"
+                "Ou, sem servidor Postgres, use no .env:\n"
                 "  DATABASE_URL=sqlite:///data/contagem.db"
             ) from exc
         raise
@@ -53,11 +53,37 @@ def init_db(engine: Engine | None = None) -> Engine:
 
 
 SessionLocal: sessionmaker[Session] | None = None
+_db_startup_logged = False
+
+
+def _log_db_target_once(url: str) -> None:
+    global _db_startup_logged
+    if _db_startup_logged:
+        return
+    _db_startup_logged = True
+    try:
+        u = make_url(url)
+        driver = u.drivername or "?"
+        if driver == "sqlite":
+            db = u.database or ""
+            print(f"[db] Persistencia activa: sqlite ficheiro={db!r}", flush=True)
+        else:
+            host = u.host or ""
+            port = u.port or ""
+            db = u.database or ""
+            hp = f"{host}:{port}" if port else host
+            print(
+                f"[db] Persistencia activa: {driver} host={hp!r} database={db!r}",
+                flush=True,
+            )
+    except Exception:
+        print(f"[db] Persistencia activa (URL nao parseada): {url[:120]!r}", flush=True)
 
 
 def get_session_factory() -> sessionmaker[Session]:
     global SessionLocal
     if SessionLocal is None:
         eng = init_db()
+        _log_db_target_once(database_url())
         SessionLocal = sessionmaker(bind=eng, autoflush=False, autocommit=False, future=True)
     return SessionLocal

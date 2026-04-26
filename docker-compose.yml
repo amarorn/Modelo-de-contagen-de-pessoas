@@ -1,12 +1,69 @@
-# Treino reproduzivel com GPU (requer NVIDIA Container Toolkit no host).
-# Uso (GPU):
-#   docker compose build train
-#   docker compose run --rm --gpus all train
-# CPU apenas (lento para YOLO):
-#   docker compose run --rm train
+# Stack unificada: PostgreSQL (analytics / SQLAlchemy), Redpanda (Kafka API) opcional,
+# e imagem de treino YOLO com GPU opcional.
+#
+# Base de dados (só Postgres no host):
+#   docker compose up -d
+#
+# Postgres + Redpanda (KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:9092 no .env):
+#   docker compose --profile kafka up -d
+#
+# Treino reproduzível com GPU (NVIDIA Container Toolkit no host):
+#   docker compose --profile train build train
+#   docker compose --profile train run --rm --gpus all train
+# CPU apenas (lento):
+#   docker compose --profile train run --rm train
+#
+# No .env (raiz do repo), típico com Postgres na porta host 5433:
+#   DATABASE_URL=postgresql+psycopg2://contagem:contagem@127.0.0.1:5433/contagem
+#   POSTGRES_PORT=5433
+#
+# Requisitos Python no host: pip install psycopg2-binary (e kafka-python se usar Kafka).
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: contagem-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-contagem}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-contagem}
+      POSTGRES_DB: ${POSTGRES_DB:-contagem}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - contagem_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redpanda:
+    profiles: ["kafka"]
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.11
+    container_name: contagem-redpanda
+    command:
+      - redpanda
+      - start
+      - --smp
+      - "1"
+      - --memory
+      - 1G
+      - --reserve-memory
+      - 0M
+      - --overprovisioned
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr
+      - PLAINTEXT://127.0.0.1:9092
+    ports:
+      - "9092:9092"
+
   train:
+    profiles: ["train"]
     build:
       context: .
       dockerfile: docker/Dockerfile.train
@@ -14,7 +71,9 @@ services:
     working_dir: /workspace
     volumes:
       - .:/workspace
-    # run_train.sh le .env a partir de /workspace se existir no host.
     shm_size: "2gb"
     stdin_open: true
     tty: true
+
+volumes:
+  contagem_pgdata:

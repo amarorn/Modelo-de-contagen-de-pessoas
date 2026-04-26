@@ -4,7 +4,7 @@ import type { ConnectionStatus, Stats } from "../types/api";
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 const POLL_INTERVAL_MS = 2000;
 
-const EMPTY_STATS: Stats = {
+export const EMPTY_STATS: Stats = {
   entries: 0,
   exits: 0,
   total_passages: 0,

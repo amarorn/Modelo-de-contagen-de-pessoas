@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
 import type { FlowInsightsPayload } from "../types/api";
 
-export function useFlowInsights(apiBase: string, enabled: boolean) {
+export function useFlowInsights(
+  apiBase: string,
+  enabled: boolean,
+  pollIntervalMs: number = 15000,
+) {
   const [data, setData] = useState<FlowInsightsPayload | null>(null);
   const [error, setError] = useState(false);
 
@@ -23,14 +27,14 @@ export function useFlowInsights(apiBase: string, enabled: boolean) {
       }
     };
     tick();
-    const id = setInterval(tick, 15000);
+    const id = setInterval(tick, pollIntervalMs);
     const onVis = () => { if (!isHidden()) void tick(); };
     document.addEventListener("visibilitychange", onVis);
     return () => {
       clearInterval(id);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [apiBase, enabled]);
+  }, [apiBase, enabled, pollIntervalMs]);
 
   return { data, error };
 }

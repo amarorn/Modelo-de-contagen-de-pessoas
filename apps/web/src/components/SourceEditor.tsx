@@ -338,8 +338,10 @@ export function SourceEditor({ apiBase, onClose }: Props) {
       <div style={{
         background: "var(--bg-surface)", border: "1px solid var(--border)",
         borderRadius: "var(--radius-xl)", width: "100%", maxWidth: 620,
-        boxShadow: "0 24px 64px rgba(0,0,0,0.6)", overflow: "hidden",
-        maxHeight: "90vh", overflowY: "auto",
+        boxShadow: "0 24px 64px rgba(0,0,0,0.6)",
+        maxHeight: "90vh",
+        overflowX: "hidden",
+        overflowY: "auto",
       }}>
         <div style={{
           padding: "14px 20px", borderBottom: "1px solid var(--border)",
@@ -388,6 +390,9 @@ export function SourceEditor({ apiBase, onClose }: Props) {
               <div className="section-label" style={{ marginBottom: 8 }}>
                 Cameras guardadas ({presets.length})
               </div>
+              <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 8, lineHeight: 1.45 }}>
+                A direita de cada entrada: editar (lapis) e apagar (caixote). Se nao vir os icones, alargue a janela ou faça scroll horizontal no cartao.
+              </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {presets.map((p) => {
                   const kind = detectKind(p.url);
@@ -434,21 +439,35 @@ export function SourceEditor({ apiBase, onClose }: Props) {
                     );
                   }
                   return (
-                    <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div
+                      key={p.id}
+                      style={{
+                        display: "flex",
+                        alignItems: "stretch",
+                        gap: 8,
+                        minWidth: 0,
+                      }}
+                    >
                       <button
                         type="button"
                         disabled={saving}
                         onClick={() => selectPreset(p.id)}
                         title={p.url}
                         style={{
-                          flex: 1, textAlign: "left", padding: "10px 12px",
+                          flex: 1,
+                          minWidth: 0,
+                          textAlign: "left",
+                          padding: "10px 12px",
                           background: active ? "var(--cyan-dim)" : "var(--bg-elevated)",
                           border: `1px solid ${active ? "var(--border-glow)" : "var(--border)"}`,
                           borderRadius: 8,
                           color: active ? "var(--cyan)" : "var(--text-primary)",
-                          fontSize: 13, fontWeight: 600,
+                          fontSize: 13,
+                          fontWeight: 600,
                           cursor: saving ? "wait" : "pointer",
-                          display: "flex", flexDirection: "column", gap: 4,
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 4,
                         }}
                       >
                         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -469,20 +488,28 @@ export function SourceEditor({ apiBase, onClose }: Props) {
                       <button
                         type="button"
                         title="Editar"
+                        aria-label={`Editar ${p.label}`}
                         onClick={(ev) => startEdit(p, ev)}
                         disabled={saving}
-                        style={iconActionBtnStyle}
+                        style={{ ...iconActionBtnStyle, flexShrink: 0, alignSelf: "stretch" }}
                       >
-                        <IconPencil size={15} />
+                        <IconPencil size={15} color="var(--text-secondary)" />
                       </button>
                       <button
                         type="button"
                         title="Remover da lista"
+                        aria-label={`Apagar ${p.label} da lista`}
                         onClick={(ev) => void removePreset(p.id, ev)}
                         disabled={saving}
-                        style={iconActionBtnStyle}
+                        style={{
+                          ...iconActionBtnStyle,
+                          flexShrink: 0,
+                          alignSelf: "stretch",
+                          borderColor: "rgba(239,68,68,0.35)",
+                          color: "var(--red)",
+                        }}
                       >
-                        <IconTrash size={15} />
+                        <IconTrash size={15} color="var(--red)" />
                       </button>
                     </div>
                   );
@@ -611,12 +638,15 @@ const iconBtnStyle: React.CSSProperties = {
 
 const iconActionBtnStyle: React.CSSProperties = {
   padding: "9px 11px",
+  minWidth: 40,
   background: "var(--bg-elevated)",
   border: "1px solid var(--border)",
   borderRadius: 8,
-  color: "var(--text-muted)",
+  color: "var(--text-secondary)",
   cursor: "pointer",
-  display: "flex", alignItems: "center", justifyContent: "center",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
 };
 
 const secondaryBtnStyle: React.CSSProperties = {
