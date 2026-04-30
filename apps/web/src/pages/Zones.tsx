@@ -50,7 +50,7 @@ function zoneTypeColor(type: string) {
 }
 
 export function ZonesPage({ apiBase, onBack }: Props) {
-  const config = useConfig(apiBase);
+  const { config } = useConfig(apiBase);
   const cameraId = config?.active_preset_id?.trim() || "default";
   const { zones, refresh } = useZones(apiBase, cameraId);
   const { templates } = useZoneTemplates(apiBase);

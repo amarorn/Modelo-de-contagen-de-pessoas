@@ -35,7 +35,14 @@ def make_engine() -> Engine:
             future=True,
         )
     try:
-        return create_engine(url, future=True, pool_pre_ping=True)
+        # connect_timeout evita que o startup do Flask fique bloqueado por >OS-TCP-timeout
+        # (20-127s) quando o container Postgres ainda não estiver pronto.
+        return create_engine(
+            url,
+            future=True,
+            pool_pre_ping=True,
+            connect_args={"connect_timeout": 5},
+        )
     except ImportError as exc:
         if "psycopg2" in str(exc).lower():
             raise ImportError(

@@ -185,6 +185,10 @@ def analytics_reports_summary():
         series = store.list_aggregations(camera_id, from_dt, to_dt, roi_id=roi_id, cls=cls)
         hourly = store.hourly_bins_from_aggregations(camera_id, from_dt, to_dt, roi_id=roi_id, cls=cls)
         trajectories = store.get_trajectories_in_range(camera_id, from_dt, to_dt)
+        if roi_id and roi_id != "line":
+            trajectories = [t for t in trajectories if roi_id in (t.zones_crossed or [])]
+        if cls:
+            trajectories = [t for t in trajectories if (t.cls or "") == cls]
     finally:
         session.close()
 

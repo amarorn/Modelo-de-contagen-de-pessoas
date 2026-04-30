@@ -872,11 +872,19 @@ KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:9092
 DATABASE_URL=postgresql+psycopg2://contagem:contagem@127.0.0.1:5433/contagem
 ```
 
-Iniciar consumer Kafka:
+Iniciar consumer Kafka (pipeline geral `persistence.consumer_service`):
 
 ```bash
 bash scripts/run_kafka_consumer.sh
 ```
+
+**Analytics de visão (eventos `events_raw` / agregados no PostgreSQL):** com `ANALYTICS_KAFKA_PUBLISH=1` no `.env`, o `run_web.sh` publica no tópico Kafka; é necessário um segundo processo que persiste no BD:
+
+```bash
+bash scripts/run_analytics_kafka_consumer.sh
+```
+
+Se o broker não estiver acessível, o agregador passa a enfileirar localmente (fallback) para não perder eventos; com o broker OK e o consumer parado, os dados ficam só no Kafka até o consumer voltar a correr.
 
 ---
 
@@ -890,7 +898,8 @@ bash scripts/run_kafka_consumer.sh
 | `scripts/run_inference.sh`              | Inferência standalone sem UI, gera CSV       |
 | `scripts/run_train.sh`                  | Treinar modelo YOLOv8                        |
 | `scripts/run_train_v2.sh`               | Treino avançado com cross-validation         |
-| `scripts/run_kafka_consumer.sh`         | Consumer Kafka → banco de dados              |
+| `scripts/run_kafka_consumer.sh`         | Consumer Kafka (`consumer_service`) → BD    |
+| `scripts/run_analytics_kafka_consumer.sh` | Consumer tópico analytics visão → BD (com `ANALYTICS_KAFKA_PUBLISH=1`) |
 | `scripts/extract_frames_from_stream.sh` | Extrair frames de stream para dataset        |
 | `scripts/extract_frames_opencv.py`      | Extração de frames via OpenCV                |
 | `scripts/record_stream_to_mp4.sh`       | Gravar stream HLS/RTSP em MP4                |

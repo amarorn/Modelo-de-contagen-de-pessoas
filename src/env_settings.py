@@ -7,6 +7,74 @@ import os
 from pathlib import Path
 
 # Chaves editaveis (alinhado a scripts/run_web.sh e .env); sem segredos (tokens/API keys).
+# Chaves que, ao guardar no dashboard, podem reabrir só o stream Ultralytics (sem reiniciar o Flask).
+SETTINGS_STREAM_RELOAD_KEYS: frozenset[str] = frozenset(
+    {
+        "YOLO_INFER_CONF",
+        "YOLO_INFER_IOU",
+        "YOLO_INFER_IMGSZ",
+        "YOLO_MAX_DET",
+        "YOLO_AUGMENT",
+        "YOLO_AGNOSTIC_NMS",
+        "YOLO_VID_STRIDE",
+        "YOLO_STREAM_BUFFER",
+        "YOLO_TRACKER",
+        "YOLO_TRACK_EMA",
+        "YOLO_TRACK_HOLD_FRAMES",
+        "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+        "CAP_PROP_BUFFERSIZE",
+        "FFMPEG_RELAY",
+        "FFMPEG_STATIC_DIR",
+        "YOLO_WEB_HEADING",
+        "YOLO_WEB_JPEG_QUALITY",
+        "YOLO_WEB_TRAIL_LEN",
+        # Limiares de contagem: relidos a cada reabertura do stream
+        "TRACK_CONF_SUPPRESS_THRESHOLD",
+        "TRACK_CONF_VEHICLE_SUPPRESS_THRESHOLD",
+        "TRACK_CONF_MIN_AGE_FRAMES",
+        # Watchdog e feed: relidos dinamicamente pelo watchdog/flask
+        "YOLO_WATCHDOG_SOFT_S",
+        "YOLO_WATCHDOG_HARD_S",
+        "YOLO_FEED_STALE_S",
+    }
+)
+
+MJPEG_ENV_DEFAULTS: dict[str, str] = {
+    "YOLO_MJPEG_MAX_FPS": "10",
+    # Com infer baixo + smooth display, cadência fixa costuma ser mais estável que seguir infer_fps.
+    "YOLO_MJPEG_ADAPTIVE_FPS": "0",
+    "YOLO_MJPEG_ADAPTIVE_HEADROOM": "1.15",
+    "YOLO_MJPEG_ADAPTIVE_MIN_FPS": "8",
+    "YOLO_MJPEG_BURST_NEW": "1",
+    "YOLO_MJPEG_BURST_CAP_FPS": "35",
+}
+
+# Lidas em cada frame ao desenhar overlay (web_dashboard). POST /api/settings aplica sem reinício.
+# Defaults só para snapshot /api/settings quando a chave ainda não está no ambiente.
+OVERLAY_SNAPSHOT_DEFAULTS: dict[str, str] = {
+    "YOLO_OVERLAY_VEHICLE_EDGE_COVER_FRAC": "0.5",
+    "YOLO_OVERLAY_PERSON_EDGE_COVER_FRAC": "0.5",
+}
+
+SETTINGS_DRAW_LOOP_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "YOLO_HIDE_STALE_BOXES",
+        "YOLO_OVERLAY_MIN_DET_CONF",
+        "YOLO_OVERLAY_MIN_DET_CONF_VEHICLE",
+        "YOLO_OVERLAY_VEHICLE_MIN_WIDTH_FRAC",
+        "YOLO_OVERLAY_VEHICLE_EDGE_MARGIN_FRAC",
+        "YOLO_OVERLAY_VEHICLE_EDGE_COVER_FRAC",
+        "YOLO_OVERLAY_PERSON_EDGE_MARGIN_FRAC",
+        "YOLO_OVERLAY_PERSON_EDGE_COVER_FRAC",
+        "YOLO_OVERLAY_PERSON_MIN_HEIGHT_FRAC",
+        "YOLO_OVERLAY_PERSON_GLARE_ZONE_FRAC",
+        "YOLO_OVERLAY_PERSON_GLARE_ZONE_MIN_CONF",
+    }
+)
+
+# Chaves que o Flask aplica em memória sem reinício nem reabertura do stream YOLO.
+SETTINGS_RUNTIME_APPLY_KEYS: frozenset[str] = frozenset(MJPEG_ENV_DEFAULTS.keys())
+
 EDITABLE_ENV_KEYS: tuple[str, ...] = (
     "YOLO_DEVICE",
     "YOLO_NO_HALF",
@@ -35,6 +103,17 @@ EDITABLE_ENV_KEYS: tuple[str, ...] = (
     "YOLO_TRACK_EMA",
     "YOLO_TRACK_HOLD_FRAMES",
     "YOLO_HIDE_STALE_BOXES",
+    "YOLO_OVERLAY_MIN_DET_CONF",
+    "YOLO_OVERLAY_MIN_DET_CONF_VEHICLE",
+    "YOLO_OVERLAY_VEHICLE_MIN_WIDTH_FRAC",
+    "YOLO_OVERLAY_VEHICLE_EDGE_MARGIN_FRAC",
+    "YOLO_OVERLAY_VEHICLE_EDGE_COVER_FRAC",
+    "YOLO_OVERLAY_PERSON_EDGE_MARGIN_FRAC",
+    "YOLO_OVERLAY_PERSON_EDGE_COVER_FRAC",
+    "YOLO_OVERLAY_PERSON_MIN_HEIGHT_FRAC",
+    "YOLO_OVERLAY_PERSON_GLARE_ZONE_FRAC",
+    "YOLO_OVERLAY_PERSON_GLARE_ZONE_MIN_CONF",
+    "YOLO_SHAPE_FILTER_NONPERSON",
     "YOLO_NO_SHAPE_FILTER",
     "YOLO_MIN_PERSON_AR",
     "YOLO_MAX_PERSON_AR",
@@ -63,13 +142,42 @@ EDITABLE_ENV_KEYS: tuple[str, ...] = (
     "YOLO_WEB_HEADING",
     "WEB_HOST",
     "WEB_PORT",
+    # Limiares de contagem (confiança do rastreamento)
+    "TRACK_CONF_SUPPRESS_THRESHOLD",
+    "TRACK_CONF_VEHICLE_SUPPRESS_THRESHOLD",
+    "TRACK_CONF_MIN_AGE_FRAMES",
+    # Reconexão de stream / watchdog
+    "YOLO_WATCHDOG_SOFT_S",
+    "YOLO_WATCHDOG_HARD_S",
+    "YOLO_FEED_STALE_S",
+    # MJPEG (/video_feed): ritmo de imagens no browser
+    "YOLO_MJPEG_MAX_FPS",
+    "YOLO_MJPEG_ADAPTIVE_FPS",
+    "YOLO_MJPEG_ADAPTIVE_HEADROOM",
+    "YOLO_MJPEG_ADAPTIVE_MIN_FPS",
+    "YOLO_MJPEG_BURST_NEW",
+    "YOLO_MJPEG_BURST_CAP_FPS",
+    # Persistência e analytics
+    "ANALYTICS_KAFKA_PUBLISH",
+    "DATABASE_URL",
+    "KAFKA_BOOTSTRAP_SERVERS",
+    # Alertas
+    "ALERT_CAP_ENABLED",
+    "ALERT_CAP_THRESHOLD",
+    "ALERT_CAR_COLOR",
+    "ALERT_COOLDOWN",
 )
 
 
 def snapshot_editable_env() -> dict[str, str]:
     out: dict[str, str] = {}
     for k in EDITABLE_ENV_KEYS:
-        out[k] = os.environ.get(k, "")
+        v = os.environ.get(k, "")
+        if (not v) and k in MJPEG_ENV_DEFAULTS:
+            v = MJPEG_ENV_DEFAULTS[k]
+        if (not v) and k in OVERLAY_SNAPSHOT_DEFAULTS:
+            v = OVERLAY_SNAPSHOT_DEFAULTS[k]
+        out[k] = v
     return out
 
 
@@ -108,6 +216,27 @@ def merge_env_file(env_path: Path, updates: dict[str, str]) -> None:
         if not seen.get(k):
             out_lines.append(f"{k}={v}")
     env_path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+
+
+def apply_settings_updates_to_environ(updates: dict[str, str]) -> None:
+    """Reflecte valores guardados no processo actual (os.environ)."""
+    for k, v in updates.items():
+        os.environ[k] = v
+
+
+def settings_updates_require_restart(keys: set[str] | frozenset[str]) -> bool:
+    """Modelo, GPU, bind HTTP, heatmap no processo, fonte inicial, filtros geometricos, etc."""
+    fk = frozenset(keys) - SETTINGS_RUNTIME_APPLY_KEYS - SETTINGS_DRAW_LOOP_ENV_KEYS
+    if not fk:
+        return False
+    return bool(fk - SETTINGS_STREAM_RELOAD_KEYS)
+
+
+def settings_updates_trigger_stream_reload(keys: set[str] | frozenset[str]) -> bool:
+    fk = frozenset(keys) - SETTINGS_RUNTIME_APPLY_KEYS - SETTINGS_DRAW_LOOP_ENV_KEYS
+    if not fk:
+        return False
+    return bool(fk & SETTINGS_STREAM_RELOAD_KEYS)
 
 
 def read_training_metrics_from_weights(model_weights_path: str) -> dict | None:

@@ -87,7 +87,7 @@ export function HeatmapCanvas({ payload, opacity }: Props) {
         width: "100%",
         height: "100%",
         opacity,
-        filter: "blur(18px)",
+        filter: "blur(10px)",
         pointerEvents: "none",
         zIndex: 3,
         mixBlendMode: "screen",

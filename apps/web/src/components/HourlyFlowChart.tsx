@@ -5,13 +5,15 @@ interface Props {
   hourlyEntries: number[];
   hourlyExits: number[];
   peakHour: number;
+  /** Intervalo consultado (ex.: datas do filtro de relatórios). */
+  periodHint?: string;
 }
 
 const HOURS = Array.from({ length: 24 }, (_, i) =>
   `${String(i).padStart(2, "0")}h`
 );
 
-export function HourlyFlowChart({ hourlyEntries, hourlyExits, peakHour }: Props) {
+export function HourlyFlowChart({ hourlyEntries, hourlyExits, peakHour, periodHint }: Props) {
   const options: ApexOptions = {
     chart: {
       type: "bar",
@@ -98,7 +100,9 @@ export function HourlyFlowChart({ hourlyEntries, hourlyExits, peakHour }: Props)
         <div>
           <p className="section-label">Fluxo por Hora</p>
           <p style={{ fontSize: 15, fontWeight: 600 }}>
-            Entradas e Saídas nas Últimas 24h
+            {periodHint?.trim()
+              ? `Entradas e saídas por hora (${periodHint.trim()})`
+              : "Entradas e saídas por hora no intervalo selecionado"}
           </p>
         </div>
         <span className="badge badge-amber" style={{ alignSelf: "center" }}>

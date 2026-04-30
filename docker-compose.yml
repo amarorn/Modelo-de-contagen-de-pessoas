@@ -83,6 +83,8 @@ services:
       timeout: 3s
       retries: 5
 
+  # Object storage (S3 API). O codigo Python actual nao envia ficheiros ao MinIO;
+  # o servico fica na stack para K8s/integracoes futuras e para o perfil app (env MINIO_*).
   minio:
     image: minio/minio:RELEASE.2024-10-13T13-34-11Z
     container_name: contagem-minio

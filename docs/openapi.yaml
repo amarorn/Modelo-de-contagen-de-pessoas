@@ -554,6 +554,19 @@ paths:
       responses:
         "200": { description: OK }
 
+  /api/profiles/suggest:
+    get:
+      tags: [system]
+      summary: Sugerir perfil de ambiente com base em sinais ao vivo (blur, bbox, dwell, velocidade, ocupação)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
   /api/suggest/line:
     get:
       tags: [config-roi]

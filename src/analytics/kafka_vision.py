@@ -1,4 +1,4 @@
-"""Publicação opcional de eventos de visão para Kafka (desacoplamento da inferência)."""
+"""Publicação de eventos de visão para Kafka (caminho primário quando habilitado)."""
 
 from __future__ import annotations
 
@@ -23,13 +23,13 @@ def _topic() -> str:
     return t or "vision.analytics.events"
 
 
-def _publish_enabled() -> bool:
+def kafka_publish_enabled() -> bool:
     return strip_env_comment(os.environ.get("ANALYTICS_KAFKA_PUBLISH", "")) == "1"
 
 
 def _ensure_producer() -> Any:
     global _producer, _configured
-    if not _publish_enabled():
+    if not kafka_publish_enabled():
         return None
     if _configured is False:
         return None
@@ -51,21 +51,28 @@ def _ensure_producer() -> Any:
         acks=1,
         linger_ms=5,
         compression_type="gzip",
-        retries=2,
-        request_timeout_ms=30000,
+        retries=3,
+        request_timeout_ms=10000,
     )
     _configured = True
     print(f"[analytics-kafka] produtor topico={_topic()!r} servers={servers!r}", flush=True)
     return _producer
 
 
-def publish_vision_analytics_event(event: EventRaw) -> None:
-    """Fire-and-forget; falhas silenciosas para não afectar o pipeline ao vivo."""
+def publish_vision_analytics_event(event: EventRaw) -> bool:
+    """Publica evento no Kafka. Retorna True se entregue, False em falha.
+
+    Quando Kafka é o caminho primário (ANALYTICS_KAFKA_PUBLISH=1), a chamada
+    deve ser feita antes de qualquer gravação local para garantir que o evento
+    está durável no broker antes de descartar o objeto.
+    """
     prod = _ensure_producer()
     if prod is None:
-        return
+        return False
     body = {"type": "vision_analytics_event", "payload": event.to_dict()}
     try:
         prod.send(_topic(), value=body)
-    except Exception:
-        pass
+        return True
+    except Exception as exc:
+        print(f"[analytics-kafka] falha ao publicar evento {event.id!r}: {exc}", flush=True)
+        return False

@@ -44,6 +44,13 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
   const heatmapPayload = useHeatmap(apiBase, showHeatmap);
   const vehicleHeatmapPayload = useVehicleHeatmap(apiBase, showVehicleHeatmap);
 
+  const [isRecording, setIsRecording]       = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const mediaRecorderRef   = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef  = useRef<Blob[]>([]);
+  const recordingRafRef    = useRef<number>(0);
+  const recordingIntervalRef = useRef<number>(0);
+
   const imgRef       = useRef<HTMLImageElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -215,6 +222,76 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, [toggleFullscreen]);
 
+  /* ── Recording ────────────────────────────────────────────── */
+  const startRecording = useCallback(() => {
+    const img = imgRef.current;
+    if (!img || isRecording) return;
+
+    const canvas = document.createElement("canvas");
+    canvas.width  = img.naturalWidth  || 1280;
+    canvas.height = img.naturalHeight || 720;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const drawFrame = () => {
+      if (!mediaRecorderRef.current) return;
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      recordingRafRef.current = requestAnimationFrame(drawFrame);
+    };
+    recordingRafRef.current = requestAnimationFrame(drawFrame);
+
+    const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
+      ? "video/webm;codecs=vp9"
+      : MediaRecorder.isTypeSupported("video/webm")
+        ? "video/webm"
+        : "video/mp4";
+
+    const recorder = new MediaRecorder(canvas.captureStream(25), { mimeType });
+    recordedChunksRef.current = [];
+
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) recordedChunksRef.current.push(e.data);
+    };
+
+    recorder.onstop = () => {
+      cancelAnimationFrame(recordingRafRef.current);
+      window.clearInterval(recordingIntervalRef.current);
+      const blob = new Blob(recordedChunksRef.current, { type: mimeType });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement("a");
+      a.href     = url;
+      a.download = `gravacao_${new Date().toISOString().replace(/[:.]/g, "-")}.${mimeType.includes("mp4") ? "mp4" : "webm"}`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setIsRecording(false);
+      setRecordingSeconds(0);
+    };
+
+    mediaRecorderRef.current = recorder;
+    recorder.start(1000);
+    setIsRecording(true);
+    setRecordingSeconds(0);
+    recordingIntervalRef.current = window.setInterval(
+      () => setRecordingSeconds((s) => s + 1),
+      1000,
+    );
+  }, [isRecording]);
+
+  const stopRecording = useCallback(() => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      mediaRecorderRef.current.stop();
+      mediaRecorderRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      stopRecording();
+      cancelAnimationFrame(recordingRafRef.current);
+      window.clearInterval(recordingIntervalRef.current);
+    };
+  }, [stopRecording]);
+
   return (
     <div
       ref={containerRef}
@@ -314,6 +391,58 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
               <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/>
               <path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
             </svg>
+          </button>
+
+          {/* ── Record button ── */}
+          <button
+            onClick={isRecording ? stopRecording : startRecording}
+            disabled={!feedEngaged || loading || error}
+            title={
+              isRecording
+                ? `Parar gravação (${formatDuration(recordingSeconds)})`
+                : "Gravar vídeo do stream"
+            }
+            style={{
+              background: isRecording ? "rgba(239,68,68,0.15)" : "var(--bg-surface)",
+              border: `1px solid ${isRecording ? "var(--red)" : "var(--border)"}`,
+              borderRadius: "var(--radius-sm)",
+              cursor: feedEngaged && !loading && !error ? "pointer" : "not-allowed",
+              padding: "4px 8px",
+              color: isRecording ? "var(--red)" : "var(--text-muted)",
+              opacity: feedEngaged && !loading && !error ? 1 : 0.4,
+              fontFamily: "var(--font-display)",
+              fontSize: 10,
+              fontWeight: 700,
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+              transition: "background 0.15s, border-color 0.15s, color 0.15s",
+            }}
+          >
+            {isRecording ? (
+              <>
+                <span
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: 2,
+                    background: "var(--red)",
+                    animation: "pulse 0.9s infinite",
+                    flexShrink: 0,
+                  }}
+                />
+                {formatDuration(recordingSeconds)}
+              </>
+            ) : (
+              <>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                  <circle cx="12" cy="12" r="9" />
+                </svg>
+                REC
+              </>
+            )}
           </button>
 
           {/* ── Heatmap toggle ── */}
@@ -492,7 +621,6 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
 
       {/* ── Video area ──────────────────────────────────────────── */}
       <div
-        className="scanlines"
         style={{
           position: "relative",
           width: "100%",
@@ -507,6 +635,7 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
           alignItems: "center",
           justifyContent: "center",
           overflow: "hidden",
+          isolation: "isolate",
         }}
       >
         {(!presetsReady || sourceBootstrapErr) && (
@@ -553,20 +682,36 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
         {feedEngaged && error ? (
           <ErrorState onRetry={handleReload} />
         ) : feedEngaged ? (
-          <img
-            ref={imgRef}
-            src={src}
-            alt="Feed de vídeo"
-            onLoad={() => setLoading(false)}
-            onError={() => { setError(true); setLoading(false); }}
+          <div
             style={{
+              position: "relative",
               width: "100%",
               height: "100%",
-              objectFit: isFullscreen || hero ? "contain" : "cover",
-              display: loading ? "none" : "block",
-              ...(isFullscreen ? { maxHeight: "100vh" } : {}),
+              minHeight: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              overflow: "hidden",
             }}
-          />
+          >
+            <img
+              ref={imgRef}
+              src={src}
+              alt="Feed de vídeo"
+              decoding="async"
+              onLoad={() => setLoading(false)}
+              onError={() => { setError(true); setLoading(false); }}
+              style={{
+                width: "100%",
+                height: "100%",
+                objectFit: isFullscreen || hero ? "contain" : "cover",
+                display: loading ? "none" : "block",
+                transform: "translate3d(0, 0, 0)",
+                backfaceVisibility: "hidden",
+                ...(isFullscreen ? { maxHeight: "100vh" } : {}),
+              }}
+            />
+          </div>
         ) : null}
 
         {/* Heatmap canvas overlay — pessoas */}
@@ -1217,6 +1362,12 @@ function IdleStandbyPlaceholder({ presetCount }: { presetCount: number }) {
       </div>
     </div>
   );
+}
+
+function formatDuration(secs: number): string {
+  const m = Math.floor(secs / 60).toString().padStart(2, "0");
+  const s = (secs % 60).toString().padStart(2, "0");
+  return `${m}:${s}`;
 }
 
 function LoadingSpinner() {

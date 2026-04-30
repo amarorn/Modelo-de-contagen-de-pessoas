@@ -82,11 +82,17 @@ from alert_manager import AlertManager
 from sex_classifier_agg import OptionalSexClassifier, PerTrackSexSmoother, SexAggregateStats
 from env_settings import (
     EDITABLE_ENV_KEYS,
+    SETTINGS_RUNTIME_APPLY_KEYS,
+    apply_settings_updates_to_environ,
     filter_updates,
     merge_env_file,
     read_training_metrics_from_weights,
+    settings_updates_require_restart,
+    settings_updates_trigger_stream_reload,
     snapshot_editable_env,
 )
+
+MJPEG_SHARED_SYNC_KEYS = SETTINGS_RUNTIME_APPLY_KEYS | frozenset({"YOLO_FEED_STALE_S"})
 from persistence.emitter import emit_config_event, shutdown_emitter, start_stats_emitter_thread
 from persistence.db import get_session_factory
 from analytics import AggregatorWorker, bp as analytics_bp
@@ -101,7 +107,15 @@ from zones.zone_assigner import ZoneAssigner
 from zones.zone_store import ZoneStore, ensure_builtin_templates
 from queue_detector import QueueDetector
 from flow_vector_grid import FlowVectorGrid
-from env_profiles import PROFILES, get_profile, list_profiles as _list_env_profiles
+from env_profiles import (
+    PROFILES,
+    get_profile,
+    is_builtin_profile,
+    list_profiles as _list_env_profiles,
+    save_custom_profile as _save_custom_profile,
+    delete_custom_profile as _delete_custom_profile,
+    EnvProfile as _EnvProfile,
+)
 from roi_suggester import suggest_line as _suggest_line, suggest_zones as _suggest_zones
 from track_confidence import TrackConfidenceTracker
 from camera_drift import CameraDriftDetector
@@ -346,6 +360,28 @@ def _save_source_presets_to_file(presets: list[dict[str, str]]) -> None:
         pass
 
 
+def _is_youtube_page_url(url: str) -> bool:
+    u = str(url or "").strip().lower()
+    if not u:
+        return False
+    return (
+        "youtube.com/watch" in u
+        or "youtube.com/live/" in u
+        or "youtube.com/shorts/" in u
+        or "youtu.be/" in u
+    )
+
+
+def _youtube_source_error_payload() -> dict[str, str]:
+    return {
+        "error": (
+            "URL de pagina do YouTube nao e uma fonte de video direta. "
+            "Use ./scripts/run_web.sh --youtube 'URL_DO_YOUTUBE' "
+            "ou defina YOLO_WEB_YOUTUBE_URL no .env para converter via yt-dlp."
+        )
+    }
+
+
 def _preset_id_for_url(presets: list[dict[str, str]], url: str) -> str:
     u = str(url).strip()
     for p in presets:
@@ -362,11 +398,14 @@ def _apply_default_calibration(shared: SharedState) -> None:
         shared.polygons_default = []
 
 
+def _calibration_store_preset_id(preset_id: str) -> str:
+    """Chave SQL para calibracao: preset real ou 'default' quando nao ha preset (URL directa)."""
+    pid = str(preset_id or "").strip()[:32]
+    return pid if pid else "default"
+
+
 def _load_calibration_for_preset(shared: SharedState, preset_id: str) -> None:
-    pid = str(preset_id or "").strip()
-    if not pid:
-        _apply_default_calibration(shared)
-        return
+    pid = _calibration_store_preset_id(preset_id)
     data = cam_cal.load(cam_cal.site_id(), pid)
     if not data:
         _apply_default_calibration(shared)
@@ -389,9 +428,7 @@ def _load_calibration_for_preset(shared: SharedState, preset_id: str) -> None:
 
 
 def _save_calibration_for_preset(shared: SharedState, preset_id: str) -> None:
-    pid = str(preset_id or "").strip()
-    if not pid:
-        return
+    pid = _calibration_store_preset_id(preset_id)
     with shared.lock:
         mode = shared.count_mode
         line = shared.line_live
@@ -433,6 +470,10 @@ class SharedState:
         self.last_frame_jpeg: bytes | None = None
         # time.monotonic() do ultimo frame JPEG escrito pelo inference_loop (watchdog + MJPEG stale).
         self.last_frame_mono: float = 0.0
+        # Sequencia monotona do JPEG publicado (consumidor MJPEG detecta frame novo sem ambiguidade).
+        self.last_frame_seq: int = 0
+        # Ring buffer curto com os ultimos JPEGs para reduzir "salto" visual em picos de carga.
+        self.frame_ring: deque[tuple[int, float, bytes]] = deque(maxlen=3)
         # Ultimo avanco do iterador model.track (incl. orig_img None entre segmentos HLS). Watchdog usa max(mono, tick).
         self.last_track_tick_mono: float = 0.0
         # Lock dedicado ao JPEG: o inference_loop segura `lock` durante processamento pesado por frame;
@@ -467,7 +508,8 @@ class SharedState:
         # overlays no MJPEG (caixas/labels mantêm-se; só rastro e seta PCA)
         self.show_trail_overlay: bool = False
         self.show_heading_overlay: bool = False
-        self.show_roi_overlay: bool = False
+        # Linha/polígono visíveis por defeito para alinhar contagem (UI pode desligar «Marcações ROI»).
+        self.show_roi_overlay: bool = True
         # Mapa de calor: só tem efeito se o processo foi iniciado sem --no-heatmap (WEB_HEATMAP=1)
         self.heatmap_available: bool = False
         self.show_heatmap_overlay: bool = False
@@ -509,6 +551,8 @@ class SharedState:
         self.track_person_enabled: bool = True
         self.track_vehicle_enabled: bool = False
         self.track_classes_changed: bool = False
+        # POST /api/settings: reabrir model.track() com novos conf/imgsz/etc. (sem reiniciar o processo).
+        self.infer_params_reload: bool = False
         self.cam_confidence: str = "high"
         self.cam_confidence_reasons: list[str] = []
         self.queue_size: int = 0
@@ -545,12 +589,76 @@ class SharedState:
         self.cam_drift_score: float = 0.0  # 0-1 severity
         self.cam_drift_reason: str = ""
         self.cam_drift_baseline_ready: bool = False
+        # ── Camera observation (used for profile suggestion) ──────────────────
+        self.cam_blur_ema: float = 0.0       # Laplacian variance EMA
+        self.cam_avg_bbox_h: float = 0.0     # mean person bbox height (px)
         # Smooth display (YOLO_SMOOTH_DISPLAY=1): segundo VideoCapture lê à FPS nativa da câmera
         # e composta o último diff de overlay (int16) do YOLO por cima de cada frame bruto.
         # O loop YOLO NÃO escreve em last_frame_jpeg quando smooth display está activo —
         # só a thread de display escreve, evitando o tremido causado por dois fundos alternados.
         self.smooth_display_overlay_i16: "np.ndarray | None" = None
         self.smooth_display_overlay_lock = threading.Lock()
+        # MJPEG /video_feed (espelho de YOLO_MJPEG_* + YOLO_FEED_STALE_S; actualizado no arranque e em POST /api/settings)
+        self.mjpeg_max_fps: float = 10.0
+        self.mjpeg_adaptive_fps: bool = False
+        self.mjpeg_adaptive_headroom: float = 1.15
+        self.mjpeg_adaptive_min_fps: float = 8.0
+        self.mjpeg_burst_new: bool = True
+        self.mjpeg_burst_cap_fps: float = 35.0
+        self.mjpeg_stale_s: float = 8.0
+
+
+def _sync_mjpeg_from_environ(shared: SharedState) -> None:
+    """Relê os limiares MJPEG/stale a partir de os.environ (após merge do .env)."""
+    try:
+        mx = float(os.environ.get("YOLO_MJPEG_MAX_FPS", "10").strip() or "10")
+    except ValueError:
+        mx = 10.0
+    mx = max(1.0, min(30.0, mx))
+    adaptive = os.environ.get("YOLO_MJPEG_ADAPTIVE_FPS", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    try:
+        headroom = float(os.environ.get("YOLO_MJPEG_ADAPTIVE_HEADROOM", "1.15").strip() or "1.15")
+    except ValueError:
+        headroom = 1.15
+    headroom = max(1.0, min(1.8, headroom))
+    try:
+        min_fps = float(os.environ.get("YOLO_MJPEG_ADAPTIVE_MIN_FPS", "8").strip() or "8")
+    except ValueError:
+        min_fps = 8.0
+    min_fps = max(1.0, min(mx, min_fps))
+    try:
+        stale_s = float(os.environ.get("YOLO_FEED_STALE_S", "8").strip() or "8")
+    except ValueError:
+        stale_s = 8.0
+    stale_s = max(2.0, stale_s)
+    burst_new = os.environ.get("YOLO_MJPEG_BURST_NEW", "1").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    try:
+        burst_cap = float(os.environ.get("YOLO_MJPEG_BURST_CAP_FPS", "35").strip() or "35")
+    except ValueError:
+        burst_cap = 35.0
+    burst_cap = max(10.0, min(60.0, burst_cap))
+    with shared.lock:
+        shared.mjpeg_max_fps = mx
+        shared.mjpeg_adaptive_fps = adaptive
+        shared.mjpeg_adaptive_headroom = headroom
+        shared.mjpeg_adaptive_min_fps = min_fps
+        shared.mjpeg_stale_s = stale_s
+        shared.mjpeg_burst_new = burst_new
+        shared.mjpeg_burst_cap_fps = burst_cap
+
+
+def _publish_jpeg_frame(shared: SharedState, jpeg: bytes, now_mono: float | None = None) -> None:
+    ts = time.monotonic() if now_mono is None else float(now_mono)
+    with shared.frame_output_lock:
+        seq = shared.last_frame_seq + 1
+        shared.last_frame_seq = seq
+        shared.last_frame_jpeg = jpeg
+        shared.last_frame_mono = ts
+        shared.frame_ring.append((seq, ts, jpeg))
 
 
 def _sync_track_flags_from_active(
@@ -707,6 +815,10 @@ class TrackBoxOverlay:
         self.hold_frames = max(0, hold_frames)
         self._smooth: dict[int, tuple[float, float, float, float]] = {}
         self._miss: dict[int, int] = {}
+
+    def set_params(self, ema_alpha: float, hold_frames: int) -> None:
+        self.ema_alpha = float(np.clip(ema_alpha, 0.0, 1.0))
+        self.hold_frames = max(0, hold_frames)
 
     def step(
         self,
@@ -1110,13 +1222,13 @@ def _draw_count_line(
     frame: np.ndarray,
     x1: int, y1: int, x2: int, y2: int,
 ) -> None:
-    """Linha de contagem estilizada: glow escuro + cyan + marcadores nas extremidades."""
+    """Linha de contagem: glow suave + cyan fino + marcadores discretos."""
     shadow = tuple(int(c * 0.3) for c in _C_CYAN)
-    cv2.line(frame, (x1, y1), (x2, y2), shadow, 6, lineType=cv2.LINE_AA)   # type: ignore[arg-type]
+    cv2.line(frame, (x1, y1), (x2, y2), shadow, 4, lineType=cv2.LINE_AA)   # type: ignore[arg-type]
     cv2.line(frame, (x1, y1), (x2, y2), _C_CYAN, 2, lineType=cv2.LINE_AA)
     for pt in ((x1, y1), (x2, y2)):
-        cv2.circle(frame, pt, 6, _C_BLACK, -1, lineType=cv2.LINE_AA)
-        cv2.circle(frame, pt, 4, _C_CYAN,  -1, lineType=cv2.LINE_AA)
+        cv2.circle(frame, pt, 4, _C_BLACK, -1, lineType=cv2.LINE_AA)
+        cv2.circle(frame, pt, 3, _C_CYAN,  -1, lineType=cv2.LINE_AA)
 
 
 def _draw_heading_arrow(
@@ -1124,13 +1236,11 @@ def _draw_heading_arrow(
     p0: tuple[int, int], p1: tuple[int, int],
     color: tuple[int, int, int],
 ) -> None:
-    """Seta de direção com glow: contorno escuro + cor do tema."""
-    # arrowedLine(img, pt1, pt2, color, thickness, lineType, shift, tipLength)
-    cv2.arrowedLine(frame, p0, p1, _C_BLACK, 5, cv2.LINE_AA, 0, 0.30)
-    cv2.arrowedLine(frame, p0, p1, color,    2, cv2.LINE_AA, 0, 0.30)
-    # circle(img, center, radius, color, thickness, lineType, shift)
-    cv2.circle(frame, p1, 5, _C_BLACK, -1, cv2.LINE_AA)
-    cv2.circle(frame, p1, 3, color,    -1, cv2.LINE_AA)
+    """Seta de direção: contorno fino + cor do tema."""
+    cv2.arrowedLine(frame, p0, p1, _C_BLACK, 3, cv2.LINE_AA, 0, 0.22)
+    cv2.arrowedLine(frame, p0, p1, color,    1, cv2.LINE_AA, 0, 0.22)
+    cv2.circle(frame, p1, 4, _C_BLACK, -1, cv2.LINE_AA)
+    cv2.circle(frame, p1, 2, color,    -1, cv2.LINE_AA)
 
 
 def _draw_label_pill(
@@ -1139,12 +1249,12 @@ def _draw_label_pill(
     center: tuple[int, int],
     color: tuple[int, int, int],
     fw: int, fh: int,
-    scale: float = 0.44,
+    scale: float = 0.36,
     thickness: int = 1,
 ) -> None:
     """Desenha label em pilula (fundo preto + borda colorida + texto branco)."""
     (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
-    pad_x, pad_y = 7, 4
+    pad_x, pad_y = 5, 3
     cx, cy = center
     x0 = max(2, cx - tw // 2 - pad_x)
     y0 = max(2, cy - th // 2 - pad_y)
@@ -1152,12 +1262,12 @@ def _draw_label_pill(
     y1 = min(fh - 3, y0 + th + pad_y * 2)
     overlay = frame.copy()
     cv2.rectangle(overlay, (x0, y0), (x1, y1), (0, 0, 0), -1, cv2.LINE_AA)
-    cv2.addWeighted(overlay, 0.78, frame, 0.22, 0, frame)
+    cv2.addWeighted(overlay, 0.62, frame, 0.38, 0, frame)
     cv2.rectangle(frame, (x0, y0), (x1, y1), color, 1, cv2.LINE_AA)
     tx = x0 + pad_x
     ty = y0 + pad_y + th - 1
     cv2.putText(frame, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX,
-                scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+                scale, (0, 0, 0), thickness + 1, cv2.LINE_AA)
     cv2.putText(frame, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX,
                 scale, _C_WHITE, thickness, cv2.LINE_AA)
 
@@ -1183,18 +1293,18 @@ def _draw_flow_direction_arrow(
     dx = float(ex - sx)
     dy = float(ey - sy)
     length = (dx * dx + dy * dy) ** 0.5
-    if length < 6.0:
+    if length < 5.0:
         return
     ux, uy = dx / length, dy / length
     nx, ny = -uy, ux
-    head_len = max(14.0, min(34.0, length * 0.42))
-    head_half_w = head_len * 0.58
+    head_len = max(10.0, min(24.0, length * 0.32))
+    head_half_w = head_len * 0.44
     shaft_end_x = ex - ux * head_len
     shaft_end_y = ey - uy * head_len
     s0 = (int(round(sx)), int(round(sy)))
     se = (int(round(shaft_end_x)), int(round(shaft_end_y)))
-    cv2.line(frame, s0, se, (0, 0, 0), 10, cv2.LINE_AA)
-    cv2.line(frame, s0, se, color, 6, cv2.LINE_AA)
+    cv2.line(frame, s0, se, (0, 0, 0), 4, cv2.LINE_AA)
+    cv2.line(frame, s0, se, color, 2, cv2.LINE_AA)
     cv2.line(frame, s0, se, _C_WHITE, 1, cv2.LINE_AA)
     tip = (int(round(ex)), int(round(ey)))
     pL = (int(round(shaft_end_x + nx * head_half_w)),
@@ -1203,11 +1313,11 @@ def _draw_flow_direction_arrow(
           int(round(shaft_end_y - ny * head_half_w)))
     tri = np.array([tip, pL, pR], dtype=np.int32)
     tri_outer = np.array([
-        (int(round(ex + ux * 2)), int(round(ey + uy * 2))),
-        (int(round(shaft_end_x + nx * (head_half_w + 2))),
-         int(round(shaft_end_y + ny * (head_half_w + 2)))),
-        (int(round(shaft_end_x - nx * (head_half_w + 2))),
-         int(round(shaft_end_y - ny * (head_half_w + 2)))),
+        (int(round(ex + ux)), int(round(ey + uy))),
+        (int(round(shaft_end_x + nx * (head_half_w + 1))),
+         int(round(shaft_end_y + ny * (head_half_w + 1)))),
+        (int(round(shaft_end_x - nx * (head_half_w + 1))),
+         int(round(shaft_end_y - ny * (head_half_w + 1)))),
     ], dtype=np.int32)
     cv2.fillPoly(frame, [tri_outer], (0, 0, 0), lineType=cv2.LINE_AA)
     cv2.fillPoly(frame, [tri], color, lineType=cv2.LINE_AA)
@@ -1222,12 +1332,12 @@ def _draw_flow_direction_arrow(
         1,
         cv2.LINE_AA,
     )
-    cv2.circle(frame, s0, 9, (0, 0, 0), -1, cv2.LINE_AA)
-    cv2.circle(frame, s0, 6, color, -1, cv2.LINE_AA)
-    cv2.circle(frame, s0, 3, _C_WHITE, -1, cv2.LINE_AA)
+    cv2.circle(frame, s0, 5, (0, 0, 0), -1, cv2.LINE_AA)
+    cv2.circle(frame, s0, 4, color, -1, cv2.LINE_AA)
+    cv2.circle(frame, s0, 2, _C_WHITE, -1, cv2.LINE_AA)
     tail_label = "SAIDA" if inverted else "ENTRADA"
     head_label = "ENTRADA" if inverted else "SAIDA"
-    off = 22
+    off = 15
     tail_lbl_pos = (int(round(sx + nx * off)), int(round(sy + ny * off)))
     head_lbl_pos = (int(round(ex - nx * off)), int(round(ey - ny * off)))
     _draw_label_pill(frame, tail_label, tail_lbl_pos, color, fw, fh)
@@ -1243,16 +1353,16 @@ def _overlay_text(
     infer_fps: float = 0.0,
 ) -> None:
     """Textos de contagem no canto superior esquerdo com fundo escuro."""
-    pad = 10
+    pad = 8
     # Hershey nao desenha acentos (aparecem como "?"); manter ASCII.
     _fps = f"FPS infer. {infer_fps:.1f}" if infer_fps > 0.05 else "FPS infer. --"
     for i, (line, scale, thick) in enumerate([
-        (text, 0.85, 2),
-        (live_text, 0.58, 1),
-        (_fps, 0.62, 1),
+        (text, 0.72, 2),
+        (live_text, 0.52, 1),
+        (_fps, 0.55, 1),
     ]):
         (tw, th), _ = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, scale, thick)
-        y = pad + (i * (th + 10)) + th
+        y = pad + (i * (th + 7)) + th
         cv2.rectangle(frame, (pad - 4, y - th - 4), (pad + tw + 4, y + 4),
                       (0, 0, 0), -1)
         cv2.putText(frame, line, (pad, y),
@@ -1500,11 +1610,20 @@ def filter_boxes_by_shape_multi(
     max_nonperson_area_frac: float,
     min_h_px: int,
     nonperson_min_h_frac: float = 0.28,
-) -> tuple[list[int], list[tuple[float, float, float, float]], list[int]]:
+    confs: list[float] | None = None,
+) -> tuple[
+    list[int],
+    list[tuple[float, float, float, float]],
+    list[int],
+    list[float] | None,
+]:
     out_ids: list[int] = []
     out_xy: list[tuple[float, float, float, float]] = []
     out_cls: list[int] = []
-    for tid, box, c in zip(ids, xyxys, clss):
+    out_confs: list[float] | None = (
+        [] if confs is not None and len(confs) == len(ids) else None
+    )
+    for i, (tid, box, c) in enumerate(zip(ids, xyxys, clss)):
         c = int(c)
         if c == person_class_id:
             ok = bbox_looks_like_person(
@@ -1518,7 +1637,9 @@ def filter_boxes_by_shape_multi(
             out_ids.append(tid)
             out_xy.append(box)
             out_cls.append(c)
-    return out_ids, out_xy, out_cls
+            if out_confs is not None and confs is not None:
+                out_confs.append(float(confs[i]))
+    return out_ids, out_xy, out_cls, out_confs
 
 
 def fallback_track_ids_from_detections(
@@ -1707,6 +1828,84 @@ def write_summary_csv(
             row["age_elderly_agg"] = age.elderly
             row["age_unknown_agg"] = age.unknown
         writer.writerow(row)
+
+
+def _read_track_infer_env(args: argparse.Namespace) -> dict[str, Any]:
+    """Parametros para model.track() a partir de os.environ (hot-reload), com fallback em args."""
+
+    def _f(key: str, default: float) -> float:
+        raw = os.environ.get(key, "").strip()
+        if raw == "":
+            return float(default)
+        try:
+            return float(raw)
+        except ValueError:
+            return float(default)
+
+    def _i(key: str, default: int) -> int:
+        raw = os.environ.get(key, "").strip()
+        if raw == "":
+            return int(default)
+        try:
+            return int(float(raw))
+        except ValueError:
+            return int(default)
+
+    def _bool_env(key: str, default_bool: bool) -> bool:
+        raw = os.environ.get(key, "").strip().lower()
+        if raw in ("1", "true", "yes", "on"):
+            return True
+        if raw in ("0", "false", "no", "off"):
+            return False
+        return bool(default_bool)
+
+    conf = max(0.01, min(0.99, _f("YOLO_INFER_CONF", float(args.conf))))
+    iou = max(0.05, min(0.95, _f("YOLO_INFER_IOU", float(args.iou))))
+    imgsz = max(320, min(2048, _i("YOLO_INFER_IMGSZ", int(args.imgsz))))
+    max_det = max(1, min(500, _i("YOLO_MAX_DET", int(args.max_det))))
+    vid_stride = max(1, min(16, _i("YOLO_VID_STRIDE", int(max(1, getattr(args, "vid_stride", 1))))))
+    stream_buffer = _bool_env("YOLO_STREAM_BUFFER", bool(getattr(args, "stream_buffer", False)))
+    augment = _bool_env("YOLO_AUGMENT", bool(args.augment))
+    agnostic_nms = _bool_env("YOLO_AGNOSTIC_NMS", bool(args.agnostic_nms))
+    tracker = os.environ.get("YOLO_TRACKER", "").strip() or str(getattr(args, "tracker", "bytetrack.yaml"))
+    track_ema = max(0.0, min(1.0, _f("YOLO_TRACK_EMA", float(args.track_ema))))
+    track_hold = max(0, min(240, _i("YOLO_TRACK_HOLD_FRAMES", int(args.track_hold_frames))))
+    tc_suppress = max(0.01, min(0.99, _f("TRACK_CONF_SUPPRESS_THRESHOLD", 0.35)))
+    tc_vehicle_suppress = max(0.01, min(0.99, _f("TRACK_CONF_VEHICLE_SUPPRESS_THRESHOLD", 0.30)))
+    tc_min_age = max(1, min(30, _i("TRACK_CONF_MIN_AGE_FRAMES", 3)))
+    return {
+        "conf": conf,
+        "iou": iou,
+        "imgsz": imgsz,
+        "max_det": max_det,
+        "vid_stride": vid_stride,
+        "stream_buffer": stream_buffer,
+        "augment": augment,
+        "agnostic_nms": agnostic_nms,
+        "tracker": tracker,
+        "track_ema": track_ema,
+        "track_hold_frames": track_hold,
+        "tc_suppress": tc_suppress,
+        "tc_vehicle_suppress": tc_vehicle_suppress,
+        "tc_min_age": tc_min_age,
+    }
+
+
+def _jpeg_quality_from_env(default: int = 80) -> int:
+    try:
+        q = int(os.environ.get("YOLO_WEB_JPEG_QUALITY", "").strip() or str(default))
+    except ValueError:
+        q = default
+    return max(30, min(100, q))
+
+
+def _heading_enabled_from_env(args: argparse.Namespace) -> bool:
+    raw = os.environ.get("YOLO_WEB_HEADING", "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    return not bool(getattr(args, "no_heading_arrow", False))
 
 
 def inference_loop(
@@ -1967,13 +2166,7 @@ def inference_loop(
         _last_norm_pos_by_id: dict[int, tuple[float, float]] = {}
         track_conf_tracker = TrackConfidenceTracker()
 
-        tracker_yaml = resolve_tracker_yaml(args.tracker)
         box_overlay = TrackBoxOverlay(args.track_ema, args.track_hold_frames)
-        print(
-            f"[web] tracker={tracker_yaml} track_ema={args.track_ema} "
-            f"track_hold_frames={args.track_hold_frames} trail_len={args.trail_len} "
-            f"heading_arrow={not args.no_heading_arrow}"
-        )
         if args.no_shape_filter:
             print("[web] Filtro de forma desligado (--no-shape-filter)")
         else:
@@ -1984,14 +2177,23 @@ def inference_loop(
                 f"min_h_px={args.min_person_height_px}"
             )
 
-        _ffmpeg_capture_base = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS", "").strip()
-
         # ── Loop externo: reinicia o stream ao trocar fonte ─────────────────
         while not stop_event.is_set():
             with shared.lock:
                 raw_src = shared.source_live
                 shared.source_changed = False
                 shared.track_classes_changed = False
+
+            _tp = _read_track_infer_env(args)
+            box_overlay.set_params(_tp["track_ema"], _tp["track_hold_frames"])
+            tracker_yaml = resolve_tracker_yaml(_tp["tracker"])
+            _ffmpeg_capture_base = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS", "").strip()
+            print(
+                f"[web] tracker={tracker_yaml} conf={_tp['conf']:.3f} imgsz={_tp['imgsz']} "
+                f"max_det={_tp['max_det']} vid_stride={_tp['vid_stride']} "
+                f"stream_buffer={_tp['stream_buffer']}",
+                flush=True,
+            )
 
             try:
                 stream_src = resolve_stream_source(str(raw_src))
@@ -2055,11 +2257,11 @@ def inference_loop(
             # A expansao antiga fazia aparecer carros com «so moto» marcado (YOLO_TRACK_NO_CLASSES_ARG).
             effective_class_ids = sorted(set(_uniq))
             _eff_set = set(effective_class_ids)
-            _tp = person_class_id in _eff_set
+            _track_people = person_class_id in _eff_set
             _tv = any(c in _eff_set for c in _v_ids)
             print(
                 f"[web] YOLO classes={effective_class_ids} "
-                f"(track_active={_active_raw}, track_people={_tp}, track_vehicles={_tv})"
+                f"(track_active={_active_raw}, track_people={_track_people}, track_vehicles={_tv})"
             )
 
             _omit_track_classes_kw = os.environ.get("YOLO_TRACK_NO_CLASSES_ARG", "0").strip().lower() in (
@@ -2078,7 +2280,7 @@ def inference_loop(
             else:
                 _eff_cls_fz = _strict_ui_classes_fz
 
-            _infer_conf = float(args.conf)
+            _infer_conf = float(_tp["conf"])
             _vehicles_only_stream = (
                 person_class_id not in _eff_set and bool(_v_ids) and any(c in _eff_set for c in _v_ids)
             )
@@ -2090,22 +2292,22 @@ def inference_loop(
                 _infer_conf = max(0.02, min(0.99, _infer_conf * _vmult))
                 print(
                     f"[web] Modo so veiculos: conf={_infer_conf:.3f} "
-                    f"(base {args.conf:.3f} * YOLO_CONF_MULT_VEHICLE_ONLY={_vmult})"
+                    f"(base {_tp['conf']:.3f} * YOLO_CONF_MULT_VEHICLE_ONLY={_vmult})"
                 )
 
             track_kw: dict = {
                 "source": source,
                 "stream": True,
                 "conf": _infer_conf,
-                "iou": args.iou,
-                "imgsz": args.imgsz,
-                "max_det": args.max_det,
+                "iou": _tp["iou"],
+                "imgsz": _tp["imgsz"],
+                "max_det": _tp["max_det"],
                 "tracker": tracker_yaml,
                 "persist": True,
                 "verbose": False,
                 "device": resolved_device,
-                "vid_stride": max(1, args.vid_stride),
-                "stream_buffer": args.stream_buffer,
+                "vid_stride": max(1, int(_tp["vid_stride"])),
+                "stream_buffer": bool(_tp["stream_buffer"]),
             }
             _is_http_hls = (
                 isinstance(source, str)
@@ -2125,9 +2327,9 @@ def inference_loop(
                 track_kw["classes"] = effective_class_ids
             if use_half:
                 track_kw["half"] = True
-            if args.augment:
+            if _tp["augment"]:
                 track_kw["augment"] = True
-            if args.agnostic_nms:
+            if _tp["agnostic_nms"]:
                 track_kw["agnostic_nms"] = True
 
             # ── Smooth display: interpolação temporal entre frames YOLO consecutivos ─────────
@@ -2204,9 +2406,7 @@ def inference_loop(
                                 ".jpg", _disp, [int(cv2.IMWRITE_JPEG_QUALITY), _jq]
                             )
                             if _ok_e:
-                                with shared.frame_output_lock:
-                                    shared.last_frame_jpeg = _enc.tobytes()
-                                    shared.last_frame_mono = time.monotonic()
+                                _publish_jpeg_frame(shared, _enc.tobytes())
                         _cap.release()
                         print("[web] smooth-display: encerrado.", flush=True)
                     return _fn
@@ -2229,8 +2429,14 @@ def inference_loop(
                 PerTrackSexSmoother.from_env() if sex_clf is not None and sex_clf.enabled else None
             )
             foot_trail_by_id: dict[int, deque[tuple[int, int]]] = {}
-            trail_max = max(0, int(args.trail_len))
-            show_heading_arrow = (not args.no_heading_arrow) and trail_max >= 2
+            try:
+                trail_max = max(
+                    0,
+                    int(os.environ.get("YOLO_WEB_TRAIL_LEN", "").strip() or str(int(args.trail_len))),
+                )
+            except ValueError:
+                trail_max = max(0, int(args.trail_len))
+            show_heading_arrow = _heading_enabled_from_env(args) and trail_max >= 2
             prev_frame_mono: float | None = None
             ema_infer_fps: float = 0.0
             blur_ema: float = 0.0
@@ -2261,6 +2467,8 @@ def inference_loop(
                     shared.last_track_tick_mono = _tick_now
                 with shared.lock:
                     if shared.source_changed or shared.track_classes_changed:
+                        break
+                    if shared.infer_params_reload:
                         break
 
                 frame = result.orig_img
@@ -2458,9 +2666,8 @@ def inference_loop(
                             _synthetic_id_warned = True
                     if len(ids_list) != len(xys_raw):
                         ids_list = fallback_track_ids_from_detections(xys_raw, clss_raw)
-                    conf_by_tid = {int(tid): float(c) for tid, c in zip(ids_list, confs_raw)}
                     if not args.no_shape_filter and not _skip_nonperson_shape:
-                        ids_list, xys_raw, clss_raw = filter_boxes_by_shape_multi(
+                        ids_list, xys_raw, clss_raw, _cf_f = filter_boxes_by_shape_multi(
                             ids_list,
                             xys_raw,
                             clss_raw,
@@ -2473,7 +2680,44 @@ def inference_loop(
                             args.max_nonperson_area_frac,
                             args.min_person_height_px,
                             _np_h_frac,
+                            confs_raw,
                         )
+                        if _cf_f is not None:
+                            confs_raw = _cf_f
+                    elif (
+                        args.no_shape_filter
+                        and not _skip_nonperson_shape
+                        and os.environ.get("YOLO_SHAPE_FILTER_NONPERSON", "").strip().lower()
+                        in ("1", "true", "yes", "on")
+                    ):
+                        _oi: list[int] = []
+                        _ox: list[tuple[float, float, float, float]] = []
+                        _oc: list[int] = []
+                        _of: list[float] = []
+                        for tid, box, c, cf in zip(ids_list, xys_raw, clss_raw, confs_raw):
+                            ci = int(c)
+                            if ci == int(person_class_id):
+                                _oi.append(tid)
+                                _ox.append(box)
+                                _oc.append(ci)
+                                _of.append(float(cf))
+                            elif bbox_non_person_sane(
+                                box,
+                                fw,
+                                fh,
+                                args.max_nonperson_area_frac,
+                                args.min_person_height_px,
+                                _np_h_frac,
+                            ):
+                                _oi.append(tid)
+                                _ox.append(box)
+                                _oc.append(ci)
+                                _of.append(float(cf))
+                        ids_list = _oi
+                        xys_raw = _ox
+                        clss_raw = _oc
+                        confs_raw = _of
+                    conf_by_tid = {int(tid): float(c) for tid, c in zip(ids_list, confs_raw)}
                     cls_by_tid = {int(tid): int(c) for tid, c in zip(ids_list, clss_raw)}
                     for _tid, _c in cls_by_tid.items():
                         last_yolo_cls_by_tid[int(_tid)] = int(_c)
@@ -2504,7 +2748,12 @@ def inference_loop(
                             frame_ts,
                             is_vehicle=_is_veh,
                         )
-                        _track_reliable = track_conf_tracker.is_reliable(track_id)
+                        _track_reliable = track_conf_tracker.is_reliable(
+                            track_id,
+                            suppress_thresh=_tp["tc_suppress"],
+                            vehicle_suppress_thresh=_tp["tc_vehicle_suppress"],
+                            min_age=_tp["tc_min_age"],
+                        )
                         _cx_n, _cy_n = foot_x / fw, foot_y / fh
                         grid_live.update_track(int(track_id), _cx_n, _cy_n, frame_ts)
                         flow_grid.update_track(int(track_id), _cx_n, _cy_n)
@@ -2527,49 +2776,68 @@ def inference_loop(
                                 )
                         if count_mode == "polygon" and poly_pts_list:
                             inside = inside_for_presence
-                            with shared.lock:
-                                prev_b = prev_inside_by_id.get(track_id)
-                                _poly_roi = (named_clamped[0].get("title") or "polygon") if named_clamped else "polygon"
-                                if prev_b is not None and not prev_b and inside:
-                                    if _track_reliable:
-                                        shared.counter.entries += 1
-                                        if _is_veh:
-                                            shared.counter.vehicle_entries += 1
-                                            _vcls = cls_by_tid.get(track_id, _default_det_cls)
-                                            shared.counter.vehicle_class_entries[_vcls] = shared.counter.vehicle_class_entries.get(_vcls, 0) + 1
-                                        _bump_hourly(shared, "entry")
-                                        entry_boxes.append(
-                                            (track_id, (x_min, y_min, x_max, y_max))
-                                        )
-                                        audit_log.log(
-                                            ts=frame_ts, session_id=shared.session_id,
-                                            event_type="entry", track_id=int(track_id),
-                                            confidence=track_conf_tracker.score_of(track_id),
-                                            x_norm=_cx_n, y_norm=_cy_n,
-                                            metadata={"mode": "polygon"},
-                                        )
-                                        _emit("entry", int(track_id), cls_by_tid.get(track_id, _default_det_cls), _cx_n, _cy_n, track_conf_tracker.score_of(track_id), _poly_roi, "polygon", frame_ts)
-                                    else:
-                                        shared.suppressed_events += 1
-                                elif prev_b is not None and prev_b and not inside:
-                                    if _track_reliable:
+                            prev_b = prev_inside_by_id.get(track_id)
+                            _poly_roi = (named_clamped[0].get("title") or "polygon") if named_clamped else "polygon"
+                            # Entrada na uniao: (1) fora->dentro classico; (2) primeira observacao
+                            # ja dentro — sem (2), camaras que so cobrem o interior da zona ficam sempre a 0.
+                            union_entry = (
+                                _track_reliable
+                                and inside
+                                and (prev_b is None or not prev_b)
+                            )
+                            if union_entry:
+                                with shared.lock:
+                                    _sess_poly = shared.session_id
+                                    shared.counter.entries += 1
+                                    if _is_veh:
+                                        shared.counter.vehicle_entries += 1
+                                        _vcls = cls_by_tid.get(track_id, _default_det_cls)
+                                        shared.counter.vehicle_class_entries[_vcls] = shared.counter.vehicle_class_entries.get(_vcls, 0) + 1
+                                    _bump_hourly(shared, "entry")
+                                entry_boxes.append(
+                                    (track_id, (x_min, y_min, x_max, y_max))
+                                )
+                                audit_log.log(
+                                    ts=frame_ts, session_id=_sess_poly,
+                                    event_type="entry", track_id=int(track_id),
+                                    confidence=track_conf_tracker.score_of(track_id),
+                                    x_norm=_cx_n, y_norm=_cy_n,
+                                    metadata={"mode": "polygon"},
+                                )
+                                _emit("entry", int(track_id), cls_by_tid.get(track_id, _default_det_cls), _cx_n, _cy_n, track_conf_tracker.score_of(track_id), _poly_roi, "polygon", frame_ts)
+                            elif (
+                                prev_b is not None
+                                and not prev_b
+                                and inside
+                                and not _track_reliable
+                            ):
+                                with shared.lock:
+                                    shared.suppressed_events += 1
+                            elif prev_b is not None and prev_b and not inside:
+                                if _track_reliable:
+                                    with shared.lock:
+                                        _sess_poly = shared.session_id
                                         shared.counter.exits += 1
                                         if _is_veh:
                                             shared.counter.vehicle_exits += 1
                                             _vcls = cls_by_tid.get(track_id, _default_det_cls)
                                             shared.counter.vehicle_class_exits[_vcls] = shared.counter.vehicle_class_exits.get(_vcls, 0) + 1
                                         _bump_hourly(shared, "exit")
-                                        audit_log.log(
-                                            ts=frame_ts, session_id=shared.session_id,
-                                            event_type="exit", track_id=int(track_id),
-                                            confidence=track_conf_tracker.score_of(track_id),
-                                            x_norm=_cx_n, y_norm=_cy_n,
-                                            metadata={"mode": "polygon"},
-                                        )
-                                        _emit("exit", int(track_id), cls_by_tid.get(track_id, _default_det_cls), _cx_n, _cy_n, track_conf_tracker.score_of(track_id), _poly_roi, "polygon", frame_ts)
-                                    else:
+                                    audit_log.log(
+                                        ts=frame_ts, session_id=_sess_poly,
+                                        event_type="exit", track_id=int(track_id),
+                                        confidence=track_conf_tracker.score_of(track_id),
+                                        x_norm=_cx_n, y_norm=_cy_n,
+                                        metadata={"mode": "polygon"},
+                                    )
+                                    _emit("exit", int(track_id), cls_by_tid.get(track_id, _default_det_cls), _cx_n, _cy_n, track_conf_tracker.score_of(track_id), _poly_roi, "polygon", frame_ts)
+                                else:
+                                    with shared.lock:
                                         shared.suppressed_events += 1
-                            prev_inside_by_id[track_id] = inside
+                            # Primeira observacao dentro mas track ainda "novo": nao fixar prev=True
+                            # ate ser confiavel, senao perde-se a entrada implicita na uniao.
+                            if not (prev_b is None and inside and not _track_reliable):
+                                prev_inside_by_id[track_id] = inside
                             # Per-polygon individual tracking (entries/exits per zone)
                             if poly_pts_list:
                                 cur_poly = [foot_inside_polygon(foot_x, foot_y, pts) for pts in poly_pts_list]
@@ -2642,46 +2910,51 @@ def inference_loop(
                                 prev_foot_per_track[track_id] = (foot_x, foot_y)
                         elif count_mode == "line":
                             side = side_of_line(foot_x, foot_y, x1, y1, x2, y2)
-                            with shared.lock:
-                                prev = last_side_by_id.get(track_id)
-                                if prev is not None and prev < 0 <= side:
-                                    if _track_reliable:
+                            prev = last_side_by_id.get(track_id)
+                            if prev is not None and prev < 0 <= side:
+                                if _track_reliable:
+                                    with shared.lock:
+                                        _sess_line = shared.session_id
                                         shared.counter.entries += 1
                                         if _is_veh:
                                             shared.counter.vehicle_entries += 1
                                             _vcls = cls_by_tid.get(track_id, _default_det_cls)
                                             shared.counter.vehicle_class_entries[_vcls] = shared.counter.vehicle_class_entries.get(_vcls, 0) + 1
                                         _bump_hourly(shared, "entry")
-                                        entry_boxes.append(
-                                            (track_id, (x_min, y_min, x_max, y_max))
-                                        )
-                                        audit_log.log(
-                                            ts=frame_ts, session_id=shared.session_id,
-                                            event_type="entry", track_id=int(track_id),
-                                            confidence=track_conf_tracker.score_of(track_id),
-                                            x_norm=_cx_n, y_norm=_cy_n,
-                                            metadata={"mode": "line"},
-                                        )
-                                        _emit("entry", int(track_id), cls_by_tid.get(track_id, _default_det_cls), _cx_n, _cy_n, track_conf_tracker.score_of(track_id), "line", "line", frame_ts)
-                                    else:
+                                    entry_boxes.append(
+                                        (track_id, (x_min, y_min, x_max, y_max))
+                                    )
+                                    audit_log.log(
+                                        ts=frame_ts, session_id=_sess_line,
+                                        event_type="entry", track_id=int(track_id),
+                                        confidence=track_conf_tracker.score_of(track_id),
+                                        x_norm=_cx_n, y_norm=_cy_n,
+                                        metadata={"mode": "line"},
+                                    )
+                                    _emit("entry", int(track_id), cls_by_tid.get(track_id, _default_det_cls), _cx_n, _cy_n, track_conf_tracker.score_of(track_id), "line", "line", frame_ts)
+                                else:
+                                    with shared.lock:
                                         shared.suppressed_events += 1
-                                elif prev is not None and prev > 0 >= side:
-                                    if _track_reliable:
+                            elif prev is not None and prev > 0 >= side:
+                                if _track_reliable:
+                                    with shared.lock:
+                                        _sess_line = shared.session_id
                                         shared.counter.exits += 1
                                         if _is_veh:
                                             shared.counter.vehicle_exits += 1
                                             _vcls = cls_by_tid.get(track_id, _default_det_cls)
                                             shared.counter.vehicle_class_exits[_vcls] = shared.counter.vehicle_class_exits.get(_vcls, 0) + 1
                                         _bump_hourly(shared, "exit")
-                                        audit_log.log(
-                                            ts=frame_ts, session_id=shared.session_id,
-                                            event_type="exit", track_id=int(track_id),
-                                            confidence=track_conf_tracker.score_of(track_id),
-                                            x_norm=_cx_n, y_norm=_cy_n,
-                                            metadata={"mode": "line"},
-                                        )
-                                        _emit("exit", int(track_id), cls_by_tid.get(track_id, _default_det_cls), _cx_n, _cy_n, track_conf_tracker.score_of(track_id), "line", "line", frame_ts)
-                                    else:
+                                    audit_log.log(
+                                        ts=frame_ts, session_id=_sess_line,
+                                        event_type="exit", track_id=int(track_id),
+                                        confidence=track_conf_tracker.score_of(track_id),
+                                        x_norm=_cx_n, y_norm=_cy_n,
+                                        metadata={"mode": "line"},
+                                    )
+                                    _emit("exit", int(track_id), cls_by_tid.get(track_id, _default_det_cls), _cx_n, _cy_n, track_conf_tracker.score_of(track_id), "line", "line", frame_ts)
+                                else:
+                                    with shared.lock:
                                         shared.suppressed_events += 1
                             last_side_by_id[track_id] = side
 
@@ -2789,7 +3062,122 @@ def inference_loop(
                     _active_classes = frozenset(shared.track_active_class_ids)
                     _all_vehicles_mode = shared.all_vehicles_mode
 
+                _hide_stale_boxes = os.environ.get("YOLO_HIDE_STALE_BOXES", "").strip().lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                )
+                try:
+                    _ov_min_det = float(
+                        os.environ.get("YOLO_OVERLAY_MIN_DET_CONF", "").strip() or "0"
+                    )
+                except ValueError:
+                    _ov_min_det = 0.0
+                _ov_min_det = max(0.0, min(0.99, _ov_min_det))
+                try:
+                    _ov_min_v = float(
+                        os.environ.get("YOLO_OVERLAY_MIN_DET_CONF_VEHICLE", "").strip() or "0"
+                    )
+                except ValueError:
+                    _ov_min_v = 0.0
+                _ov_min_v = max(0.0, min(0.99, _ov_min_v))
+                try:
+                    _ov_v_wmin = float(
+                        os.environ.get("YOLO_OVERLAY_VEHICLE_MIN_WIDTH_FRAC", "").strip() or "0"
+                    )
+                except ValueError:
+                    _ov_v_wmin = 0.0
+                _ov_v_wmin = max(0.0, min(0.5, _ov_v_wmin))
+                try:
+                    _ov_v_edge = float(
+                        os.environ.get(
+                            "YOLO_OVERLAY_VEHICLE_EDGE_MARGIN_FRAC", ""
+                        ).strip()
+                        or "0"
+                    )
+                except ValueError:
+                    _ov_v_edge = 0.0
+                _ov_v_edge = max(0.0, min(0.45, _ov_v_edge))
+                _raw_v_edge_cov = os.environ.get(
+                    "YOLO_OVERLAY_VEHICLE_EDGE_COVER_FRAC", ""
+                ).strip()
+                if not _raw_v_edge_cov:
+                    _ov_v_edge_cover = 0.5
+                else:
+                    try:
+                        _ov_v_edge_cover = float(_raw_v_edge_cov)
+                    except ValueError:
+                        _ov_v_edge_cover = 0.5
+                _ov_v_edge_cover = max(0.0, min(1.0, _ov_v_edge_cover))
+                try:
+                    _ov_p_edge = float(
+                        os.environ.get(
+                            "YOLO_OVERLAY_PERSON_EDGE_MARGIN_FRAC", ""
+                        ).strip()
+                        or "0"
+                    )
+                except ValueError:
+                    _ov_p_edge = 0.0
+                _ov_p_edge = max(0.0, min(0.45, _ov_p_edge))
+                try:
+                    _ov_p_hmin = float(
+                        os.environ.get(
+                            "YOLO_OVERLAY_PERSON_MIN_HEIGHT_FRAC", ""
+                        ).strip()
+                        or "0"
+                    )
+                except ValueError:
+                    _ov_p_hmin = 0.0
+                _ov_p_hmin = max(0.0, min(0.5, _ov_p_hmin))
+                _raw_p_edge_cov = os.environ.get(
+                    "YOLO_OVERLAY_PERSON_EDGE_COVER_FRAC", ""
+                ).strip()
+                if not _raw_p_edge_cov:
+                    _ov_p_edge_cover = 0.5
+                else:
+                    try:
+                        _ov_p_edge_cover = float(_raw_p_edge_cov)
+                    except ValueError:
+                        _ov_p_edge_cover = 0.5
+                _ov_p_edge_cover = max(0.0, min(1.0, _ov_p_edge_cover))
+                try:
+                    _ov_p_glare_z = float(
+                        os.environ.get(
+                            "YOLO_OVERLAY_PERSON_GLARE_ZONE_FRAC", ""
+                        ).strip()
+                        or "0"
+                    )
+                except ValueError:
+                    _ov_p_glare_z = 0.0
+                _ov_p_glare_z = max(0.0, min(0.45, _ov_p_glare_z))
+                try:
+                    _ov_p_glare_min = float(
+                        os.environ.get(
+                            "YOLO_OVERLAY_PERSON_GLARE_ZONE_MIN_CONF", ""
+                        ).strip()
+                        or "0"
+                    )
+                except ValueError:
+                    _ov_p_glare_min = 0.0
+                _ov_p_glare_min = max(0.0, min(0.99, _ov_p_glare_min))
                 for track_id, (xa, ya, xb, yb), stale in draw_items:
+                    if _hide_stale_boxes and stale:
+                        continue
+                    # ByteTrack pode ainda devolver ID com predição Kalman (stale=False) e conf baixa;
+                    # esconde overlay sem cortar a lógica de contagem em cima.
+                    if _ov_min_det > 0.0:
+                        _dc = conf_by_tid.get(track_id)
+                        if _dc is None or float(_dc) < _ov_min_det:
+                            continue
+                    if _ov_min_v > 0.0:
+                        _oc = cls_by_tid.get(track_id)
+                        if _oc is None:
+                            _oc = last_yolo_cls_by_tid.get(track_id, _default_det_cls)
+                        if int(_oc) != int(person_class_id):
+                            _dcv = conf_by_tid.get(track_id)
+                            if _dcv is None or float(_dcv) < _ov_min_v:
+                                continue
                     if track_id in raw_foot_by_id:
                         fcx, fcy = raw_foot_by_id[track_id]
                     else:
@@ -2802,6 +3190,77 @@ def inference_loop(
                     det_cls = int(_cls_prev)
                     cls_tag = short_class_tag(names, det_cls) if isinstance(names, dict) else "?"
                     is_person = det_cls == person_class_id
+                    if _ov_v_wmin > 0.0 and not is_person:
+                        _bw = max(0.0, float(xb) - float(xa))
+                        if _bw < _ov_v_wmin * float(max(fw, 1)):
+                            continue
+                    if _ov_v_edge > 0.0 and not is_person:
+                        _fwf = float(max(fw, 1))
+                        _mx = _ov_v_edge * _fwf
+                        _xa_f, _xb_f = float(xa), float(xb)
+                        _bwv = max(0.0, _xb_f - _xa_f)
+                        _cxn = (_xa_f + _xb_f) * 0.5 / _fwf
+                        _in_margin_center = _cxn < _ov_v_edge or _cxn > (
+                            1.0 - _ov_v_edge
+                        )
+                        _frac_in_margin = 0.0
+                        if _bwv > 1e-6:
+                            _lo = max(0.0, min(_xb_f, _mx) - max(_xa_f, 0.0))
+                            _ro = max(
+                                0.0,
+                                min(_xb_f, _fwf) - max(_xa_f, _fwf - _mx),
+                            )
+                            _frac_in_margin = min(1.0, (_lo + _ro) / _bwv)
+                        if _ov_v_edge_cover <= 0.0:
+                            if _in_margin_center:
+                                continue
+                        elif (
+                            _frac_in_margin >= _ov_v_edge_cover
+                            or _in_margin_center
+                        ):
+                            continue
+                    if _ov_p_edge > 0.0 and is_person:
+                        _fwfp = float(max(fw, 1))
+                        _mxp = _ov_p_edge * _fwfp
+                        _xap, _xbp = float(xa), float(xb)
+                        _bwp = max(0.0, _xbp - _xap)
+                        _cxp = (_xap + _xbp) * 0.5 / _fwfp
+                        _in_p_margin_center = _cxp < _ov_p_edge or _cxp > (
+                            1.0 - _ov_p_edge
+                        )
+                        _frac_p_margin = 0.0
+                        if _bwp > 1e-6:
+                            _lop = max(0.0, min(_xbp, _mxp) - max(_xap, 0.0))
+                            _rop = max(
+                                0.0,
+                                min(_xbp, _fwfp) - max(_xap, _fwfp - _mxp),
+                            )
+                            _frac_p_margin = min(1.0, (_lop + _rop) / _bwp)
+                        if _ov_p_edge_cover <= 0.0:
+                            if _in_p_margin_center:
+                                continue
+                        elif (
+                            _frac_p_margin >= _ov_p_edge_cover
+                            or _in_p_margin_center
+                        ):
+                            continue
+                    if _ov_p_hmin > 0.0 and is_person:
+                        _bh = max(0.0, float(yb) - float(ya))
+                        if _bh < _ov_p_hmin * float(max(fh, 1)):
+                            continue
+                    if (
+                        _ov_p_glare_z > 0.0
+                        and _ov_p_glare_min > 0.0
+                        and is_person
+                    ):
+                        _gz_lo = _ov_p_glare_z
+                        _gz_hi = 1.0 - _ov_p_glare_z
+                        _cxg = (float(xa) + float(xb)) * 0.5 / float(max(fw, 1))
+                        _cyg = (float(ya) + float(yb)) * 0.5 / float(max(fh, 1))
+                        if _gz_lo < _cxg < _gz_hi and _gz_lo < _cyg < _gz_hi:
+                            _dgl = conf_by_tid.get(track_id)
+                            if _dgl is None or float(_dgl) < _ov_p_glare_min:
+                                continue
                     _vehicle_alert_eligible = (
                         (not is_person)
                         and det_cls in _active_classes
@@ -3084,6 +3543,61 @@ def inference_loop(
                 )
                 _flow_vec_counter += 1
                 _drift = drift_detector.update(frame)
+                _hp_refresh_after = False
+                _log_drift_now = _drift.level != "ok" and _drift.score > 0.5
+                if count_mode == "polygon" and poly_pts_list and named_clamped:
+                    _poly_occ = [0] * len(poly_pts_list)
+                    _poly_dwell_sums = [0.0] * len(poly_pts_list)
+                    _poly_dwell_cnts = [0] * len(poly_pts_list)
+                    for _tid in current_present_ids:
+                        _pstate = prev_inside_per_poly_by_id.get(_tid, [])
+                        _ept = zone_entered_per_poly_by_id.get(_tid, [])
+                        for _pi in range(len(poly_pts_list)):
+                            if _pi < len(_pstate) and _pstate[_pi]:
+                                _poly_occ[_pi] += 1
+                                if _pi < len(_ept) and _ept[_pi] is not None:
+                                    _poly_dwell_sums[_pi] += max(0.0, frame_ts - _ept[_pi])
+                                    _poly_dwell_cnts[_pi] += 1
+                    _polygon_stats_publish: list[dict[str, Any]] = []
+                    for _pi, _e in enumerate(named_clamped):
+                        _title = str(_e.get("title") or "").strip() or f"Área {_pi + 1}"
+                        _avg_d = _poly_dwell_sums[_pi] / _poly_dwell_cnts[_pi] if _poly_dwell_cnts[_pi] > 0 else 0.0
+                        _hdx, _hdy = (
+                            poly_heading_ema[_pi]
+                            if _pi < len(poly_heading_ema)
+                            else (0.0, 0.0)
+                        )
+                        _hmag = (_hdx * _hdx + _hdy * _hdy) ** 0.5
+                        _hdeg = (
+                            (math.degrees(math.atan2(_hdy, _hdx)) + 360.0) % 360.0
+                            if _hmag > 0.35
+                            else None
+                        )
+                        _polygon_stats_publish.append({
+                            "title": _title,
+                            "entries": poly_session_entries[_pi] if _pi < len(poly_session_entries) else 0,
+                            "exits": poly_session_exits[_pi] if _pi < len(poly_session_exits) else 0,
+                            "vehicle_entries": poly_session_vehicle_entries[_pi] if _pi < len(poly_session_vehicle_entries) else 0,
+                            "vehicle_exits": poly_session_vehicle_exits[_pi] if _pi < len(poly_session_vehicle_exits) else 0,
+                            "occupancy_now": _poly_occ[_pi],
+                            "avg_dwell_s": round(_avg_d, 1),
+                            "inverted": bool(_e.get("inverted", False)),
+                            "heading_deg": (
+                                round(_hdeg, 1) if _hdeg is not None else None
+                            ),
+                            "heading_speed_px_frame": round(_hmag, 2),
+                        })
+                else:
+                    _polygon_stats_publish = []
+                _flow_vec_payload = None
+                if _flow_vec_counter >= 30:
+                    _flow_vec_counter = 0
+                    _flow_vec_payload = flow_grid.to_payload()
+                _rs_reid = person_tracker.session_stats(current_present_ids)
+                _low_conf_ct = track_conf_tracker.low_confidence_count(
+                    suppress_thresh=_tp["tc_suppress"],
+                    vehicle_suppress_thresh=_tp["tc_vehicle_suppress"],
+                )
                 with shared.lock:
                     text = f"in={shared.counter.entries} out={shared.counter.exits} total={shared.counter.total}"
                     live_text = (
@@ -3100,52 +3614,7 @@ def inference_loop(
                     shared.avg_move_speed_px_per_sec = avg_move_px_sec
                     shared.vehicle_avg_speed_px_per_sec = vehicle_avg_speed_px_sec
                     shared.vehicle_zone_live_payload = {"zones": vehicle_zone_tracker.get_snapshot()}
-                    # Per-polygon live stats
-                    if count_mode == "polygon" and poly_pts_list and named_clamped:
-                        _poly_occ = [0] * len(poly_pts_list)
-                        _poly_dwell_sums = [0.0] * len(poly_pts_list)
-                        _poly_dwell_cnts = [0] * len(poly_pts_list)
-                        for _tid in current_present_ids:
-                            _pstate = prev_inside_per_poly_by_id.get(_tid, [])
-                            _ept = zone_entered_per_poly_by_id.get(_tid, [])
-                            for _pi in range(len(poly_pts_list)):
-                                if _pi < len(_pstate) and _pstate[_pi]:
-                                    _poly_occ[_pi] += 1
-                                    if _pi < len(_ept) and _ept[_pi] is not None:
-                                        _poly_dwell_sums[_pi] += max(0.0, frame_ts - _ept[_pi])
-                                        _poly_dwell_cnts[_pi] += 1
-                        _live_stats: list[dict[str, Any]] = []
-                        for _pi, _e in enumerate(named_clamped):
-                            _title = str(_e.get("title") or "").strip() or f"Área {_pi + 1}"
-                            _avg_d = _poly_dwell_sums[_pi] / _poly_dwell_cnts[_pi] if _poly_dwell_cnts[_pi] > 0 else 0.0
-                            _hdx, _hdy = (
-                                poly_heading_ema[_pi]
-                                if _pi < len(poly_heading_ema)
-                                else (0.0, 0.0)
-                            )
-                            _hmag = (_hdx * _hdx + _hdy * _hdy) ** 0.5
-                            _hdeg = (
-                                (math.degrees(math.atan2(_hdy, _hdx)) + 360.0) % 360.0
-                                if _hmag > 0.35
-                                else None
-                            )
-                            _live_stats.append({
-                                "title": _title,
-                                "entries": poly_session_entries[_pi] if _pi < len(poly_session_entries) else 0,
-                                "exits": poly_session_exits[_pi] if _pi < len(poly_session_exits) else 0,
-                                "vehicle_entries": poly_session_vehicle_entries[_pi] if _pi < len(poly_session_vehicle_entries) else 0,
-                                "vehicle_exits": poly_session_vehicle_exits[_pi] if _pi < len(poly_session_vehicle_exits) else 0,
-                                "occupancy_now": _poly_occ[_pi],
-                                "avg_dwell_s": round(_avg_d, 1),
-                                "inverted": bool(_e.get("inverted", False)),
-                                "heading_deg": (
-                                    round(_hdeg, 1) if _hdeg is not None else None
-                                ),
-                                "heading_speed_px_frame": round(_hmag, 2),
-                            })
-                        shared.polygon_live_stats = _live_stats
-                    else:
-                        shared.polygon_live_stats = []
+                    shared.polygon_live_stats = list(_polygon_stats_publish)
                     shared.infer_fps_ema = ema_infer_fps
                     shared.cam_confidence = cam_conf
                     shared.cam_confidence_reasons = cam_conf_reasons
@@ -3159,25 +3628,19 @@ def inference_loop(
                         shared.queue_avg_wait_s = 0.0
                         shared.queue_saturated = False
                         shared.queue_linearity = 0.0
-                    if _flow_vec_counter >= 30:
-                        _flow_vec_counter = 0
-                        shared.flow_vectors_payload = flow_grid.to_payload()
-                    _rs = person_tracker.session_stats(current_present_ids)
-                    shared.reid_unique_persons = _rs["unique_persons"]
-                    shared.reid_active_persons = _rs["active_persons"]
-                    shared.reid_revisited = _rs["revisited_persons"]
-                    shared.reid_avg_dwell_s = _rs["avg_total_dwell_s"]
-                    shared.low_conf_tracks = track_conf_tracker.low_confidence_count()
+                    if _flow_vec_payload is not None:
+                        shared.flow_vectors_payload = _flow_vec_payload
+                    shared.reid_unique_persons = _rs_reid["unique_persons"]
+                    shared.reid_active_persons = _rs_reid["active_persons"]
+                    shared.reid_revisited = _rs_reid["revisited_persons"]
+                    shared.reid_avg_dwell_s = _rs_reid["avg_total_dwell_s"]
+                    shared.low_conf_tracks = _low_conf_ct
                     shared.cam_drift_level = _drift.level
                     shared.cam_drift_score = _drift.score
                     shared.cam_drift_reason = _drift.reason
                     shared.cam_drift_baseline_ready = _drift.baseline_ready
-                    if _drift.level != "ok" and _drift.score > 0.5:
-                        audit_log.log(
-                            ts=frame_ts, session_id=shared.session_id,
-                            event_type="drift_detected",
-                            metadata={"level": _drift.level, "reason": _drift.reason, "score": round(_drift.score, 3)},
-                        )
+                    shared.cam_blur_ema = blur_ema
+                    shared.cam_avg_bbox_h = avg_bbox_h
                     _hm_sess_id = shared.session_id
                     _grid_live_counter += 1
                     _hotspot_payload_counter += 1
@@ -3190,16 +3653,35 @@ def inference_loop(
                     if _hotspot_payload_counter >= 30:
                         _hotspot_payload_counter = 0
                         shared.dwell_live_payload = dwell_grid.to_payload()
-                        _zrec_h = zone_store_inf.load_zone_records(_hm_site_id, _hm_cam_id)
-                        _masks = [
-                            (z.id, rasterize_norm_polygon(z.polygon_norm))
-                            for z in _zrec_h
-                        ]
-                        _sg = hotspot_scorer.score_grid("composite")
-                        _zs = (
-                            hotspot_scorer.score_zones(_masks, "composite") if _masks else []
-                        )
-                        shared.hotspots_live_payload = {**_sg, "zones": _zs}
+                        _hp_refresh_after = True
+                if _log_drift_now:
+                    with shared.lock:
+                        _sid_drift_log = shared.session_id
+                    audit_log.log(
+                        ts=frame_ts,
+                        session_id=_sid_drift_log,
+                        event_type="drift_detected",
+                        metadata={
+                            "level": _drift.level,
+                            "reason": _drift.reason,
+                            "score": round(_drift.score, 3),
+                        },
+                    )
+                if _hp_refresh_after:
+                    with shared.lock:
+                        _cam_hot = shared.active_preset_id or "default"
+                    _zrec_h = zone_store_inf.load_zone_records(_hm_site_id, _cam_hot)
+                    _masks = [
+                        (z.id, rasterize_norm_polygon(z.polygon_norm))
+                        for z in _zrec_h
+                    ]
+                    _sg = hotspot_scorer.score_grid("composite")
+                    _zs = (
+                        hotspot_scorer.score_zones(_masks, "composite") if _masks else []
+                    )
+                    _hp_payload = {**_sg, "zones": _zs}
+                    with shared.lock:
+                        shared.hotspots_live_payload = _hp_payload
                 slot_aggregator.feed(grid_live.to_raw_array(), time.time())
                 for _slot_ts, _slot_grid in slot_aggregator.pop_pending():
                     heatmap_store.write_slot(
@@ -3248,16 +3730,16 @@ def inference_loop(
                             bd_color = _C_AMBER if ri % 2 == 0 else _C_CYAN
                             arr = np.array(ring, dtype=np.int32).reshape(-1, 1, 2)
                             cv2.fillPoly(overlay, [arr], bd_color, lineType=cv2.LINE_AA)
-                        cv2.addWeighted(overlay, 0.28, frame, 0.72, 0, frame)
+                        cv2.addWeighted(overlay, 0.17, frame, 0.83, 0, frame)
 
                         for ri, ring in enumerate(poly_pts_list):
                             bd_color = _C_AMBER if ri % 2 == 0 else _C_CYAN
                             arr = np.array(ring, dtype=np.int32).reshape(-1, 1, 2)
                             cv2.polylines(
-                                frame, [arr], isClosed=True, color=bd_color, thickness=2, lineType=cv2.LINE_AA
+                                frame, [arr], isClosed=True, color=bd_color, thickness=1, lineType=cv2.LINE_AA
                             )
                             for pt in ring:
-                                cv2.circle(frame, pt, 4, _C_BLACK, -1, lineType=cv2.LINE_AA)
+                                cv2.circle(frame, pt, 3, _C_BLACK, -1, lineType=cv2.LINE_AA)
                                 cv2.circle(frame, pt, 2, bd_color, -1, lineType=cv2.LINE_AA)
                             label = (
                                 (poly_titles[ri].strip() if ri < len(poly_titles) else "")
@@ -3266,7 +3748,7 @@ def inference_loop(
                             cx = int(sum(int(p[0]) for p in ring) / max(len(ring), 1))
                             cy = int(sum(int(p[1]) for p in ring) / max(len(ring), 1))
                             (tw, th), _ = cv2.getTextSize(
-                                label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2
+                                label, cv2.FONT_HERSHEY_SIMPLEX, 0.43, 1
                             )
                             tx, ty = max(4, cx - tw // 2), max(th + 4, cy + th // 2)
                             cv2.putText(
@@ -3274,9 +3756,9 @@ def inference_loop(
                                 label,
                                 (tx, ty),
                                 cv2.FONT_HERSHEY_SIMPLEX,
-                                0.55,
+                                0.43,
                                 _C_BLACK,
-                                3,
+                                2,
                                 lineType=cv2.LINE_AA,
                             )
                             cv2.putText(
@@ -3284,9 +3766,9 @@ def inference_loop(
                                 label,
                                 (tx, ty),
                                 cv2.FONT_HERSHEY_SIMPLEX,
-                                0.55,
+                                0.43,
                                 bd_color,
-                                2,
+                                1,
                                 lineType=cv2.LINE_AA,
                             )
                             # Seta estilizada de fluxo dentro da zona:
@@ -3301,8 +3783,8 @@ def inference_loop(
                                     _ys = [int(p[1]) for p in ring]
                                     _zw = max(1, max(_xs) - min(_xs))
                                     _zh = max(1, max(_ys) - min(_ys))
-                                    _max_len = min(_zw, _zh) * 0.42
-                                    _arr_len = max(40.0, min(110.0, _max_len))
+                                    _max_len = min(_zw, _zh) * 0.32
+                                    _arr_len = max(28.0, min(72.0, _max_len))
                                     _scale = _arr_len / max(1e-6, _hmag)
                                     _ex = int(round(cx + _hx * _scale * 0.55))
                                     _ey = int(round(cy + _hy * _scale * 0.55))
@@ -3355,16 +3837,27 @@ def inference_loop(
                 # Quando smooth display está activo, só a thread de display escreve em
                 # last_frame_jpeg — evita tremido causado por dois fundos alternados.
                 if not _smooth_disp:
-                    ok, encoded = cv2.imencode(".jpg", frame)
+                    _jq = _jpeg_quality_from_env(80)
+                    ok, encoded = cv2.imencode(
+                        ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), _jq]
+                    )
                     if ok:
-                        _jpeg = encoded.tobytes()
-                        with shared.frame_output_lock:
-                            shared.last_frame_jpeg = _jpeg
-                            shared.last_frame_mono = time.monotonic()
+                        _publish_jpeg_frame(shared, encoded.tobytes())
             # Para a thread de display suave antes de reconectar a fonte.
             _smooth_disp_stop.set()
             if _smooth_disp_thread is not None and _smooth_disp_thread.is_alive():
                 _smooth_disp_thread.join(timeout=3.0)
+
+            _reload_params_exit = False
+            with shared.lock:
+                if shared.infer_params_reload:
+                    shared.infer_params_reload = False
+                    _reload_params_exit = True
+            if _reload_params_exit:
+                print(
+                    "[web] Parametros de inferencia/track (.env) aplicados; stream reaberto.",
+                    flush=True,
+                )
 
             # Fim do for: se saímos sem nenhum frame e a fonte não foi trocada,
             # a URL/câmera falhou ao abrir. Registra erro e faz backoff para não
@@ -3372,7 +3865,7 @@ def inference_loop(
             if not stop_event.is_set():
                 with shared.lock:
                     _src_changed_now = shared.source_changed
-                if not _src_changed_now and _frames_received == 0:
+                if not _src_changed_now and not _reload_params_exit and _frames_received == 0:
                     if is_skylinewebcams_webcam_page(str(raw_src)):
                         _err_msg = (
                             "Falha ao ler o stream HLS (Skyline): a pagina .html foi resolvida para m3u8, "
@@ -3705,15 +4198,47 @@ def create_app(
             merge_env_file(env_file, updates)
         except OSError as exc:
             return jsonify({"error": str(exc)}), 500
+        apply_settings_updates_to_environ(updates)
+        _uk = frozenset(updates.keys())
+        if _uk & MJPEG_SHARED_SYNC_KEYS:
+            _sync_mjpeg_from_environ(shared)
+        _need_restart = settings_updates_require_restart(_uk)
+        _stream_reload = (not _need_restart) and settings_updates_trigger_stream_reload(_uk)
+        if _stream_reload:
+            with shared.lock:
+                shared.infer_params_reload = True
         _persist_config_event(shared, "settings", {"updated_keys": list(updates.keys())})
+        if _need_restart:
+            _hint = (
+                "Reinicie o servidor (bash scripts/run_web.sh) para modelo, GPU, HTTP, heatmap, "
+                "filtros geometricos, fonte inicial, etc."
+            )
+        elif _stream_reload:
+            _hint = (
+                "O stream de inferencia sera reaberto em poucos segundos (conf/imgsz/track/FFmpeg); "
+                "actualize o video se nao mudar sozinho."
+            )
+        else:
+            _hint = "Valores guardados no .env e no ambiente do processo."
         return jsonify(
             {
                 "ok": True,
                 "updated": list(updates.keys()),
-                "restart_required": True,
-                "hint": "Reinicie o servidor (bash scripts/run_web.sh) para carregar os novos valores.",
+                "restart_required": _need_restart,
+                "stream_reload_requested": _stream_reload,
+                "hint": _hint,
             }
         )
+
+    @app.post("/api/restart")
+    def api_restart() -> Response:
+        """Reinicia o processo (exit code 3 → run_web.sh reinicia automaticamente)."""
+        def _do_exit() -> None:
+            time.sleep(0.35)
+            os._exit(3)
+
+        threading.Thread(target=_do_exit, daemon=True).start()
+        return jsonify({"ok": True})
 
     @app.get("/roi")
     def roi_page() -> str:
@@ -4022,43 +4547,47 @@ def create_app(
 
     @app.post("/api/overlay")
     def post_overlay() -> Response:
-        data = request.get_json(silent=True) or {}
-        with shared.lock:
-            if "show_trail" in data:
-                shared.show_trail_overlay = bool(data["show_trail"])
-            if "show_heading" in data:
-                shared.show_heading_overlay = bool(data["show_heading"])
-            if "show_heatmap" in data and shared.heatmap_available:
-                shared.show_heatmap_overlay = bool(data["show_heatmap"])
-            if "show_sex_overlay" in data and shared.sex_overlay_available:
-                shared.show_sex_overlay = bool(data["show_sex_overlay"])
-            if "show_roi" in data:
-                shared.show_roi_overlay = bool(data["show_roi"])
-            st = shared.show_trail_overlay
-            sh = shared.show_heading_overlay
-            shm = shared.show_heatmap_overlay
-            hm_ok = shared.heatmap_available
-            ssx = shared.show_sex_overlay
-            sex_ok = shared.sex_overlay_available
-            sroi = shared.show_roi_overlay
-        ev_overlay: dict = {"show_trail": st, "show_heading": sh}
-        if hm_ok:
-            ev_overlay["show_heatmap"] = shm
-        if sex_ok:
-            ev_overlay["show_sex_overlay"] = ssx
-        _persist_config_event(shared, "overlay", ev_overlay)
-        return jsonify(
-            {
-                "ok": True,
-                "show_trail": st,
-                "show_heading": sh,
-                "heatmap_available": hm_ok,
-                "show_heatmap": shm if hm_ok else False,
-                "sex_overlay_available": sex_ok,
-                "show_sex_overlay": ssx if sex_ok else False,
-                "show_roi": sroi,
-            }
-        )
+        try:
+            data = request.get_json(silent=True) or {}
+            with shared.lock:
+                if "show_trail" in data:
+                    shared.show_trail_overlay = bool(data["show_trail"])
+                if "show_heading" in data:
+                    shared.show_heading_overlay = bool(data["show_heading"])
+                if "show_heatmap" in data and shared.heatmap_available:
+                    shared.show_heatmap_overlay = bool(data["show_heatmap"])
+                if "show_sex_overlay" in data and shared.sex_overlay_available:
+                    shared.show_sex_overlay = bool(data["show_sex_overlay"])
+                if "show_roi" in data:
+                    shared.show_roi_overlay = bool(data["show_roi"])
+                st = shared.show_trail_overlay
+                sh = shared.show_heading_overlay
+                shm = shared.show_heatmap_overlay
+                hm_ok = shared.heatmap_available
+                ssx = shared.show_sex_overlay
+                sex_ok = shared.sex_overlay_available
+                sroi = shared.show_roi_overlay
+            ev_overlay: dict = {"show_trail": st, "show_heading": sh, "show_roi": sroi}
+            if hm_ok:
+                ev_overlay["show_heatmap"] = shm
+            if sex_ok:
+                ev_overlay["show_sex_overlay"] = ssx
+            _persist_config_event(shared, "overlay", ev_overlay)
+            return jsonify(
+                {
+                    "ok": True,
+                    "show_trail": st,
+                    "show_heading": sh,
+                    "heatmap_available": hm_ok,
+                    "show_heatmap": shm if hm_ok else False,
+                    "sex_overlay_available": sex_ok,
+                    "show_sex_overlay": ssx if sex_ok else False,
+                    "show_roi": sroi,
+                }
+            )
+        except Exception as exc:
+            print(f"[web] POST /api/overlay: {exc}", flush=True)
+            return jsonify({"ok": False, "error": str(exc)}), 500
 
     @app.get("/api/line")
     def get_line() -> Response:
@@ -4102,6 +4631,8 @@ def create_app(
         with shared.lock:
             shared.count_mode = "line"
             shared.line_live = (x1, y1, x2, y2)
+            shared.polygons_live = []
+            shared.polygons_default = []
             if reset_counters:
                 reset_entry_exit_counters(shared)
         _persist_config_event(
@@ -4335,6 +4866,8 @@ def create_app(
             return jsonify({"error": "source vazio"}), 400
         if len(new_src) > 4096:
             return jsonify({"error": "source demasiado longo"}), 400
+        if _is_youtube_page_url(new_src):
+            return jsonify(_youtube_source_error_payload()), 400
         with shared.lock:
             old_pid = str(shared.active_preset_id or "").strip()
             presets = list(shared.source_presets)
@@ -4358,6 +4891,8 @@ def create_app(
         url = str(data.get("url", "")).strip()
         if not url or len(url) > 4096:
             return jsonify({"error": "url invalido"}), 400
+        if _is_youtube_page_url(url):
+            return jsonify(_youtube_source_error_payload()), 400
         label = str(data.get("label", "") or "").strip()[:128] or "Câmera"
         with shared.lock:
             if len(shared.source_presets) >= _MAX_SOURCE_PRESETS:
@@ -4388,6 +4923,8 @@ def create_app(
         new_label = str(data.get("label", "") or "").strip()[:128]
         if not new_url or len(new_url) > 4096:
             return jsonify({"error": "url invalido"}), 400
+        if _is_youtube_page_url(new_url):
+            return jsonify(_youtube_source_error_payload()), 400
         with shared.lock:
             found = False
             for p in shared.source_presets:
@@ -4428,6 +4965,8 @@ def create_app(
                     break
             if not url:
                 return jsonify({"error": "Preset nao encontrado"}), 404
+            if _is_youtube_page_url(url):
+                return jsonify(_youtube_source_error_payload()), 400
             shared.source_live = url
             shared.source_changed = True
             shared.active_preset_id = preset_id
@@ -4693,7 +5232,7 @@ def create_app(
     def get_profiles() -> Response:
         with shared.lock:
             active = shared.active_env_profile
-        profiles = _list_env_profiles()
+        profiles = _list_env_profiles()  # already includes is_builtin flag
         return jsonify({"profiles": profiles, "active": active})
 
     @app.post("/api/profiles/<profile_id>/apply")
@@ -4716,6 +5255,43 @@ def create_app(
         _persist_config_event(shared, "profile_applied", {"profile_id": profile_id})
         return jsonify({"ok": True, "applied": profile_id, "profile": profile.to_dict()})
 
+    @app.post("/api/profiles/save")
+    def save_profile() -> Response:
+        data = request.get_json(force=True, silent=True) or {}
+        try:
+            profile = _EnvProfile(
+                id=str(data.get("id", "")),
+                label=str(data.get("label", "Personalizado")),
+                description=str(data.get("description", "")),
+                icon=str(data.get("icon", "📷")),
+                loitering_seconds=float(data.get("loitering_seconds", 10.0)),
+                stationary_max_speed=float(data.get("stationary_max_speed", 2.2)),
+                queue_saturation=int(data.get("queue_saturation", 8)),
+                density_alert_threshold=int(data.get("density_alert_threshold", 0)),
+                blur_thresh_low=float(data.get("blur_thresh_low", 60.0)),
+                blur_thresh_critical=float(data.get("blur_thresh_critical", 20.0)),
+                bbox_small_thresh_px=float(data.get("bbox_small_thresh_px", 40.0)),
+                reid_radius_norm=float(data.get("reid_radius_norm", 0.18)),
+                reid_timeout_s=float(data.get("reid_timeout_s", 20.0)),
+                notes=[str(n) for n in data.get("notes", []) if n],
+            )
+        except (TypeError, ValueError) as exc:
+            return jsonify({"error": str(exc)}), 400
+        saved = _save_custom_profile(profile)
+        return jsonify({"ok": True, "profile": {**saved.to_dict(), "is_builtin": False}})
+
+    @app.delete("/api/profiles/<profile_id>")
+    def delete_profile(profile_id: str) -> Response:
+        if is_builtin_profile(profile_id):
+            return jsonify({"error": "Cannot delete built-in profiles"}), 403
+        ok = _delete_custom_profile(profile_id)
+        if not ok:
+            return jsonify({"error": f"Profile '{profile_id}' not found"}), 404
+        with shared.lock:
+            if shared.active_env_profile == profile_id:
+                shared.active_env_profile = ""
+        return jsonify({"ok": True, "deleted": profile_id})
+
     @app.post("/api/profiles/reset")
     def reset_profile() -> Response:
         with shared.lock:
@@ -4731,6 +5307,118 @@ def create_app(
             shared.thr_reid_timeout_s = 20.0
             shared.active_env_profile = ""
         return jsonify({"ok": True, "active": ""})
+
+    @app.get("/api/profiles/suggest")
+    def suggest_profile() -> Response:
+        with shared.lock:
+            blur = shared.cam_blur_ema
+            avg_bbox_h = shared.cam_avg_bbox_h
+            avg_dwell = shared.avg_dwell_sec
+            avg_speed = shared.avg_move_speed_px_per_sec
+            occupancy = shared.occupancy_now
+
+        scores: dict[str, float] = {pid: 0.0 for pid in PROFILES}
+        reasoning: list[str] = []
+        has_signal = False
+
+        if blur > 0:
+            has_signal = True
+            if blur < 25:
+                scores["estacionamento"] += 3.0
+                scores["praca_aberta"] += 1.5
+                reasoning.append(f"Imagem muito desfocada (blur={blur:.0f}) → câmera de baixa qualidade")
+            elif blur < 50:
+                scores["estacionamento"] += 1.5
+                scores["praca_aberta"] += 1.0
+                reasoning.append(f"Qualidade de imagem moderada (blur={blur:.0f})")
+            elif blur > 120:
+                scores["portaria"] += 1.5
+                scores["loja"] += 1.0
+                reasoning.append(f"Imagem muito nítida (blur={blur:.0f}) → câmera próxima")
+
+        if avg_bbox_h > 0:
+            has_signal = True
+            if avg_bbox_h < 30:
+                scores["praca_aberta"] += 2.5
+                scores["estacionamento"] += 1.5
+                reasoning.append(f"Pessoas pequenas no frame (h médio={avg_bbox_h:.0f}px) → câmera alta ou distante")
+            elif avg_bbox_h < 50:
+                scores["praca_aberta"] += 1.0
+                reasoning.append(f"Pessoas de tamanho médio (h médio={avg_bbox_h:.0f}px)")
+            elif avg_bbox_h > 90:
+                scores["portaria"] += 2.5
+                scores["loja"] += 1.0
+                reasoning.append(f"Pessoas grandes no frame (h médio={avg_bbox_h:.0f}px) → câmera próxima")
+
+        if avg_dwell > 0:
+            has_signal = True
+            if avg_dwell > 90:
+                scores["loja"] += 3.0
+                scores["estacionamento"] += 0.5
+                reasoning.append(f"Permanência longa (dwell médio={avg_dwell:.0f}s) → ambiente de permanência")
+            elif avg_dwell > 40:
+                scores["loja"] += 1.5
+                reasoning.append(f"Permanência moderada (dwell médio={avg_dwell:.0f}s)")
+            elif avg_dwell < 12:
+                scores["corredor"] += 2.0
+                scores["portaria"] += 1.5
+                reasoning.append(f"Trânsito rápido (dwell médio={avg_dwell:.0f}s) → fluxo de passagem")
+
+        if avg_speed > 0:
+            has_signal = True
+            if avg_speed > 25:
+                scores["corredor"] += 2.5
+                reasoning.append(f"Movimento rápido (vel. média={avg_speed:.0f}px/s) → corredor ou área de passagem")
+            elif avg_speed > 12:
+                scores["corredor"] += 1.0
+            elif avg_speed < 4:
+                scores["loja"] += 0.8
+                scores["portaria"] += 0.8
+
+        if occupancy > 0:
+            has_signal = True
+            if occupancy >= 15:
+                scores["praca_aberta"] += 1.0
+                scores["loja"] += 0.5
+                reasoning.append(f"Alta ocupação instantânea ({occupancy} pessoas)")
+            elif occupancy <= 4:
+                scores["portaria"] += 1.0
+                scores["corredor"] += 0.5
+
+        if not has_signal:
+            return jsonify({
+                "suggested_profile_id": "default",
+                "profile": PROFILES["default"].to_dict(),
+                "confidence": 0.0,
+                "reasoning": ["Sem dados suficientes ainda — aguarde alguns segundos de inferência"],
+                "signals": {"blur_ema": 0, "avg_bbox_h": 0, "avg_dwell_sec": 0, "avg_speed_px_s": 0, "occupancy_now": 0},
+                "scores": {},
+            })
+
+        best_id = max(scores, key=lambda k: scores[k])
+        best_score = scores[best_id]
+        total_score = sum(scores.values()) or 1.0
+        confidence = round(best_score / total_score, 2)
+
+        if best_score < 1.0:
+            best_id = "default"
+            confidence = 0.0
+            reasoning.append("Sinal ambíguo — recomendado perfil Padrão")
+
+        return jsonify({
+            "suggested_profile_id": best_id,
+            "profile": PROFILES[best_id].to_dict(),
+            "confidence": confidence,
+            "reasoning": reasoning,
+            "signals": {
+                "blur_ema": round(blur, 1),
+                "avg_bbox_h": round(avg_bbox_h, 1),
+                "avg_dwell_sec": round(avg_dwell, 1),
+                "avg_speed_px_s": round(avg_speed, 1),
+                "occupancy_now": occupancy,
+            },
+            "scores": {k: round(v, 2) for k, v in scores.items()},
+        })
 
     # ── Assisted configuration ────────────────────────────────────────────────
 
@@ -5205,49 +5893,49 @@ def create_app(
 
     @app.get("/video_feed")
     def video_feed() -> Response:
-        try:
-            _max_fps = float(os.environ.get("YOLO_MJPEG_MAX_FPS", "10").strip() or "10")
-        except ValueError:
-            _max_fps = 10.0
-        _max_fps = max(1.0, min(30.0, _max_fps))
-        _min_interval = 1.0 / _max_fps
-        try:
-            stale_s = float(os.environ.get("YOLO_FEED_STALE_S", "8").strip() or "8")
-        except ValueError:
-            stale_s = 8.0
-        stale_s = max(2.0, stale_s)
-        _burst_new = os.environ.get("YOLO_MJPEG_BURST_NEW", "1").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-            "on",
-        )
-        try:
-            _burst_cap = float(os.environ.get("YOLO_MJPEG_BURST_CAP_FPS", "35").strip() or "35")
-        except ValueError:
-            _burst_cap = 35.0
-        _burst_cap = max(10.0, min(60.0, _burst_cap))
-        _min_burst = 1.0 / _burst_cap
-
         def gen() -> bytes:
             _last_emit = 0.0
-            _last_sent_mono = 0.0
+            _last_sent_seq = 0
+            _cached_infer_fps = 0.0
+            _next_fps_refresh = 0.0
             while True:
                 now = time.perf_counter()
                 with shared.frame_output_lock:
+                    seq = shared.last_frame_seq
                     frame = shared.last_frame_jpeg
                     last_mono = shared.last_frame_mono
+                    if shared.frame_ring:
+                        seq, last_mono, frame = shared.frame_ring[-1]
+                with shared.lock:
+                    _max_fps = max(1.0, min(30.0, float(shared.mjpeg_max_fps)))
+                    _adaptive_fps = shared.mjpeg_adaptive_fps
+                    _adaptive_headroom = max(1.0, min(1.8, float(shared.mjpeg_adaptive_headroom)))
+                    _adaptive_min_fps = max(1.0, min(_max_fps, float(shared.mjpeg_adaptive_min_fps)))
+                    stale_s = max(2.0, float(shared.mjpeg_stale_s))
+                    _burst_new = shared.mjpeg_burst_new
+                    _burst_cap = max(10.0, min(60.0, float(shared.mjpeg_burst_cap_fps)))
+                    if _adaptive_fps and now >= _next_fps_refresh:
+                        _cached_infer_fps = float(shared.infer_fps_ema or 0.0)
+                        _next_fps_refresh = now + 0.4
+                _min_burst = 1.0 / _burst_cap
+                target_fps = _max_fps
+                if _adaptive_fps and _cached_infer_fps > 0.2:
+                    target_fps = min(
+                        _max_fps,
+                        max(_adaptive_min_fps, _cached_infer_fps * _adaptive_headroom),
+                    )
+                _dynamic_min_interval = 1.0 / max(1.0, target_fps)
                 is_stale = last_mono > 0.0 and (time.monotonic() - last_mono) >= stale_s
                 _fresh = (
                     _burst_new
                     and not is_stale
                     and frame is not None
-                    and last_mono > _last_sent_mono + 1e-6
+                    and seq > _last_sent_seq
                 )
                 if _fresh:
                     wait = max(0.0, _min_burst - (now - _last_emit))
                 else:
-                    wait = max(0.0, _min_interval - (now - _last_emit))
+                    wait = max(0.0, _dynamic_min_interval - (now - _last_emit))
                 if wait > 0:
                     time.sleep(wait)
                 if frame is None or is_stale:
@@ -5268,7 +5956,7 @@ def create_app(
                     b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
                 )
                 _last_emit = time.perf_counter()
-                _last_sent_mono = last_mono
+                _last_sent_seq = seq
 
         return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
@@ -5323,6 +6011,7 @@ def main() -> None:
         line_default=line_init,
         loitering_threshold_sec=args.loitering_seconds,
     )
+    _sync_mjpeg_from_environ(shared)
     with shared.lock:
         shared.heatmap_available = not args.no_heatmap
         shared.show_heatmap_overlay = False
@@ -5354,8 +6043,12 @@ def main() -> None:
     drift_detector = CameraDriftDetector()
     audit_log.log(ts=0.0, session_id=shared.session_id, event_type="session_start")
 
-    analytics_worker = AggregatorWorker(get_session_factory())
-    analytics_worker.start()
+    try:
+        analytics_worker = AggregatorWorker(get_session_factory())
+        analytics_worker.start()
+    except Exception as exc:
+        print(f"[web] Analytics worker nao iniciado (BD indisponivel): {exc}", flush=True)
+        analytics_worker = None
 
     t = threading.Thread(
         target=inference_loop,

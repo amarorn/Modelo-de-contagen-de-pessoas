@@ -9,7 +9,7 @@ interface ImportMetaEnv {
   readonly VITE_VIDEO_FEED_ORIGIN?: string;
   /** Opcional: ms ate mostrar erro se o MJPEG nao carregar (default 120000). */
   readonly VITE_VIDEO_FEED_LOAD_TIMEOUT_MS?: string;
-  /** Opcional: intervalo do poller /api/stats em ms (minimo 1500; default 3000). */
+  /** Opcional: intervalo do poller /api/stats em ms (minimo 1200; default 2000). */
   readonly VITE_STATS_POLL_MS?: string;
 }
 

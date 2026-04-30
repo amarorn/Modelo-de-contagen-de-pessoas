@@ -6,12 +6,29 @@ interface Props {
   variant?: "default" | "vehicles";
 }
 
+/** Base normalizada: sem espaços; sem barra final. Vazio = mesmo host (proxy Vite ou static). */
+function apiPrefix(raw: string): string {
+  const t = raw.trim().replace(/\/+$/, "");
+  return t ? `${t}/api` : "/api";
+}
+
+async function readJsonOrText(res: Response): Promise<{ json: unknown | null; text: string }> {
+  const text = await res.text();
+  if (!text.trim()) return { json: null, text: "" };
+  try {
+    return { json: JSON.parse(text) as unknown, text };
+  } catch {
+    return { json: null, text: text.slice(0, 200) };
+  }
+}
+
 /**
  * Liga/desliga overlays no servidor: rastro, seta (PCA), sexo (F/M), mapa de calor e ROI.
  * O MJPEG é único; estes interruptores são os mesmos da vista Pessoas.
  */
 export function DisplayOverlayToggles({ apiBase, variant = "default" }: Props) {
   const isVeh = variant === "vehicles";
+  const prefix = apiPrefix(apiBase);
   const [trail, setTrail] = useState(false);
   const [heading, setHeading] = useState(false);
   const [heatmap, setHeatmap] = useState(false);
@@ -27,7 +44,6 @@ export function DisplayOverlayToggles({ apiBase, variant = "default" }: Props) {
   const load = useCallback(async () => {
     cancelLoadRef.current = false;
     setErr(null);
-    const base = apiBase.trim() || window.location.origin;
     const TIMEOUT_MS = 45_000;
     const MAX_TOTAL_MS = 300_000;
     const t0 = Date.now();
@@ -38,7 +54,7 @@ export function DisplayOverlayToggles({ apiBase, variant = "default" }: Props) {
       try {
         const ac = new AbortController();
         const timer = window.setTimeout(() => ac.abort(), TIMEOUT_MS);
-        const r = await fetch(`${apiBase}/api/config`, { signal: ac.signal });
+        const r = await fetch(`${prefix}/config`, { signal: ac.signal, cache: "no-store" });
         window.clearTimeout(timer);
         if (cancelLoadRef.current) return;
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -61,11 +77,11 @@ export function DisplayOverlayToggles({ apiBase, variant = "default" }: Props) {
     }
     if (!cancelLoadRef.current) {
       setErr(
-        `Sem resposta de ${base}/api/config apos ${MAX_TOTAL_MS / 60_000} min (GPU/modelo a demorar ou servidor parado). ` +
+        `Sem resposta de ${prefix}/config apos ${MAX_TOTAL_MS / 60_000} min (GPU/modelo a demorar ou servidor parado). ` +
           `Confirme: bash scripts/run_web.sh na porta WEB_PORT; em dev, pnpm dev com proxy para essa porta.`,
       );
     }
-  }, [apiBase]);
+  }, [apiBase, prefix]);
 
   useEffect(() => {
     cancelLoadRef.current = false;
@@ -84,24 +100,50 @@ export function DisplayOverlayToggles({ apiBase, variant = "default" }: Props) {
   }) => {
     setPending(true);
     setErr(null);
+    const ac = new AbortController();
+    const tid = window.setTimeout(() => ac.abort(), 20_000);
     try {
-      const r = await fetch(`${apiBase}/api/overlay`, {
+      const r = await fetch(`${prefix}/overlay`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(next),
+        cache: "no-store",
+        signal: ac.signal,
       });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const j = await r.json();
-      if (typeof j.show_trail === "boolean") setTrail(j.show_trail);
-      if (typeof j.show_heading === "boolean") setHeading(j.show_heading);
-      if (typeof j.heatmap_available === "boolean") setHeatmapOk(j.heatmap_available);
-      if (typeof j.show_heatmap === "boolean") setHeatmap(j.show_heatmap);
-      if (typeof j.sex_overlay_available === "boolean") setSexOk(j.sex_overlay_available);
-      if (typeof j.show_sex_overlay === "boolean") setSexOn(j.show_sex_overlay);
-      if (typeof j.show_roi === "boolean") setShowRoi(j.show_roi);
-    } catch {
-      setErr("Não foi possível atualizar");
+      const { json: j, text } = await readJsonOrText(r);
+      if (!r.ok) {
+        const msg =
+          j && typeof j === "object" && j !== null && "error" in j
+            ? String((j as { error: unknown }).error)
+            : text || `HTTP ${r.status}`;
+        throw new Error(msg);
+      }
+      if (j === null || typeof j !== "object") {
+        throw new Error(text || "Resposta inválida do servidor");
+      }
+      const o = j as Record<string, unknown>;
+      if (o.ok === false && typeof o.error === "string") {
+        throw new Error(o.error);
+      }
+      if (typeof o.show_trail === "boolean") setTrail(o.show_trail);
+      if (typeof o.show_heading === "boolean") setHeading(o.show_heading);
+      if (typeof o.heatmap_available === "boolean") setHeatmapOk(o.heatmap_available);
+      if (typeof o.show_heatmap === "boolean") setHeatmap(o.show_heatmap);
+      if (typeof o.sex_overlay_available === "boolean") setSexOk(o.sex_overlay_available);
+      if (typeof o.show_sex_overlay === "boolean") setSexOn(o.show_sex_overlay);
+      if (typeof o.show_roi === "boolean") setShowRoi(o.show_roi);
+    } catch (e) {
+      const name = e instanceof DOMException ? e.name : "";
+      const aborted = name === "AbortError" || (e instanceof Error && e.name === "AbortError");
+      const detail =
+        aborted
+          ? "Tempo esgotado (20s). O servidor pode estar bloqueado ou a porta errada."
+          : e instanceof Error
+            ? e.message
+            : "Falha de rede";
+      setErr(`Não foi possível atualizar: ${detail}`);
     } finally {
+      window.clearTimeout(tid);
       setPending(false);
     }
   };

@@ -8,7 +8,7 @@ tracker_type: bytetrack
 track_high_thresh: 0.12
 track_low_thresh: 0.05
 new_track_thresh: 0.12
-# Buffer maior: preserva ID quando a pessoa some por alguns frames atras de outra.
-track_buffer: 30
+# Frames que o ByteTrack mantém um ID "perdido" antes de libertar (menor = caixas somem mais cedo).
+track_buffer: 10
 match_thresh: 0.80
 fuse_score: true

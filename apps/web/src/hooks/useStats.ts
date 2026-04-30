@@ -3,8 +3,9 @@ import type { ConnectionStatus, Stats } from "../types/api";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 const _pollRaw = Number(import.meta.env.VITE_STATS_POLL_MS);
+/** Default 2s: mais responsivo que 3s; min 1.2s evita martelar o Flask em redes lentas. */
 const POLL_INTERVAL_MS =
-  Number.isFinite(_pollRaw) && _pollRaw >= 1500 ? _pollRaw : 3000;
+  Number.isFinite(_pollRaw) && _pollRaw >= 1200 ? _pollRaw : 2000;
 
 export const EMPTY_STATS: Stats = {
   entries: 0,

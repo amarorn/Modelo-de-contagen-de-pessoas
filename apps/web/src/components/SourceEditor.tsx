@@ -302,7 +302,7 @@ export function SourceEditor({ apiBase, onClose }: Props) {
     }
   };
 
-  const usePreset = (value: string) => {
+  const applyPresetShortcut = (value: string) => {
     setInputValue(value);
     setMsg(null);
   };
@@ -524,7 +524,7 @@ export function SourceEditor({ apiBase, onClose }: Props) {
               {SHORTCUTS.map((p) => (
                 <button
                   key={p.label}
-                  onClick={() => usePreset(p.value)}
+                  onClick={() => applyPresetShortcut(p.value)}
                   title={p.hint}
                   style={{
                     display: "flex", alignItems: "center", gap: 6,

@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
+import type { ReportsApiQuery } from "../lib/reportsQuery";
+import { appendReportsQueryParams } from "../lib/reportsQuery";
 
 const POLL_MS = 60_000;
 
@@ -11,7 +13,7 @@ export type ReportsHourlyState = {
 
 const ZEROS = () => Array.from({ length: 24 }, () => 0);
 
-export function useReportsHourly(apiBase: string, cameraId: string) {
+export function useReportsHourly(apiBase: string, cameraId: string | null, query: ReportsApiQuery) {
   const [state, setState] = useState<ReportsHourlyState>({
     hourlyEntries: ZEROS(),
     hourlyExits: ZEROS(),
@@ -20,11 +22,13 @@ export function useReportsHourly(apiBase: string, cameraId: string) {
   });
 
   const fetchOnce = useCallback(async () => {
-    const cam = cameraId.trim() || "default";
+    const cam = cameraId?.trim();
+    if (!cam) return;
     const base = apiBase.replace(/\/$/, "");
     setState((s) => ({ ...s, status: s.status === "idle" ? "loading" : s.status }));
     try {
       const q = new URLSearchParams({ camera_id: cam });
+      appendReportsQueryParams(q, query);
       const r = await fetch(`${base}/api/analytics/hourly?${q}`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const j = (await r.json()) as {
@@ -51,9 +55,10 @@ export function useReportsHourly(apiBase: string, cameraId: string) {
         status: "error",
       }));
     }
-  }, [apiBase, cameraId]);
+  }, [apiBase, cameraId, query.fromIso, query.toIso, query.roiId, query.cls]);
 
   useEffect(() => {
+    if (!cameraId?.trim()) return;
     const isHidden = () =>
       typeof document !== "undefined" && document.visibilityState === "hidden";
     void fetchOnce();
@@ -68,7 +73,7 @@ export function useReportsHourly(apiBase: string, cameraId: string) {
       clearInterval(id);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [fetchOnce]);
+  }, [fetchOnce, cameraId]);
 
   return state;
 }

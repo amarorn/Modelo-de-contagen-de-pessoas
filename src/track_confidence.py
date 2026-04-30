@@ -134,14 +134,23 @@ class TrackConfidenceTracker:
             )
         return rec.score
 
-    def is_reliable(self, track_id: int) -> bool:
+    def is_reliable(
+        self,
+        track_id: int,
+        suppress_thresh: float | None = None,
+        vehicle_suppress_thresh: float | None = None,
+        min_age: int | None = None,
+    ) -> bool:
         """Return True if track is above the suppression threshold."""
         rec = self._records.get(track_id)
         if rec is None:
             return False
-        if rec.frames < MIN_AGE_FRAMES:
+        _min_age = min_age if min_age is not None else MIN_AGE_FRAMES
+        if rec.frames < _min_age:
             return False
-        thresh = VEHICLE_SUPPRESS_THRESHOLD if rec.is_vehicle else SUPPRESS_THRESHOLD
+        _pt = suppress_thresh if suppress_thresh is not None else SUPPRESS_THRESHOLD
+        _vt = vehicle_suppress_thresh if vehicle_suppress_thresh is not None else VEHICLE_SUPPRESS_THRESHOLD
+        thresh = _vt if rec.is_vehicle else _pt
         return rec.score >= thresh
 
     def score_of(self, track_id: int) -> float:
@@ -151,9 +160,16 @@ class TrackConfidenceTracker:
     def evict(self, track_id: int) -> None:
         self._records.pop(track_id, None)
 
-    def low_confidence_count(self) -> int:
+    def low_confidence_count(
+        self,
+        suppress_thresh: float | None = None,
+        vehicle_suppress_thresh: float | None = None,
+    ) -> int:
+        _pt = suppress_thresh if suppress_thresh is not None else SUPPRESS_THRESHOLD
+        _vt = vehicle_suppress_thresh if vehicle_suppress_thresh is not None else VEHICLE_SUPPRESS_THRESHOLD
+
         def _thresh(r: _TrackRecord) -> float:
-            return VEHICLE_SUPPRESS_THRESHOLD if r.is_vehicle else SUPPRESS_THRESHOLD
+            return _vt if r.is_vehicle else _pt
 
         return sum(1 for r in self._records.values() if r.score < _thresh(r))
 

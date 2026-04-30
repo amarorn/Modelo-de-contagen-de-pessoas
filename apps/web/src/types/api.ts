@@ -308,6 +308,7 @@ export interface EnvProfile {
   reid_radius_norm: number;
   reid_timeout_s: number;
   notes: string[];
+  is_builtin?: boolean;
 }
 
 export interface SuggestedLine {

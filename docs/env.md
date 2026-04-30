@@ -3,6 +3,13 @@
 # Carregado por: scripts/run_web.sh, run_web_mobile.sh, run_kafka_consumer.sh,
 #   run_analytics_kafka_consumer.sh (e docker compose com env_file=.env se configurar).
 # Reinicie o servidor após editar.
+#
+# Menos erros no arranque:
+#   - Caminhos YOLO_* relativos ao repo (no Docker, ./runs monta-se em /app/runs).
+#   - ANALYTICS_KAFKA_PUBLISH=0 se nao tiver Redpanda/Kafka a escutar.
+#   - YOLO_SEX_MODEL / YOLO_AGE_MODEL vazios se nao existirem os .pt (evita ERRO no log).
+#   - ALERT_CAP_ENABLED=0 sem pip install open-clip-torch.
+#   - Nao commite chaves (Ultralytics, ngrok); use valores vazios e preencha so localmente.
 # =============================================================================
 
 # =============================================================================
@@ -23,7 +30,8 @@ YOLO_NO_HALF=0
 #   exp-3               mAP50=0.555  mAP50-95=0.383
 #   exp-34-all-valid    mAP50=0.540  mAP50-95=0.358
 #   exp-25 (referencia) mAP50=0.460  mAP50-95=0.386 (recall 0.66 mas P=0.39)
-YOLO_INFER_MODEL=/home/amaro-neto/Modelo-de-contagen-de-pessoas/runs/detect/runs/peoplecountv2/exp-6/weights/best.pt
+# Relativo ao repo (funciona em host e no container com volume ./runs:/app/runs:ro).
+YOLO_INFER_MODEL=runs/people_count/yolov8m-door-counter/weights/best.pt
 # Indice da classe "pessoa" no modelo (0 = Pessoa / COCO person). ID errado = zero deteccoes.
 PERSON_CLASS_ID=0
 # IDs no .pt (exp-23): 0 Pessoa,1 Carro,2 Moto,3 Onibus,4 Van,5 caminhao,6 bicicleta (nc=7).
@@ -46,6 +54,8 @@ YOLO_INFER_CONF=0.05
 YOLO_CONF_MULT_VEHICLE_ONLY=1
 TRACK_CONF_VEHICLE_SUPPRESS_THRESHOLD=0.30
 TRACK_CONF_SUPPRESS_THRESHOLD=0.35
+# Frames minimos antes de contar cruzamento (menor = mais sensivel; 2 evita suprimir cruzamentos rapidos).
+TRACK_CONF_MIN_AGE_FRAMES=2
 # Opcional: limiar so para run_web.sh com webcam (ex. 0.02). Descomente se precisar.
 # YOLO_WEB_INFER_CONF=0.02
 # Baixado de 0.15 -> 0.08 para acompanhar YOLO_INFER_CONF.
@@ -59,9 +69,9 @@ YOLO_MAX_DET=250
 YOLO_AUGMENT=0
 YOLO_AGNOSTIC_NMS=1
 # Stride 2/3 = mais FPS (1 em N frames na inferencia). Valor 0 no .env vira 1 no codigo.
-YOLO_VID_STRIDE=2
-# 0 = menor latencia; 1 = fila se aparecer "Waiting for stream".
-YOLO_STREAM_BUFFER=1
+YOLO_VID_STRIDE=1
+# 0 = menor latencia (recomendado para HLS ao vivo); 1 = fila quando houver burst de decode.
+YOLO_STREAM_BUFFER=0
 # Opcional (web_dashboard): YOLO_BLUR_SAMPLE_EVERY=2, YOLO_SEX_UI_STRIDE=3 para aliviar CPU/GPU em multidao.
 
 # =============================================================================
@@ -96,8 +106,8 @@ YOLO_MIN_PERSON_HEIGHT_PX=42
 # =============================================================================
 # 8. Classificador de sexo (YOLO classify; opcional)
 # =============================================================================
-# Deteccao = best.pt acima. Sexo = ficheiro task=classify (Female/Male). Vazio = desativado.
-YOLO_SEX_MODEL=/home/amaro-neto/Modelo-de-contagen-de-pessoas/runs/detect/amaro-neto/count_person/yolov8m-door-counter11/weights/exp-sex-1.pt
+# Deteccao = best.pt acima. Sexo = classify (Female/Male). Vazio = desativado (menos erros no log).
+YOLO_SEX_MODEL=
 # Mais baixo = F/M aparecem mais rapido (mais erros). Mais alto = mais "?" ate ter confianca.
 YOLO_SEX_ABSTAIN=0.45
 # Altura minima bbox (px); desce se quiseres sexo mais cedo em figuras mais pequenas.
@@ -111,7 +121,7 @@ YOLO_SEX_CROP_PAD=0.08
 # =============================================================================
 # 9. Classificador de idade (YOLO classify; opcional)
 # =============================================================================
-YOLO_AGE_MODEL=/home/amaro-neto/Modelo-de-contagen-de-pessoas/runs/detect/amaro-neto/count_person/yolov8m-door-age-1/exp-age-1.pt
+YOLO_AGE_MODEL=
 YOLO_AGE_ABSTAIN=0.15
 
 # =============================================================================
@@ -133,7 +143,9 @@ YOLO_WEB_SOURCE_PRESETS=[{"id":"sky-1","label":"Skyline — Plaza Mayor (Cusco)"
 # YOLO_WEB_SOURCE=rtsp://user:258258@192.168.20.220:554/cam/realmonitor?channel=1&subtype=1
 # YOLO_WEB_SOURCE_PRESETS=[{"id":"dvr-ch1","label":"Intelbras CH1","url":"rtsp://user:258258@192.168.20.220:554/cam/realmonitor?channel=1&subtype=1"},{"id":"dvr-ch2","label":"Intelbras CH2","url":"rtsp://user:258258@192.168.20.220:554/cam/realmonitor?channel=2&subtype=1"},{"id":"dvr-ch3","label":"Intelbras CH3","url":"rtsp://user:258258@192.168.20.220:554/cam/realmonitor?channel=3&subtype=1"}]
 # Pagina .html Skyline: YOLO_WEB_SOURCE=https://www.skylinewebcams.com/.../webcam/....html
-FFMPEG_RELAY=1
+# FFMPEG_RELAY / FFMPEG_STATIC_DIR — reservados para UI de configuracao; o web_dashboard
+# actual NAO le estes valores (captura e via OpenCV + OPENCV_FFMPEG_CAPTURE_OPTIONS em web_dashboard.py).
+# FFMPEG_RELAY=1
 # FFMPEG_STATIC_DIR=/caminho/para/pasta_com_ffmpeg_e_ffprobe
 
 # =============================================================================
@@ -159,16 +171,14 @@ YOLO_WATCHDOG_HARD_S=820
 # Placeholder "FONTE OFFLINE" no /video_feed quando frame ficar mais velho que N s.
 YOLO_FEED_STALE_S=15
 # Limite de FPS do MJPEG no /video_feed (evita saturar threads Flask + GIL).
-YOLO_MJPEG_MAX_FPS=10
+YOLO_MJPEG_MAX_FPS=14
 
 # =============================================================================
 # 12. Persistência SQL, relatórios (AnalyticsStore) e Kafka opcional
 # =============================================================================
-# Base de dados: SQLAlchemy (events_raw, events_aggregated, trajectories, etc.).
-# A app usa sempre uma BD — por defeito SQLite em ficheiro (./data/). No arranque aparece [db] Persistencia activa: ...
-# Para Postgres: comente a linha SQLite abaixo, descomente a postgresql, suba: docker compose up -d  e pip install psycopg2-binary.
+# Base de dados: SQLAlchemy. Postgres: exija `docker compose up -d postgres` saudavel na 5433.
+# Se aparecer erro de ligacao, use SQLite local (um ficheiro em ./data/):
 # DATABASE_URL=sqlite:///data/contagem.db
-# Postgres (docker compose up -d na raiz; porta host 5433 por padrão):
 DATABASE_URL=postgresql+psycopg2://contagem:contagem@127.0.0.1:5433/contagem
 # Variáveis usadas pelo compose (opcional; o compose já tem defaults):
 # POSTGRES_USER=contagem
@@ -186,8 +196,8 @@ DATABASE_URL=postgresql+psycopg2://contagem:contagem@127.0.0.1:5433/contagem
 # Eventos de visão → tópico analytics (run_analytics_kafka_consumer.sh; requer pip install kafka-python):
 # ANALYTICS_KAFKA_TOPIC=vision.analytics.events
 # ANALYTICS_KAFKA_GROUP=contagem-analytics-vision
-# 1 = publica JSON após enqueue no worker; ativar só com broker acessível (evita trabalho inútil).
-ANALYTICS_KAFKA_PUBLISH=1
+# 0 = nao tenta Kafka (recomendado sem Redpanda a correr). 1 = publica para ANALYTICS_KAFKA_*.
+ANALYTICS_KAFKA_PUBLISH=0
 
 # =============================================================================
 # 13. Mapa de calor (WEB_HEATMAP=0 desliga no arranque)
@@ -203,8 +213,8 @@ HEAT_GAIN=1.75
 # 14. Processo de inferencia / display (X11)
 # =============================================================================
 INFER_NO_SHOW=1
-# DISPLAY tipo :0 (X11). "1" nao e display valido.
-DISPLAY=:1
+# Em servidor/Docker sem X11, nao defina DISPLAY. No desktop com X11: export DISPLAY=:0
+# DISPLAY=:0
 HOTSPOT_RECENT_ALPHA=0.6
 HOTSPOT_RECENT_WINDOW_S=900
 HOTSPOT_HIST_DAYS=7
@@ -227,7 +237,8 @@ TRAIN_USE_MLFLOW=1
 # =============================================================================
 # 16. Ultralytics Platform (opcional)
 # =============================================================================
-ULTRALYTICS_HUB_API_KEY=ul_4fff8cc1412a7c6e67bb098678b1f4d758dae201
+# Preencha localmente se usar upload/sync Ultralytics (nao commite esta linha com chave real).
+ULTRALYTICS_HUB_API_KEY=
 ULTRALYTICS_PLATFORM_PROJECT=amaro-neto/count_person
 ULTRALYTICS_PLATFORM_PROJECT_NAME=amaro-neto
 ULTRALYTICS_PLATFORM_NAME=
@@ -240,14 +251,15 @@ ULTRALYTICS_SSL_VERIFY=0
 # =============================================================================
 # 17. Tunel / utilitarios
 # =============================================================================
-NOGROK_AUTHTOKEN=1Wka7bPItdP6S8gQPFyjXKPdOt1_3kwr75tLopH6ZTZnZU6Y3
+# Token ngrok (opcional). Vazio = ignorado.
+NOGROK_AUTHTOKEN=
 
 # =============================================================================
 # 18. Alertas (bip no dashboard quando detectar boné ou carro de cor X)
 # =============================================================================
 # Boné/chapéu: zero-shot com CLIP. Requer `pip install open-clip-torch`.
-# 0 = desativado; 1 = ativa (1a inferencia baixa ~350MB do HuggingFace).
-ALERT_CAP_ENABLED=1
+# 0 = desativado (evita dependencia open-clip e download ~350MB). 1 = boné/chapéu via CLIP.
+ALERT_CAP_ENABLED=0
 # Probabilidade minima CLIP para confirmar bone (0..1). Baixe se perder alertas.
 ALERT_CAP_THRESHOLD=0.45
 
@@ -262,3 +274,12 @@ ALERT_CAR_COLOR_MIN_SCORE=0.08
 ALERT_COOLDOWN=3.0
 # Tocar bell do terminal (\a) no servidor a cada alerta (beep em PC local).
 ALERT_SERVER_BEEP=0
+
+# =============================================================================
+# 19. Resolucao rapida de erros
+# =============================================================================
+# - "Model not found" / YOLO: confirme que YOLO_INFER_MODEL existe sob ./runs (ou ajuste o caminho).
+# - Postgres / connection refused: `docker compose up -d postgres` e espere healthy; ou SQLite em DATABASE_URL.
+# - Kafka / analytics: mantenha ANALYTICS_KAFKA_PUBLISH=0 ate `docker compose --profile kafka` com broker OK.
+# - Docker compose --profile app: o backend define DATABASE_URL e KAFKA_*; nao use caminhos /home/... no .env.
+# - Web UI "Nao foi possivel atualizar": VITE_API_BASE vazio em dev (proxy) ou porta = WEB_PORT.

@@ -596,15 +596,8 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
             didMove: false,
           };
         } else {
-          let ring = -1;
-          let ptIndex = 0;
-          if (idx >= 900_000) {
-            ring = -1;
-            ptIndex = idx - 900_000;
-          } else {
-            ring = Math.floor(idx / 10_000);
-            ptIndex = idx % 10_000;
-          }
+          const ring = idx >= 900_000 ? -1 : Math.floor(idx / 10_000);
+          const ptIndex = idx >= 900_000 ? idx - 900_000 : idx % 10_000;
           const pts = ring === -1 ? polyDraft : polyRings[ring].points;
           dragRef.current = {
             active: true,
@@ -623,7 +616,7 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
   );
 
   const handleMouseUp = useCallback(
-    (_e: React.MouseEvent<HTMLCanvasElement>) => {
+    () => {
       const drag = dragRef.current;
       if (drag?.active && drag.didMove) {
         // Commit drag para state
@@ -907,11 +900,6 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
           body: JSON.stringify({ polygons: specs, reset_counters: true }),
         });
         if (!res.ok) throw new Error(await res.text());
-        await fetch(`${apiBase}/api/mode`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: "polygon", reset_counters: false }),
-        });
         setMsg({ text: "Polígono aplicado com sucesso!", ok: true });
       }
       onApplied();
@@ -1116,7 +1104,11 @@ export function RoiEditor({ apiBase, config, onClose, onApplied }: Props) {
                 {(["line", "polygon"] as DrawMode[]).map((m) => (
                   <button
                     key={m}
-                    onClick={() => { setMode(m); resetPoints(); }}
+                    onClick={() => {
+                      if (mode === m) return;
+                      setMode(m);
+                      resetPoints();
+                    }}
                     style={{
                       display: "flex", alignItems: "center", gap: 5,
                       padding: "5px 13px",

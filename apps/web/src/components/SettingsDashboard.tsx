@@ -2,7 +2,7 @@
  * Dashboard de parametros do .env (via /api/settings) e metricas do treino (results.csv).
  */
 
-import { useCallback, useEffect, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 
 interface Props {
   apiBase: string;
@@ -67,12 +67,59 @@ const SECTIONS: Section[] = [
     ],
   },
   {
+    title: "Confiança de contagem",
+    description: "Controla quando um cruzamento é registado. Valores mais altos = menos falsos; mais baixos = conta mais.",
+    keys: [
+      "TRACK_CONF_SUPPRESS_THRESHOLD",
+      "TRACK_CONF_VEHICLE_SUPPRESS_THRESHOLD",
+      "TRACK_CONF_MIN_AGE_FRAMES",
+    ],
+  },
+  {
+    title: "Reconexão de stream",
+    description: "Watchdog que detecta stream parado (HLS expirado, RTSP silencioso) e reinicia automaticamente.",
+    keys: [
+      "YOLO_WATCHDOG_SOFT_S",
+      "YOLO_WATCHDOG_HARD_S",
+      "YOLO_FEED_STALE_S",
+    ],
+  },
+  {
+    title: "Persistência e analytics",
+    description: "Destino dos dados de contagem. Reiniciar o servidor após alterar.",
+    keys: [
+      "ANALYTICS_KAFKA_PUBLISH",
+      "DATABASE_URL",
+      "KAFKA_BOOTSTRAP_SERVERS",
+    ],
+  },
+  {
+    title: "Alertas",
+    description: "Notificações sonoras ao detectar boné/chapéu ou cor de veículo. Reiniciar após alterar.",
+    keys: [
+      "ALERT_CAP_ENABLED",
+      "ALERT_CAP_THRESHOLD",
+      "ALERT_CAR_COLOR",
+      "ALERT_COOLDOWN",
+    ],
+  },
+  {
     title: "ByteTrack / overlay",
     keys: [
       "YOLO_TRACKER",
       "YOLO_TRACK_EMA",
       "YOLO_TRACK_HOLD_FRAMES",
       "YOLO_HIDE_STALE_BOXES",
+      "YOLO_OVERLAY_MIN_DET_CONF",
+      "YOLO_OVERLAY_MIN_DET_CONF_VEHICLE",
+      "YOLO_OVERLAY_VEHICLE_MIN_WIDTH_FRAC",
+      "YOLO_OVERLAY_VEHICLE_EDGE_MARGIN_FRAC",
+      "YOLO_OVERLAY_VEHICLE_EDGE_COVER_FRAC",
+      "YOLO_OVERLAY_PERSON_EDGE_MARGIN_FRAC",
+      "YOLO_OVERLAY_PERSON_EDGE_COVER_FRAC",
+      "YOLO_OVERLAY_PERSON_MIN_HEIGHT_FRAC",
+      "YOLO_OVERLAY_PERSON_GLARE_ZONE_FRAC",
+      "YOLO_OVERLAY_PERSON_GLARE_ZONE_MIN_CONF",
       "YOLO_WEB_HEADING",
     ],
   },
@@ -115,12 +162,62 @@ const SECTIONS: Section[] = [
 const KEY_HINTS: Partial<Record<string, string>> = {
   YOLO_DEVICE: "0 = primeira GPU; cpu; auto",
   YOLO_NO_HALF: "1 = FP32 (mais lento na GPU)",
-  YOLO_STREAM_BUFFER: "1 = fila Ultralytics (menos “Waiting for stream”, mais latência)",
+  YOLO_STREAM_BUFFER: '1 = fila Ultralytics (menos "Waiting for stream", mais latência)',
   YOLO_HIDE_STALE_BOXES: "1 = não desenhar caixas sem deteção neste frame",
+  YOLO_OVERLAY_MIN_DET_CONF:
+    "Conf. mínima da deteção (frame actual) para desenhar qualquer caixa; 0 = sem filtro extra no overlay.",
+  YOLO_OVERLAY_MIN_DET_CONF_VEHICLE:
+    "Igual, só para classes que não são pessoa (ex. veículos). Ajuda a cortar FP à noite.",
+  YOLO_OVERLAY_VEHICLE_MIN_WIDTH_FRAC:
+    "Largura mínima da bbox em fracção do frame (só não-pessoa no overlay). Corta fiapos na borda.",
+  YOLO_OVERLAY_VEHICLE_EDGE_MARGIN_FRAC:
+    "Fracção da largura em cada lado: faixas laterais para o filtro de overlay de veículos. 0 = off.",
+  YOLO_OVERLAY_VEHICLE_EDGE_COVER_FRAC:
+    "0 = só centro na margem; 0.3–0.7 = esconde se essa fracção da largura da bbox intersectar as margens (pilhas na borda). Vazio no .env = 0.5.",
+  YOLO_OVERLAY_PERSON_EDGE_MARGIN_FRAC:
+    "Igual para classe pessoa no overlay (FP colados às bordas). 0 = off.",
+  YOLO_OVERLAY_PERSON_MIN_HEIGHT_FRAC:
+    "Altura mínima da bbox / altura do frame para desenhar pessoa; corta reflexos miúdos. 0 = off.",
+  YOLO_OVERLAY_PERSON_EDGE_COVER_FRAC:
+    "0 = só centro na margem; 0.3–0.7 = esconde se essa fracção da largura intersectar margens. Vazio no .env ≈ 0.5.",
+  YOLO_OVERLAY_PERSON_GLARE_ZONE_FRAC:
+    "0 = off. z>0: centro da bbox dentro de [z,1-z]×[z,1-z] exige conf >= GLARE_ZONE_MIN_CONF.",
+  YOLO_OVERLAY_PERSON_GLARE_ZONE_MIN_CONF:
+    "Limiar extra de confiança na zona central (reflexo). Usar com GLARE_ZONE_FRAC > 0.",
   YOLO_WEB_SOURCE_PRESETS:
-    "JSON: [{\"label\":\"...\",\"url\":\"...\"}, ...]; em url pode ser m3u8 ou página .html skylinewebcams.com/webcam/…",
+    'JSON: [{"label":"...","url":"..."}, ...]; em url pode ser m3u8 ou página .html skylinewebcams.com/webcam/...',
   WEB_HEATMAP: "0 = desliga heatmap",
   INFER_NO_SHOW: "Uso interno / flags de visualização",
+  // Confiança de contagem
+  TRACK_CONF_SUPPRESS_THRESHOLD:
+    "Score mínimo [0-1] para contar o cruzamento de uma pessoa. Suba (ex. 0.45) se houver contagens falsas; desça (ex. 0.25) se pessoas reais forem ignoradas. Aplica-se no próximo stream (sem reiniciar).",
+  TRACK_CONF_VEHICLE_SUPPRESS_THRESHOLD:
+    "Mesmo limiar, mas para veículos. Carros têm bbox mais instável, por isso o padrão é mais baixo que o de pessoas.",
+  TRACK_CONF_MIN_AGE_FRAMES:
+    "Frames mínimos que uma pessoa precisa aparecer antes de poder cruzar a linha. 1 = mais sensível; 5+ = evita flashes mas pode perder passagens muito rápidas.",
+  // Reconexão
+  YOLO_WATCHDOG_SOFT_S:
+    "Segundos sem frame novo antes de tentar reabrir o stream (soft reset). Aumente se o CDN for lento; reduza para reconectar mais rápido.",
+  YOLO_WATCHDOG_HARD_S:
+    "Segundos sem frame antes de matar e reiniciar o processo completo (hard reset via run_web.sh). Deve ser maior que SOFT.",
+  YOLO_FEED_STALE_S:
+    'Segundos sem frame novo antes de mostrar "FONTE OFFLINE" na tela. Não afeta a reconexão, só o aviso visual.',
+  // Persistência
+  ANALYTICS_KAFKA_PUBLISH:
+    "0 = dados ficam só em memória (zero no banco). 1 = grava no banco via Kafka/Redpanda (requer run_analytics_kafka_consumer.sh ativo).",
+  DATABASE_URL:
+    "SQLAlchemy URL. Postgres: postgresql+psycopg2://user:pass@host:5433/db. SQLite local: sqlite:///data/contagem.db",
+  KAFKA_BOOTSTRAP_SERVERS:
+    "Endereço do broker Kafka/Redpanda. Ex.: 127.0.0.1:19092 (host) ou redpanda:9092 (Docker).",
+  // Alertas
+  ALERT_CAP_ENABLED:
+    "1 = ativa deteção de boné/chapéu com CLIP (requer pip install open-clip-torch, ~350 MB).",
+  ALERT_CAP_THRESHOLD:
+    "Probabilidade mínima CLIP para confirmar boné [0-1]. Baixe se perder alertas; suba se tiver falsos positivos.",
+  ALERT_CAR_COLOR:
+    "Cores-alvo separadas por vírgula. Ex.: vermelho,amarelo. Deixe vazio para desativar. Valores: vermelho, laranja, amarelo, verde, azul, preto, branco, cinza.",
+  ALERT_COOLDOWN:
+    "Segundos mínimos entre alertas do mesmo tipo para o mesmo veículo/pessoa (evita beeps contínuos).",
 };
 
 function allSectionKeys(): Set<string> {
@@ -135,6 +232,58 @@ export function SettingsDashboard({ apiBase, onBack }: Props) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  const [, setActionTick] = useState(0);
+  const postSaveTimers = useRef<Record<string, ReturnType<typeof setInterval>>>({});
+
+  const [postSave, setPostSave] = useState<
+    | null
+    | {
+        kind: "stream_reload";
+        startedAt: number;
+        maxMs: number;
+      }
+    | { kind: "restart_required" }
+  >(null);
+
+  useEffect(() => {
+    return () => {
+      Object.values(postSaveTimers.current).forEach((t) => clearInterval(t));
+      postSaveTimers.current = {};
+    };
+  }, []);
+
+  const clearPostSaveTimer = (id: string) => {
+    const t = postSaveTimers.current[id];
+    if (t) clearInterval(t);
+    delete postSaveTimers.current[id];
+  };
+
+  const beginPostSaveUx = (restartRequired: boolean, streamReload: boolean) => {
+    Object.keys(postSaveTimers.current).forEach((k) => clearPostSaveTimer(k));
+    setPostSave(null);
+
+    if (restartRequired) {
+      setPostSave({ kind: "restart_required" });
+      return;
+    }
+
+    if (streamReload) {
+      const id = "stream";
+      const maxMs = 15000;
+      setPostSave({ kind: "stream_reload", startedAt: Date.now(), maxMs });
+      postSaveTimers.current[id] = setInterval(() => {
+        setActionTick((t) => t + 1);
+        setPostSave((cur) => {
+          if (!cur || cur.kind !== "stream_reload") return cur;
+          if (Date.now() - cur.startedAt >= cur.maxMs) {
+            clearPostSaveTimer(id);
+            return null;
+          }
+          return cur;
+        });
+      }, 350);
+    }
+  };
 
   const load = useCallback(async () => {
     setMsg(null);
@@ -197,10 +346,26 @@ export function SettingsDashboard({ apiBase, onBack }: Props) {
       });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`);
+      const parts: string[] = [];
+      if (j.restart_required) {
+        parts.push(
+          "Algumas chaves exigem reinicio do backend (modelo, GPU, porta HTTP, heatmap, filtros geometricos, fonte inicial).",
+        );
+      }
+      if (j.stream_reload_requested) {
+        parts.push(
+          "Deteccao/track/FFmpeg: o stream de inferencia reabre sozinho em segundos — volte ao live ou actualize o /video_feed.",
+        );
+      }
+      if (!j.restart_required && !j.stream_reload_requested) {
+        parts.push("Valores guardados no .env.");
+      }
+      const hint = typeof j.hint === "string" ? j.hint : "";
       setMsg({
-        text: `${j.hint ?? "Guardado."} Chaves: ${(j.updated as string[]).join(", ")}`,
+        text: `${parts.join(" ")} ${hint} Chaves: ${(j.updated as string[]).join(", ")}`.trim(),
         ok: true,
       });
+      beginPostSaveUx(Boolean(j.restart_required), Boolean(j.stream_reload_requested));
       await load();
     } catch (e) {
       setMsg({ text: String(e), ok: false });
@@ -212,6 +377,11 @@ export function SettingsDashboard({ apiBase, onBack }: Props) {
   const covered = allSectionKeys();
   const extraKeys =
     data?.editable_keys.filter((k) => !covered.has(k)) ?? [];
+
+  const streamPct =
+    postSave && postSave.kind === "stream_reload"
+      ? Math.min(100, ((Date.now() - postSave.startedAt) / postSave.maxMs) * 100)
+      : 0;
 
   return (
     <div style={{ maxWidth: 960, margin: "0 auto", padding: "20px 20px 48px", width: "100%" }}>
@@ -226,11 +396,80 @@ export function SettingsDashboard({ apiBase, onBack }: Props) {
           <button type="button" onClick={onBack} style={btnSecondary}>
             Voltar ao live
           </button>
-          <button type="button" onClick={() => void save()} disabled={saving || loading} style={btnPrimary}>
-            {saving ? "A guardar…" : "Guardar alterações"}
+          <button
+            type="button"
+            onClick={() => void save()}
+            disabled={saving || loading}
+            style={{
+              ...btnPrimary,
+              position: "relative",
+              overflow: "hidden",
+              minWidth: 170,
+            }}
+          >
+            {postSave?.kind === "stream_reload" && (
+              <span
+                aria-hidden
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  width: `${streamPct}%`,
+                  background: "rgba(255,255,255,0.16)",
+                  transition: "width 0.2s linear",
+                }}
+              />
+            )}
+            <span style={{ position: "relative", zIndex: 1 }}>
+              {saving
+                ? "A guardar…"
+                : postSave?.kind === "stream_reload"
+                  ? "A reabrir stream…"
+                  : postSave?.kind === "restart_required"
+                    ? "Reinício necessário"
+                    : "Guardar alterações"}
+            </span>
           </button>
         </div>
       </div>
+
+      {postSave?.kind === "stream_reload" && (
+        <div style={{ marginTop: -8, marginBottom: 16 }}>
+          <div
+            style={{
+              height: 8,
+              borderRadius: 999,
+              border: "1px solid rgba(255,255,255,0.10)",
+              background: "rgba(255,255,255,0.06)",
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                height: "100%",
+                width: `${streamPct}%`,
+                background: "linear-gradient(90deg, rgba(56,189,248,0.95), rgba(255,255,255,0.35))",
+                transition: "width 0.2s linear",
+              }}
+            />
+          </div>
+          <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.45 }}>
+            Estimativa:{" "}
+            <strong style={{ color: "var(--text-primary)" }}>
+              {Math.max(0, Math.ceil(((postSave.startedAt + postSave.maxMs - Date.now()) / 1000) * 10) / 10)}s
+            </strong>{" "}
+            para concluir a reabertura do pipeline (ou até estabilizar).
+          </div>
+        </div>
+      )}
+
+      {postSave?.kind === "restart_required" && (
+        <div style={{ marginTop: -8, marginBottom: 16 }}>
+          <SettingsRestartButton
+            apiBase={apiBase}
+            onDone={() => setPostSave(null)}
+          />
+        </div>
+      )}
 
       {data?.env_file && (
         <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 16 }}>
@@ -375,6 +614,116 @@ function FieldRow({
       )}
       {hint && <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>{hint}</div>}
     </label>
+  );
+}
+
+function SettingsRestartButton({
+  apiBase,
+  onDone,
+}: {
+  apiBase: string;
+  onDone?: () => void;
+}) {
+  const [phase, setPhase] = useState<"idle" | "restarting" | "done">("idle");
+  const [progress, setProgress] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const clear = () => {
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  };
+
+  const handleRestart = async () => {
+    if (phase !== "idle") return;
+    setPhase("restarting");
+    setProgress(0);
+    try { await fetch(`${apiBase}/api/restart`, { method: "POST" }); } catch { /* ok */ }
+    const startedAt = Date.now();
+    timerRef.current = setInterval(() => {
+      setProgress(Math.min(92, ((Date.now() - startedAt) / 28000) * 100));
+    }, 200);
+    await new Promise<void>((r) => setTimeout(r, 4000));
+    pollRef.current = setInterval(async () => {
+      try {
+        const r = await fetch(`${apiBase}/api/settings`, { cache: "no-store" });
+        if (r.ok) {
+          clear();
+          setProgress(100);
+          setPhase("done");
+          setTimeout(() => { onDone?.(); }, 1800);
+        }
+      } catch { /* not ready */ }
+    }, 900);
+  };
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => () => clear(), []);
+
+  const label =
+    phase === "done" ? "Servidor pronto ✓"
+    : phase === "restarting" ? (progress < 30 ? "A reiniciar…" : "A aguardar servidor…")
+    : "Reiniciar servidor";
+
+  return (
+    <button
+      type="button"
+      disabled={phase !== "idle"}
+      onClick={handleRestart}
+      style={{
+        position: "relative",
+        overflow: "hidden",
+        width: "100%",
+        padding: "11px 16px",
+        borderRadius: "var(--radius-md)",
+        border: `1px solid rgba(239,68,68,${phase === "idle" ? "0.35" : "0.18"})`,
+        background: phase === "idle" ? "rgba(239,68,68,0.10)" : "rgba(239,68,68,0.06)",
+        cursor: phase === "idle" ? "pointer" : "default",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 8,
+        fontSize: 13,
+        fontWeight: 700,
+      }}
+    >
+      {phase !== "idle" && (
+        <span aria-hidden style={{
+          position: "absolute", inset: 0,
+          width: `${progress}%`,
+          background: phase === "done" ? "rgba(34,197,94,0.20)" : "rgba(239,68,68,0.16)",
+          transition: phase === "done" ? "width 0.4s ease" : "width 0.2s linear",
+          pointerEvents: "none",
+        }} />
+      )}
+      <span style={{ position: "relative", zIndex: 1, display: "flex", alignItems: "center" }}>
+        {phase === "done" ? (
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--green)" strokeWidth="2.5" strokeLinecap="round"><polyline points="20 6 9 17 4 12" /></svg>
+        ) : phase === "restarting" ? (
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--red)" strokeWidth="2.5" strokeLinecap="round" style={{ animation: "spin 1s linear infinite" }}><path d="M21 12a9 9 0 1 1-6.22-8.56" /></svg>
+        ) : (
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--red)" strokeWidth="2.5" strokeLinecap="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /></svg>
+        )}
+      </span>
+      <span style={{
+        position: "relative", zIndex: 1,
+        color: phase === "done" ? "var(--green)" : "var(--red)",
+        transition: "color 0.2s",
+      }}>
+        {label}
+      </span>
+      {phase !== "idle" && (
+        <span style={{
+          position: "relative", zIndex: 1,
+          fontFamily: "var(--font-mono)", fontSize: 12,
+          color: phase === "done" ? "var(--green)" : "rgba(239,68,68,0.7)",
+          marginLeft: "auto",
+        }}>
+          {Math.round(progress)}%
+        </span>
+      )}
+      <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
+    </button>
   );
 }
 

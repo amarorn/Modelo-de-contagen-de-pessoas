@@ -22,6 +22,7 @@ import { HeatmapCard } from "./components/HeatmapCard";
 import { ZonesPage } from "./pages/Zones";
 import { VehiclesDashboard } from "./pages/VehiclesDashboard";
 import { ReportsDashboard } from "./pages/ReportsDashboard";
+import { LivePage } from "./pages/LivePage";
 import { ProfileSelector } from "./components/ProfileSelector";
 import { AuditLogPanel } from "./components/AuditLogPanel";
 import { FlowInsightsCard } from "./components/FlowInsightsCard";
@@ -42,7 +43,7 @@ export default function App() {
     API_BASE,
     liveEnabled && status === "connected",
   );
-  const config = useConfig();
+  const { config, refetchConfig } = useConfig();
 
   const handleResetCounters = async () => {
     if (resetting) return;
@@ -84,6 +85,15 @@ export default function App() {
 
       {view === "zonas" ? (
         <ZonesPage apiBase={API_BASE} onBack={() => setView("pessoas")} />
+      ) : view === "aovivo" ? (
+        <LivePage
+          apiBase={API_BASE}
+          stats={stats}
+          config={config}
+          refetchConfig={refetchConfig}
+          onOpenSource={() => setSourceOpen(true)}
+          onOpenRoi={() => setRoiOpen(true)}
+        />
       ) : view === "configuracoes" ? (
         <SettingsDashboard apiBase={API_BASE} onBack={() => setView("pessoas")} />
       ) : view === "veiculos" ? (
@@ -259,6 +269,37 @@ export default function App() {
                 colorDim="var(--red-dim)"
                 subtitle="sessão atual"
               />
+              {stats.entries === 0 &&
+                stats.exits === 0 &&
+                (stats.moving_now ?? 0) + (stats.stationary_now ?? 0) >= 8 && (
+                  <div
+                    style={{
+                      margin: "0 12px 8px",
+                      padding: "10px 12px",
+                      borderRadius: "var(--radius-sm)",
+                      border: "1px solid rgba(245,158,11,0.35)",
+                      background: "rgba(245,158,11,0.08)",
+                      fontSize: 11,
+                      lineHeight: 1.45,
+                      color: "var(--text-secondary)",
+                    }}
+                  >
+                    <strong style={{ color: "var(--amber)" }}>Contagem a zero com movimento.</strong>{" "}
+                    Entradas/saídas só sobem quando alguém{" "}
+                    <strong>cruza</strong> a linha ou a fronteira do polígono. Use{" "}
+                    <strong>Configurar ROI</strong> para alinhar ao passeio e, em Visualização,{" "}
+                    <strong>Marcações ROI</strong> para ver no vídeo.
+                    {(stats.suppressed_events ?? 0) > 5 && (
+                      <>
+                        {" "}
+                        Muitos «cruzamentos suprimidos» no painel Inferência: afinar{" "}
+                        <span style={{ fontFamily: "var(--font-mono)" }}>TRACK_CONF_SUPPRESS_THRESHOLD</span> ou{" "}
+                        <span style={{ fontFamily: "var(--font-mono)" }}>YOLO_VID_STRIDE</span> no{" "}
+                        <span style={{ fontFamily: "var(--font-mono)" }}>.env</span> e reiniciar o servidor.
+                      </>
+                    )}
+                  </div>
+                )}
               <StatCard
                 variant="counter"
                 label="Presentes agora"
@@ -429,9 +470,7 @@ export default function App() {
           </div>
 
           {/* ── Heatmap analítico ───────────────────────────────── */}
-          <div style={{ marginTop: 0 }}>
-            <HeatmapCard apiBase={API_BASE} />
-          </div>
+          <HeatmapCard apiBase={API_BASE} />
 
           {/* ── Audit log (6.2) ─────────────────────────────────── */}
           <div style={{ marginTop: 14 }}>
@@ -467,15 +506,18 @@ export default function App() {
       )}
 
       {/* ── Modals ──────────────────────────────────────────────── */}
-      {(view === "pessoas" || view === "veiculos") && sourceOpen && (
+      {(view === "pessoas" || view === "veiculos" || view === "aovivo") && sourceOpen && (
         <SourceEditor apiBase={API_BASE} onClose={() => setSourceOpen(false)} />
       )}
-      {(view === "pessoas" || view === "veiculos") && roiOpen && (
+      {(view === "pessoas" || view === "veiculos" || view === "aovivo") && roiOpen && (
         <RoiEditor
           apiBase={API_BASE}
           config={config}
           onClose={() => setRoiOpen(false)}
-          onApplied={() => setRoiOpen(false)}
+          onApplied={() => {
+            refetchConfig();
+            setRoiOpen(false);
+          }}
         />
       )}
 

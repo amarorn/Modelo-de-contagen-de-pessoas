@@ -129,7 +129,14 @@ def apply_opencv_ffmpeg_capture_env(
     base = (base_opts if base_opts is not None else os.environ.get(key, "")).strip()
     u = str(stream_src).strip().lower() if isinstance(stream_src, str) else ""
     if "skylinewebcams.com" in u:
-        # stimeout/timeout em microsegundos — HLS ao vivo pode demorar a entregar o 1.o segmento
+        # Timeouts em microsegundos.
+        # stimeout/timeout = handshake TCP (não afeta leitura de segmentos .ts em HLS).
+        # rw_timeout     = timeout de qualquer operação de I/O, incluindo leitura de segmento
+        #                  HLS — este é o parâmetro que faz cap.read() desbloquear quando o
+        #                  token expirou ou o CDN parou de responder.
+        # reconnect/reconnect_streamed REMOVIDOS: causavam loop infinito 403→retry→403 quando
+        # o token ?a= expirava, bloqueando model.track() indefinidamente.
+        # Com rw_timeout=15s, cap.read() falha em ≤15s; loop externo re-scrapa a página .html.
         base_hls = _ffmpeg_opts_skyline_friendly(base)
         sky = (
             "protocol_whitelist;file,http,https,tcp,tls,crypto|"
@@ -138,9 +145,9 @@ def apply_opencv_ffmpeg_capture_env(
             "analyzeduration;10000000|"
             "probesize;10000000|"
             "max_delay;2000000|"
-            "stimeout;40000000|"
-            "timeout;40000000|"
-            "reconnect;1|reconnect_streamed;1|reconnect_delay_max;4"
+            "rw_timeout;15000000|"
+            "stimeout;15000000|"
+            "timeout;15000000"
         )
         os.environ[key] = f"{base_hls}|{sky}" if base_hls else sky
         return
@@ -177,35 +184,76 @@ def _extract_base_href(html: str) -> str | None:
 
 
 def _extract_m3u8_from_html(html: str) -> str | None:
-    # Player actual (JS minificado): source:'livee.m3u8?a=TOKEN', ou source:"..."
-    m = re.search(r"""source\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]""", html, re.I)
-    if m:
-        return m.group(1).strip()
-    # URL absoluta em atributos ou JSON
-    m2 = re.search(
+    """Extrai o primeiro URL de manifesto HLS plausivel do HTML da Skyline.
+
+    O site muda o player (Clappr, HLS.js, JSON-LD); tentamos varios padroes.
+    """
+
+    def _clean(u: str) -> str:
+        return u.strip().rstrip(",;)}]\\").strip("'\"")
+
+    candidates: list[str] = []
+
+    def _add(raw: str | None) -> None:
+        if not raw:
+            return
+        u = _clean(raw)
+        if ".m3u8" not in u.lower():
+            return
+        if u.startswith("//"):
+            u = "https:" + u
+        if u not in candidates:
+            candidates.append(u)
+
+    # 1) Chaves JS comuns no player (ordem: mais especifico primeiro)
+    for pat in (
+        r"""source\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]""",
+        r"""file\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]""",
+        r"""src\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]""",
+        r"""url\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]""",
+        r"""hlsUrl\s*[=:]\s*['"]([^'"]+)['"]""",
+        r"""playback\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]""",
+        r"""manifestUrl\s*[=:]\s*['"]([^'"]+)['"]""",
+        r"""playlistUrl\s*[=:]\s*['"]([^'"]+)['"]""",
+        r"""["']hls["']\s*:\s*["']([^"']+)["']""",
+    ):
+        for m in re.finditer(pat, html, re.I):
+            _add(m.group(1))
+
+    # 2) Meta tags (algumas paginas expoem o stream)
+    for pat in (
+        r'<meta[^>]+property=["\']og:video["\'][^>]+content=["\']([^"\']+\.m3u8[^"\']*)["\']',
+        r'<meta[^>]+content=["\']([^"\']+\.m3u8[^"\']*)["\'][^>]+property=["\']og:video',
+        r'<meta[^>]+name=["\']twitter:player:stream["\'][^>]+content=["\']([^"\']+)["\']',
+    ):
+        m = re.search(pat, html, re.I)
+        if m:
+            _add(m.group(1))
+
+    # 3) URLs absolutas em dominios Skyline / CDN historica
+    for pat in (
         r'(https://hd-auth\.skylinewebcams\.com/[^\s"\'<>]+\.m3u8[^\s"\'<>]*)',
-        html,
-        re.I,
-    )
-    if m2:
-        return m2.group(1).strip().rstrip(",;)")
-    # Qualquer URL hd-auth com m3u8 (fallback)
-    m3 = re.search(
-        r"https://hd-auth\.skylinewebcams\.com/[a-zA-Z0-9_./-]+\.m3u8(?:\?[^\s\"'<>]*)?",
-        html,
-        re.I,
-    )
-    if m3:
-        return m3.group(0).strip()
-    # Token relativo sem aspas padrao (raro)
+        r'(https://[^\s"\'<>]*skylinewebcams\.com[^\s"\'<>]*\.m3u8(?:\?[^\s"\'<>]*)?)',
+        r'(https://[^\s"\'<>]*\.skylinewebcams\.com[^\s"\'<>]*\.m3u8(?:\?[^\s"\'<>]*)?)',
+    ):
+        for m in re.finditer(pat, html, re.I):
+            _add(m.group(1))
+
+    # 4) Path relativo classico livee.m3u8?a=TOKEN (token alfanumerico longo)
     m4 = re.search(
-        r"(livee?\.m3u8\?a=[a-z0-9]+)",
+        r"(livee?\.m3u8\?a=[A-Za-z0-9_-]{8,})",
         html,
         re.I,
     )
     if m4:
-        return m4.group(1).strip()
-    return None
+        _add(m4.group(1))
+
+    # 5) Primeiro candidato que parece URL; preferir hd-auth
+    for pref in ("hd-auth", "skylinewebcams"):
+        for c in candidates:
+            if pref in c.lower():
+                return c
+    return candidates[0] if candidates else None
 
 
 def _normalize_skyline_m3u8(url: str) -> str:
@@ -249,8 +297,10 @@ def resolve_skylinewebcams_page(page_url: str, timeout: float = 22.0) -> str:
     rel = _extract_m3u8_from_html(html)
     if not rel:
         raise ValueError(
-            "Nao foi encontrado o stream m3u8 na pagina. A Skyline pode ter alterado o player; "
-            "use o link m3u8 obtido nas ferramentas de rede do navegador."
+            "Nao foi encontrado o stream m3u8 na pagina. A Skyline pode ter alterado o player. "
+            "Solucao: no Chrome/Edge, F12 > Rede > filtrar 'm3u8' > recarregar a pagina > copiar o URL "
+            "https://hd-auth.../live.m3u8?a=... e coloque em YOLO_WEB_SOURCE ou no preset JSON em "
+            "apps/web (url). Esse link expira; para estabilidade, volte a colar um m3u8 novo apos horas/dias."
         )
     if rel.startswith("http://") or rel.startswith("https://"):
         return _normalize_skyline_m3u8(rel)

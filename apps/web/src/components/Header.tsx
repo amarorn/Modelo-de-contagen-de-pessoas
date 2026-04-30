@@ -5,6 +5,7 @@ import { IconTarget, IconVideo, IconPolygon } from "./Icons";
 
 export type AppView =
   | "pessoas"
+  | "aovivo"
   | "veiculos"
   | "zonas"
   | "configuracoes"
@@ -32,7 +33,7 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
   error:      "Offline",
 };
 
-const NAV_ITEMS: { key: AppView; label: string; icon: React.ReactNode }[] = [
+const NAV_ITEMS: { key: AppView; label: string; icon: React.ReactNode; accent?: boolean }[] = [
   {
     key: "pessoas",
     label: "Pessoas",
@@ -42,6 +43,17 @@ const NAV_ITEMS: { key: AppView; label: string; icon: React.ReactNode }[] = [
         <circle cx="9" cy="7" r="4" />
         <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
         <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+      </svg>
+    ),
+  },
+  {
+    key: "aovivo",
+    label: "Ao Vivo",
+    accent: true,
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="10" />
+        <circle cx="12" cy="12" r="3" fill="currentColor" />
       </svg>
     ),
   },
@@ -177,6 +189,9 @@ export function Header({
           <div style={styles.navTabs}>
             {NAV_ITEMS.map((item) => {
               const active = view === item.key;
+              const isLive = item.accent;
+              const activeColor = isLive ? "var(--red)" : "var(--amber)";
+              const activeDim = isLive ? "rgba(239,68,68,0.08)" : "transparent";
               return (
                 <button
                   key={item.key}
@@ -187,22 +202,24 @@ export function Header({
                     gap: 6,
                     padding: "0 14px",
                     height: "100%",
-                    background: "none",
+                    background: active && isLive ? activeDim : "none",
                     border: "none",
-                    borderBottom: `2px solid ${active ? "var(--amber)" : "transparent"}`,
-                    color: active ? "var(--amber)" : "var(--text-muted)",
+                    borderBottom: `2px solid ${active ? activeColor : "transparent"}`,
+                    color: active ? activeColor : "var(--text-muted)",
                     fontFamily: "var(--font-display)",
                     fontSize: 11,
                     fontWeight: 700,
                     letterSpacing: "0.10em",
                     textTransform: "uppercase",
                     cursor: "pointer",
-                    transition: "color 0.15s, border-color 0.15s",
+                    transition: "color 0.15s, border-color 0.15s, background 0.15s",
                     position: "relative",
                     flexShrink: 0,
                   }}
                   onMouseEnter={(e) => {
-                    if (!active) (e.currentTarget as HTMLElement).style.color = "var(--text-secondary)";
+                    if (!active) {
+                      (e.currentTarget as HTMLElement).style.color = isLive ? "var(--red)" : "var(--text-secondary)";
+                    }
                   }}
                   onMouseLeave={(e) => {
                     if (!active) (e.currentTarget as HTMLElement).style.color = "var(--text-muted)";
@@ -210,6 +227,19 @@ export function Header({
                 >
                   <span style={{ opacity: active ? 1 : 0.6 }}>{item.icon}</span>
                   {item.label}
+                  {isLive && (
+                    <span
+                      style={{
+                        width: 5,
+                        height: 5,
+                        borderRadius: "50%",
+                        background: active ? "var(--red)" : "var(--text-muted)",
+                        animation: active ? "pulse 0.9s infinite" : "none",
+                        flexShrink: 0,
+                        marginLeft: -2,
+                      }}
+                    />
+                  )}
                 </button>
               );
             })}

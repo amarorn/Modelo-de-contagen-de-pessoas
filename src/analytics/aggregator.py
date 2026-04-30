@@ -5,7 +5,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from analytics.kafka_vision import publish_vision_analytics_event
+from analytics.kafka_vision import kafka_publish_enabled, publish_vision_analytics_event
 from analytics.metrics import log_event, metrics
 from analytics.models import EventRaw
 from analytics.store import AnalyticsStore
@@ -17,17 +17,24 @@ BATCH_MAX_EVENTS = 32
 TRACK_TIMEOUT_SECONDS = int(300)
 # Interval between inactivity-close sweeps
 CLOSER_INTERVAL_SECONDS = 30
-# Worker event-queue capacity
+# Worker event-queue capacity (só usado no modo direto, sem Kafka)
 QUEUE_MAXSIZE = 10_000
 
 
 class AggregatorWorker:
     """
-    Background worker that:
-      1. Pulls EventRaw objects from an in-memory queue.
-      2. Updates events_aggregated (idempotent).
-      3. Upserts trajectories.
-      4. Periodically closes inactive tracks.
+    Encaminha EventRaw de duas formas, dependendo de ANALYTICS_KAFKA_PUBLISH:
+
+    Modo Kafka (ANALYTICS_KAFKA_PUBLISH=1):
+      submit() → publica no Kafka (primário, durável)
+      Gravação no BD feita pelo consumer Kafka separado (run_analytics_kafka_consumer.sh)
+      Se a publicação falhar (broker indisponível, KAFKA_BOOTSTRAP_SERVERS vazio, etc.),
+      o evento cai na mesma fila do modo directo para não ser perdido (evita BD vazio sem aviso).
+
+    Modo directo (ANALYTICS_KAFKA_PUBLISH=0):
+      submit() → fila em memória → _run_worker() → events_aggregated + trajectories
+
+    Em ambos os modos, _run_closer() continua ativo para fechar tracks inativos.
     """
 
     def __init__(
@@ -61,10 +68,22 @@ class AggregatorWorker:
         self._stop.set()
 
     def submit(self, event: EventRaw) -> None:
-        """Non-blocking submit. Drops event and logs if queue is full."""
+        """Encaminha evento para Kafka (modo primário) ou fila local (modo directo / fallback)."""
+        if kafka_publish_enabled():
+            ok = publish_vision_analytics_event(event)
+            if ok:
+                return
+            metrics.inc("vision_events_kafka_errors_total")
+            log_event(
+                "warning",
+                "kafka_publish_fallback_direct_queue",
+                camera_id=event.camera_id,
+                event_id=event.id,
+                event_type=event.event_type,
+            )
+
         try:
             self._queue.put_nowait(event)
-            publish_vision_analytics_event(event)
             metrics.set_gauge("vision_queue_size", self._queue.qsize())
         except queue.Full:
             metrics.inc("vision_events_ingestion_errors_total")
@@ -75,12 +94,12 @@ class AggregatorWorker:
                 event_type=event.event_type,
             )
 
-    # ── worker thread ──────────────────────────────────────────────────────
+    # ── worker thread (modo direto apenas) ────────────────────────────────
 
     def _run_worker(self) -> None:
         session = self._factory()
         store = AnalyticsStore(session)
-        log_event("info", "analytics_worker_ready")
+        log_event("info", "analytics_worker_ready", kafka_mode=kafka_publish_enabled())
 
         while not self._stop.is_set():
             batch: list[EventRaw] = []
@@ -127,7 +146,7 @@ class AggregatorWorker:
             pass
         log_event("info", "analytics_worker_stopped")
 
-    # ── closer thread ──────────────────────────────────────────────────────
+    # ── closer thread (ambos os modos) ────────────────────────────────────
 
     def _run_closer(self) -> None:
         log_event("info", "analytics_closer_ready", interval_s=CLOSER_INTERVAL_SECONDS)
