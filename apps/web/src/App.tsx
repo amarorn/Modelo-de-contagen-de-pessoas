@@ -37,6 +37,7 @@ export default function App() {
   const [sourceOpen, setSourceOpen] = useState(false);
   const [view, setView]             = useState<AppView>("pessoas");
   const [resetting, setResetting]   = useState(false);
+  const [restoringDefaults, setRestoringDefaults] = useState(false);
   const liveEnabled = view !== "relatorios";
   const { stats, status } = useStats(liveEnabled);
   const { data: flowInsights, error: flowInsightsErr } = useFlowInsights(
@@ -65,6 +66,54 @@ export default function App() {
     }
   };
 
+  const handleRestoreDefaults = async () => {
+    if (restoringDefaults) return;
+    const ok = window.confirm(
+      "Restaurar preset padrão de detecção/tracking/fluidez?\nIsso aplica valores equilibrados e recarrega o stream.",
+    );
+    if (!ok) return;
+    setRestoringDefaults(true);
+    try {
+      const preset: Record<string, string> = {
+        YOLO_INFER_CONF: "0.16",
+        YOLO_MIN_DET_CONF: "0.16",
+        YOLO_INFER_IMGSZ: "960",
+        YOLO_INFER_IOU: "0.45",
+        YOLO_MAX_DET: "150",
+        YOLO_VID_STRIDE: "2",
+        YOLO_STREAM_BUFFER: "1",
+        TRACK_CONF_SUPPRESS_THRESHOLD: "0.06",
+        TRACK_CONF_MIN_AGE_FRAMES: "1",
+        YOLO_MIN_PERSON_AR: "0.75",
+        YOLO_MAX_PERSON_AR: "3.6",
+        YOLO_MIN_PERSON_HEIGHT_PX: "20",
+        YOLO_OVERLAY_PERSON_MIN_HEIGHT_FRAC: "0.02",
+        YOLO_OVERLAY_PERSON_GLARE_ZONE_MIN_CONF: "0.30",
+        YOLO_WATCHDOG_SOFT_S: "600",
+        YOLO_WATCHDOG_HARD_S: "900",
+        YOLO_FEED_STALE_S: "10",
+        YOLO_MJPEG_MAX_FPS: "25",
+        YOLO_MJPEG_ADAPTIVE_FPS: "1",
+        YOLO_MJPEG_ADAPTIVE_HEADROOM: "1.28",
+        YOLO_MJPEG_ADAPTIVE_MIN_FPS: "12",
+        YOLO_MJPEG_BURST_NEW: "1",
+        YOLO_MJPEG_BURST_CAP_FPS: "20",
+      };
+      const res = await fetch(`${API_BASE}/api/settings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(preset),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      await refetchConfig();
+      window.alert("Preset padrão aplicado com sucesso.");
+    } catch (err) {
+      window.alert(`Falha ao restaurar padrão: ${err}`);
+    } finally {
+      setRestoringDefaults(false);
+    }
+  };
+
   return (
     <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
       <Header
@@ -75,6 +124,8 @@ export default function App() {
         onOpenRoi={() => setRoiOpen(true)}
         onOpenSource={() => setSourceOpen(true)}
         onOpenZones={() => setView("zonas")}
+        onRestoreDefaults={handleRestoreDefaults}
+        restoringDefaults={restoringDefaults}
         confidence={stats.cam_confidence}
         confidenceReasons={stats.cam_confidence_reasons}
         camDriftLevel={stats.cam_drift_level ?? "ok"}

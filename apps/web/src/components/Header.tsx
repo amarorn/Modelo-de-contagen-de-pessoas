@@ -1,7 +1,7 @@
 import React from "react";
 import type { ConnectionStatus } from "../types/api";
 import { CameraDriftBadge } from "./CameraDriftBadge";
-import { IconTarget, IconVideo, IconPolygon } from "./Icons";
+import { IconTarget, IconVideo, IconPolygon, IconRotateCcw } from "./Icons";
 
 export type AppView =
   | "pessoas"
@@ -19,6 +19,8 @@ interface Props {
   onOpenRoi: () => void;
   onOpenSource: () => void;
   onOpenZones: () => void;
+  onRestoreDefaults: () => void;
+  restoringDefaults?: boolean;
   confidence?: "high" | "medium" | "low";
   confidenceReasons?: string[];
   camDriftLevel?: "ok" | "illumination" | "focus" | "position";
@@ -112,6 +114,8 @@ export function Header({
   onOpenRoi,
   onOpenSource,
   onOpenZones,
+  onRestoreDefaults,
+  restoringDefaults = false,
   confidence,
   confidenceReasons,
   camDriftLevel = "ok",
@@ -248,6 +252,16 @@ export function Header({
             <button type="button" className="action-btn action-btn-nav" onClick={onOpenRoi} title="Linha e polígono de contagem">
               <IconTarget size={13} />
               Configurar ROI
+            </button>
+            <button
+              type="button"
+              className="action-btn action-btn-nav"
+              onClick={onRestoreDefaults}
+              disabled={restoringDefaults}
+              title="Restaura preset equilibrado de detecção, tracking e fluidez"
+            >
+              <IconRotateCcw size={13} />
+              {restoringDefaults ? "Aplicando padrão..." : "Restaurar padrão"}
             </button>
             <button type="button" className="action-btn action-btn-nav" onClick={onOpenSource} title="URL ou preset de câmara">
               <IconVideo size={13} />
