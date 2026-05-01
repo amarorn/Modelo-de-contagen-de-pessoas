@@ -2332,15 +2332,21 @@ def inference_loop(
             if _tp["agnostic_nms"]:
                 track_kw["agnostic_nms"] = True
 
-            # ── Smooth display: interpolação temporal entre frames YOLO consecutivos ─────────
-            # Com YOLO a 12.5 fps o MJPEG atualiza só 12.5×/s. Quando YOLO_SMOOTH_DISPLAY=1,
-            # uma thread faz addWeighted entre os dois últimos frames brutos YOLO (já em memória)
-            # e composta o diff de overlay por cima — ~30 fps sem abrir segundo VideoCapture,
-            # sem problemas de sincronia em HLS, sem consumo extra de banda.
-            # A exibição fica 1 intervalo YOLO atrás (≈80 ms) para poder interpolar "para frente".
+            # ── Smooth display: thread extra com segundo VideoCapture lê o mesmo source à FPS
+            # «natural» e publica JPEG com overlay composto (diff). Em webcam local ajuda a fluidez.
+            # Em HLS/RTSP/HTTP outro cap paralelo ao model.track() disputa decoder/CDN e pode travar.
             _smooth_disp: bool = os.environ.get("YOLO_SMOOTH_DISPLAY", "0").strip().lower() in (
                 "1", "true", "yes", "on",
             )
+            if _smooth_disp and isinstance(source, str):
+                _su = source.strip().lower()
+                if _su.startswith(("http://", "https://", "rtsp://", "rtmp://")):
+                    print(
+                        "[web] YOLO_SMOOTH_DISPLAY ignorado para URL em rede "
+                        "(um único leitor; segundo VideoCapture competia com track() e travava HLS).",
+                        flush=True,
+                    )
+                    _smooth_disp = False
             _smooth_disp_stop = threading.Event()
             _smooth_disp_thread: threading.Thread | None = None
             if _smooth_disp:
@@ -4857,6 +4863,57 @@ def create_app(
                 "active_preset_id": shared.active_preset_id,
                 "presets": list(shared.source_presets),
             })
+
+    @app.get("/api/source/hls")
+    def get_source_hls() -> Response:
+        with shared.lock:
+            raw_source = str(shared.source_live or "").strip()
+            changing = bool(shared.source_changed)
+            active_preset_id = str(shared.active_preset_id or "").strip()
+        if not raw_source:
+            return jsonify({"error": "source vazio"}), 404
+        if raw_source.isdigit():
+            return jsonify(
+                {
+                    "error": "Fonte local por indice (webcam) nao fornece URL HLS para player web.",
+                    "source": raw_source,
+                }
+            ), 400
+        try:
+            resolved = resolve_stream_source(raw_source)
+        except Exception as exc:
+            return jsonify(
+                {
+                    "error": f"Falha ao resolver fonte HLS: {exc}",
+                    "source": raw_source,
+                }
+            ), 502
+        low = resolved.strip().lower()
+        if not (low.startswith("http://") or low.startswith("https://")):
+            return jsonify(
+                {
+                    "error": "Fonte resolvida nao e URL HTTP(s).",
+                    "source": raw_source,
+                    "resolved": resolved,
+                }
+            ), 400
+        if ".m3u8" not in low:
+            return jsonify(
+                {
+                    "error": "Fonte resolvida nao parece HLS (.m3u8).",
+                    "source": raw_source,
+                    "resolved": resolved,
+                }
+            ), 400
+        return jsonify(
+            {
+                "ok": True,
+                "source": raw_source,
+                "url": resolved,
+                "changing": changing,
+                "active_preset_id": active_preset_id,
+            }
+        )
 
     @app.post("/api/source")
     def post_source() -> Response:

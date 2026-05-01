@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
+import Hls from "hls.js";
 import { HeatmapCanvas } from "./HeatmapCanvas";
 import { useHeatmap } from "../hooks/useHeatmap";
 import { useVehicleHeatmap } from "../hooks/useVehicleHeatmap";
@@ -8,6 +9,14 @@ interface SourcePreset {
   label: string;
   url: string;
 }
+
+interface HlsSourcePayload {
+  ok?: boolean;
+  url?: string;
+  error?: string;
+}
+
+type StreamMode = "hls" | "mjpeg";
 
 interface Props {
   apiBase: string;
@@ -25,6 +34,7 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
   const [loading, setLoading]       = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [reloadKey, setReloadKey]   = useState(() => Date.now());
+  const [streamMode, setStreamMode] = useState<StreamMode>("hls");
 
   /* ── Camera presets ────────────────────────────────────────── */
   const [presets, setPresets]           = useState<SourcePreset[]>([]);
@@ -48,10 +58,11 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const mediaRecorderRef   = useRef<MediaRecorder | null>(null);
   const recordedChunksRef  = useRef<Blob[]>([]);
-  const recordingRafRef    = useRef<number>(0);
   const recordingIntervalRef = useRef<number>(0);
 
   const imgRef       = useRef<HTMLImageElement>(null);
+  const videoRef     = useRef<HTMLVideoElement>(null);
+  const hlsRef       = useRef<Hls | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   /* MJPEG multipart: o proxy do Vite (5173) pode bufferizar e o <img> nunca dispara onLoad.
@@ -64,7 +75,9 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
     }
     return normalizeApiBase(apiBase);
   })();
-  const src = `${feedOrigin}/video_feed?t=${reloadKey}`;
+  const hlsMetaUrl = `${feedOrigin}/api/source/hls?t=${reloadKey}`;
+  const mjpegUrl = `${feedOrigin}/video_feed?t=${reloadKey}`;
+  const src = streamMode === "hls" ? hlsMetaUrl : mjpegUrl;
   const resolvedApiBase = normalizeApiBase(apiBase);
   const apiSourceDisplayUrl = resolvedApiBase ? `${resolvedApiBase}/api/source` : "/api/source";
 
@@ -132,7 +145,79 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
     setLoading(true);
   }, [src, feedEngaged]);
 
-  /* Se a inferencia nunca enviar JPEG (stream HLS preso) ou onLoad falhar, nao ficar eternamente a carregar. */
+  useEffect(() => {
+    if (streamMode !== "hls") return;
+    if (!feedEngaged) return;
+    const video = videoRef.current;
+    if (!video) return;
+    const ctrl = new AbortController();
+    let cancelled = false;
+
+    const cleanupPlayer = () => {
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    };
+
+    (async () => {
+      try {
+        const res = await fetch(hlsMetaUrl, {
+          signal: ctrl.signal,
+          credentials: "omit",
+          cache: "no-store",
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status} em /api/source/hls`);
+        const body = (await res.json()) as HlsSourcePayload;
+        const hlsUrl = typeof body.url === "string" ? body.url.trim() : "";
+        if (!hlsUrl) throw new Error(body.error || "URL HLS indisponível");
+
+        if (Hls.isSupported()) {
+          const hls = new Hls({
+            enableWorker: true,
+            lowLatencyMode: false,
+            backBufferLength: 30,
+          });
+          hlsRef.current = hls;
+          hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            if (cancelled) return;
+            void video.play().catch(() => {});
+          });
+          hls.on(Hls.Events.ERROR, (_event, data) => {
+            if (cancelled || !data.fatal) return;
+            setError(true);
+            setLoading(false);
+          });
+          hls.loadSource(hlsUrl);
+          hls.attachMedia(video);
+          return;
+        }
+
+        if (video.canPlayType("application/vnd.apple.mpegurl")) {
+          video.src = hlsUrl;
+          void video.play().catch(() => {});
+          return;
+        }
+
+        throw new Error("Este navegador não suporta HLS.");
+      } catch {
+        if (cancelled) return;
+        setError(true);
+        setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      ctrl.abort();
+      cleanupPlayer();
+    };
+  }, [hlsMetaUrl, feedEngaged, streamMode]);
+
+  /* Se o player HLS nao arrancar, nao ficar eternamente a carregar. */
   useEffect(() => {
     if (!feedEngaged || error || !loading) return;
     const raw = import.meta.env.VITE_VIDEO_FEED_LOAD_TIMEOUT_MS;
@@ -224,21 +309,20 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
 
   /* ── Recording ────────────────────────────────────────────── */
   const startRecording = useCallback(() => {
-    const img = imgRef.current;
-    if (!img || isRecording) return;
-
-    const canvas = document.createElement("canvas");
-    canvas.width  = img.naturalWidth  || 1280;
-    canvas.height = img.naturalHeight || 720;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    const drawFrame = () => {
-      if (!mediaRecorderRef.current) return;
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      recordingRafRef.current = requestAnimationFrame(drawFrame);
+    if (streamMode !== "hls") return;
+    const video = videoRef.current;
+    if (!video || isRecording) return;
+    const mediaEl = video as HTMLVideoElement & {
+      captureStream?: () => MediaStream;
+      mozCaptureStream?: () => MediaStream;
     };
-    recordingRafRef.current = requestAnimationFrame(drawFrame);
+    const stream =
+      typeof mediaEl.captureStream === "function"
+        ? mediaEl.captureStream()
+        : typeof mediaEl.mozCaptureStream === "function"
+          ? mediaEl.mozCaptureStream()
+          : null;
+    if (!stream) return;
 
     const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
       ? "video/webm;codecs=vp9"
@@ -246,7 +330,7 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
         ? "video/webm"
         : "video/mp4";
 
-    const recorder = new MediaRecorder(canvas.captureStream(25), { mimeType });
+    const recorder = new MediaRecorder(stream, { mimeType });
     recordedChunksRef.current = [];
 
     recorder.ondataavailable = (e) => {
@@ -254,7 +338,6 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
     };
 
     recorder.onstop = () => {
-      cancelAnimationFrame(recordingRafRef.current);
       window.clearInterval(recordingIntervalRef.current);
       const blob = new Blob(recordedChunksRef.current, { type: mimeType });
       const url  = URL.createObjectURL(blob);
@@ -275,7 +358,7 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
       () => setRecordingSeconds((s) => s + 1),
       1000,
     );
-  }, [isRecording]);
+  }, [isRecording, streamMode]);
 
   const stopRecording = useCallback(() => {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
@@ -287,10 +370,17 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
   useEffect(() => {
     return () => {
       stopRecording();
-      cancelAnimationFrame(recordingRafRef.current);
       window.clearInterval(recordingIntervalRef.current);
     };
   }, [stopRecording]);
+
+  useEffect(() => {
+    if (streamMode !== "hls" && isRecording) {
+      stopRecording();
+    }
+  }, [streamMode, isRecording, stopRecording]);
+
+  const canRecord = streamMode === "hls";
 
   return (
     <div
@@ -393,23 +483,87 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
             </svg>
           </button>
 
+          {/* ── Stream mode toggle ── */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-sm)",
+              overflow: "hidden",
+              background: "var(--bg-surface)",
+            }}
+          >
+            <button
+              onClick={() => {
+                if (streamMode === "hls") return;
+                setError(false);
+                setLoading(true);
+                setStreamMode("hls");
+                setReloadKey(Date.now());
+              }}
+              title="Modo HLS (mais fluido)"
+              style={{
+                padding: "4px 8px",
+                border: "none",
+                background: streamMode === "hls" ? "var(--amber-dim)" : "transparent",
+                color: streamMode === "hls" ? "var(--amber)" : "var(--text-muted)",
+                fontFamily: "var(--font-display)",
+                fontSize: 10,
+                fontWeight: 700,
+                letterSpacing: "0.08em",
+                textTransform: "uppercase",
+                cursor: "pointer",
+              }}
+            >
+              HLS
+            </button>
+            <button
+              onClick={() => {
+                if (streamMode === "mjpeg") return;
+                setError(false);
+                setLoading(true);
+                setStreamMode("mjpeg");
+                setReloadKey(Date.now());
+              }}
+              title="Modo MJPEG (overlay anotado)"
+              style={{
+                padding: "4px 8px",
+                border: "none",
+                borderLeft: "1px solid var(--border)",
+                background: streamMode === "mjpeg" ? "var(--amber-dim)" : "transparent",
+                color: streamMode === "mjpeg" ? "var(--amber)" : "var(--text-muted)",
+                fontFamily: "var(--font-display)",
+                fontSize: 10,
+                fontWeight: 700,
+                letterSpacing: "0.08em",
+                textTransform: "uppercase",
+                cursor: "pointer",
+              }}
+            >
+              MJPEG
+            </button>
+          </div>
+
           {/* ── Record button ── */}
           <button
             onClick={isRecording ? stopRecording : startRecording}
-            disabled={!feedEngaged || loading || error}
+            disabled={!feedEngaged || loading || error || !canRecord}
             title={
               isRecording
                 ? `Parar gravação (${formatDuration(recordingSeconds)})`
-                : "Gravar vídeo do stream"
+                : canRecord
+                  ? "Gravar vídeo do stream"
+                  : "Gravação disponível apenas no modo HLS"
             }
             style={{
               background: isRecording ? "rgba(239,68,68,0.15)" : "var(--bg-surface)",
               border: `1px solid ${isRecording ? "var(--red)" : "var(--border)"}`,
               borderRadius: "var(--radius-sm)",
-              cursor: feedEngaged && !loading && !error ? "pointer" : "not-allowed",
+              cursor: feedEngaged && !loading && !error && canRecord ? "pointer" : "not-allowed",
               padding: "4px 8px",
               color: isRecording ? "var(--red)" : "var(--text-muted)",
-              opacity: feedEngaged && !loading && !error ? 1 : 0.4,
+              opacity: feedEngaged && !loading && !error && canRecord ? 1 : 0.4,
               fontFamily: "var(--font-display)",
               fontSize: 10,
               fontWeight: 700,
@@ -694,23 +848,50 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
               overflow: "hidden",
             }}
           >
-            <img
-              ref={imgRef}
-              src={src}
-              alt="Feed de vídeo"
-              decoding="async"
-              onLoad={() => setLoading(false)}
-              onError={() => { setError(true); setLoading(false); }}
-              style={{
-                width: "100%",
-                height: "100%",
-                objectFit: isFullscreen || hero ? "contain" : "cover",
-                display: loading ? "none" : "block",
-                transform: "translate3d(0, 0, 0)",
-                backfaceVisibility: "hidden",
-                ...(isFullscreen ? { maxHeight: "100vh" } : {}),
-              }}
-            />
+            {streamMode === "hls" ? (
+              <video
+                ref={videoRef}
+                muted
+                playsInline
+                autoPlay
+                controls={false}
+                onLoadedData={() => setLoading(false)}
+                onError={() => {
+                  setError(true);
+                  setLoading(false);
+                }}
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  objectFit: isFullscreen || hero ? "contain" : "cover",
+                  display: loading ? "none" : "block",
+                  transform: "translate3d(0, 0, 0)",
+                  backfaceVisibility: "hidden",
+                  ...(isFullscreen ? { maxHeight: "100vh" } : {}),
+                }}
+              />
+            ) : (
+              <img
+                ref={imgRef}
+                src={mjpegUrl}
+                alt="Feed de vídeo"
+                decoding="async"
+                onLoad={() => setLoading(false)}
+                onError={() => {
+                  setError(true);
+                  setLoading(false);
+                }}
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  objectFit: isFullscreen || hero ? "contain" : "cover",
+                  display: loading ? "none" : "block",
+                  transform: "translate3d(0, 0, 0)",
+                  backfaceVisibility: "hidden",
+                  ...(isFullscreen ? { maxHeight: "100vh" } : {}),
+                }}
+              />
+            )}
           </div>
         ) : null}
 
