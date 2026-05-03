@@ -6,6 +6,7 @@ aceitar a URL da pagina (.html) evita copiar manualmente o m3u8.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import ssl
@@ -14,8 +15,8 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 _UA = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
 _SKYLINE_REFERER = "https://www.skylinewebcams.com/"
@@ -183,6 +184,84 @@ def _extract_base_href(html: str) -> str | None:
     return None
 
 
+def _walk_json_for_m3u8_url(obj: object, depth: int = 0) -> str | None:
+    """Percorre JSON (Next.js __NEXT_DATA__, APIs embutidas) a procura de URL HLS."""
+    if depth > 48:
+        return None
+    if isinstance(obj, str):
+        s = obj.strip()
+        low = s.lower()
+        if ".m3u8" in low and s.startswith(("http://", "https://")):
+            return s
+        return None
+    if isinstance(obj, dict):
+        prefer_keys = (
+            "contentUrl",
+            "embedUrl",
+            "streamUrl",
+            "hlsUrl",
+            "manifestUrl",
+            "playlistUrl",
+            "url",
+            "src",
+            "hls",
+            "playlist",
+            "stream",
+        )
+        for k in prefer_keys:
+            if k in obj and isinstance(obj[k], str) and ".m3u8" in obj[k].lower():
+                return obj[k].strip()
+        for v in obj.values():
+            found = _walk_json_for_m3u8_url(v, depth + 1)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for it in obj:
+            found = _walk_json_for_m3u8_url(it, depth + 1)
+            if found:
+                return found
+    return None
+
+
+def _extract_m3u8_from_embedded_json(html: str, candidates_add) -> None:
+    """JSON-LD, __NEXT_DATA__, __NUXT__, etc."""
+
+    def _add(raw: str | None) -> None:
+        candidates_add(raw)
+
+    for sid in ("__NEXT_DATA__", "__NUXT__"):
+        m = re.search(
+            rf'<script[^>]+id=["\']{re.escape(sid)}["\'][^>]*>([\s\S]*?)</script>',
+            html,
+            re.I,
+        )
+        if not m:
+            continue
+        try:
+            data = json.loads(m.group(1).strip())
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        found = _walk_json_for_m3u8_url(data)
+        if found:
+            _add(found)
+
+    for m in re.finditer(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>([\s\S]*?)</script>',
+        html,
+        re.I,
+    ):
+        raw = m.group(1).strip()
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        items = data if isinstance(data, list) else [data]
+        for item in items:
+            found = _walk_json_for_m3u8_url(item)
+            if found:
+                _add(found)
+
+
 def _extract_m3u8_from_html(html: str) -> str | None:
     """Extrai o primeiro URL de manifesto HLS plausivel do HTML da Skyline.
 
@@ -190,7 +269,9 @@ def _extract_m3u8_from_html(html: str) -> str | None:
     """
 
     def _clean(u: str) -> str:
-        return u.strip().rstrip(",;)}]\\").strip("'\"")
+        u = u.strip().rstrip(",;)}]\\").strip("'\"")
+        u = u.replace("\\/", "/").replace("\\u002e", ".").replace("\\u002E", ".")
+        return u.strip()
 
     candidates: list[str] = []
 
@@ -205,50 +286,77 @@ def _extract_m3u8_from_html(html: str) -> str | None:
         if u not in candidates:
             candidates.append(u)
 
-    # 1) Chaves JS comuns no player (ordem: mais especifico primeiro)
-    for pat in (
-        r"""source\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]""",
-        r"""file\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]""",
-        r"""src\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]""",
-        r"""url\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]""",
-        r"""hlsUrl\s*[=:]\s*['"]([^'"]+)['"]""",
-        r"""playback\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]""",
-        r"""manifestUrl\s*[=:]\s*['"]([^'"]+)['"]""",
-        r"""playlistUrl\s*[=:]\s*['"]([^'"]+)['"]""",
-        r"""["']hls["']\s*:\s*["']([^"']+)["']""",
-    ):
-        for m in re.finditer(pat, html, re.I):
-            _add(m.group(1))
-
-    # 2) Meta tags (algumas paginas expoem o stream)
-    for pat in (
-        r'<meta[^>]+property=["\']og:video["\'][^>]+content=["\']([^"\']+\.m3u8[^"\']*)["\']',
-        r'<meta[^>]+content=["\']([^"\']+\.m3u8[^"\']*)["\'][^>]+property=["\']og:video',
-        r'<meta[^>]+name=["\']twitter:player:stream["\'][^>]+content=["\']([^"\']+)["\']',
-    ):
-        m = re.search(pat, html, re.I)
-        if m:
-            _add(m.group(1))
-
-    # 3) URLs absolutas em dominios Skyline / CDN historica
-    for pat in (
-        r'(https://hd-auth\.skylinewebcams\.com/[^\s"\'<>]+\.m3u8[^\s"\'<>]*)',
-        r'(https://[^\s"\'<>]*skylinewebcams\.com[^\s"\'<>]*\.m3u8(?:\?[^\s"\'<>]*)?)',
-        r'(https://[^\s"\'<>]*\.skylinewebcams\.com[^\s"\'<>]*\.m3u8(?:\?[^\s"\'<>]*)?)',
-    ):
-        for m in re.finditer(pat, html, re.I):
-            _add(m.group(1))
-
-    # 4) Path relativo classico livee.m3u8?a=TOKEN (token alfanumerico longo)
-    m4 = re.search(
-        r"(livee?\.m3u8\?a=[A-Za-z0-9_-]{8,})",
+    html_variants = (
         html,
-        re.I,
+        html.replace("&amp;", "&"),
+        html.replace("&amp;amp;", "&"),
     )
-    if m4:
-        _add(m4.group(1))
 
-    # 5) Primeiro candidato que parece URL; preferir hd-auth
+    for blob in html_variants:
+        # 1) Chaves JS comuns no player (ordem: mais especifico primeiro)
+        for pat in (
+            r"""source\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]""",
+            r"""file\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]""",
+            r"""src\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]""",
+            r"""url\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]""",
+            r"""hlsUrl\s*[=:]\s*['"]([^'"]+)['"]""",
+            r"""playback\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]""",
+            r"""manifestUrl\s*[=:]\s*['"]([^'"]+)['"]""",
+            r"""playlistUrl\s*[=:]\s*['"]([^'"]+)['"]""",
+            r"""["']hls["']\s*:\s*["']([^"']+)["']""",
+            r"""streamUrl\s*[=:]\s*['"]([^'"]+)['"]""",
+        ):
+            for m in re.finditer(pat, blob, re.I):
+                _add(m.group(1))
+
+        # 2) Meta tags (algumas paginas expoem o stream)
+        for pat in (
+            r'<meta[^>]+property=["\']og:video(?::url)?["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:video(?::url)?',
+            r'<meta[^>]+name=["\']twitter:player:stream["\'][^>]+content=["\']([^"\']+)["\']',
+        ):
+            mm = re.search(pat, blob, re.I)
+            if mm:
+                _add(mm.group(1))
+
+        # 3) URLs absolutas em dominios Skyline / CDN historica
+        for pat in (
+            r'(https://hd-auth\.skylinewebcams\.com/[^\s"\'<>]+\.m3u8[^\s"\'<>]*)',
+            r'(https://[^\s"\'<>]*skylinewebcams\.com[^\s"\'<>]*\.m3u8(?:\?[^\s"\'<>]*)?)',
+            r'(https://[^\s"\'<>]*\.skylinewebcams\.com[^\s"\'<>]*\.m3u8(?:\?[^\s"\'<>]*)?)',
+        ):
+            for m in re.finditer(pat, blob, re.I):
+                _add(m.group(1))
+
+        # 3b) Qualquer URL absoluta terminando em .m3u8 (fallback por CDN nova)
+        for m in re.finditer(
+            r'https://[^\s"\'<>]+\.m3u8(?:\?[^\s"\'<>]*)?',
+            blob,
+            re.I,
+        ):
+            _add(m.group(0))
+
+        # 4) Path relativo classico livee.m3u8?a=TOKEN (token alfanumerico longo)
+        m4 = re.search(
+            r"(livee?\.m3u8\?a=[A-Za-z0-9_-]{8,})",
+            blob,
+            re.I,
+        )
+        if m4:
+            _add(m4.group(1))
+
+        # 5) Strings JS com ponto escapado (\.m3u8)
+        for m in re.finditer(
+            r"['\"]([^'\"]*(?:\\\.|\.)m3u8[^'\"]*)['\"]",
+            blob,
+            re.I,
+        ):
+            _add(m.group(1))
+
+    for blob in html_variants:
+        _extract_m3u8_from_embedded_json(blob, _add)
+
+    # 6) Primeiro candidato que parece URL; preferir hd-auth
     for pref in ("hd-auth", "skylinewebcams"):
         for c in candidates:
             if pref in c.lower():

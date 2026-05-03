@@ -28,7 +28,6 @@ import socket
 import sys
 import threading
 import time
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -134,6 +133,10 @@ from visioncount.vision.tracking.person_tracker import PersonTracker
 
 import visioncount.persistence.camera_calibration_store as cam_cal
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_MAX_SOURCE_PRESETS = 32
+_SOURCE_PRESETS_FILE = _REPO_ROOT / "data" / "web_source_presets.json"
+
 
 def _resolve_listen_port(host: str, preferred: int) -> int:
     """Escolhe uma porta livre: `preferred` ou a primeira seguinte (ate +31).
@@ -196,7 +199,6 @@ def _configure_runtime_logging() -> None:
     logging.getLogger("huggingface_hub.utils._http").setLevel(logging.ERROR)
 
 
-@dataclass
 def _load_source_presets_from_env() -> list[dict[str, str]]:
     """JSON em YOLO_WEB_SOURCE_PRESETS ou um preset a partir de URL_HLS_OU_RTSP_OU_FICHEIRO."""
     out: list[dict[str, str]] = []
@@ -1920,8 +1922,11 @@ def inference_loop(
                 f"min_h_px={args.min_person_height_px}"
             )
 
+        _occupancy_alert_high = False
+
         # ── Loop externo: reinicia o stream ao trocar fonte ─────────────────
         while not stop_event.is_set():
+            _occupancy_alert_high = False
             with shared.lock:
                 raw_src = shared.source_live
                 shared.source_changed = False
@@ -3338,6 +3343,32 @@ def inference_loop(
                         })
                 else:
                     _polygon_stats_publish = []
+                _occ_metric = occupancy_now
+                if _polygon_stats_publish:
+                    for _zone_row in _polygon_stats_publish:
+                        _occ_metric = max(
+                            _occ_metric,
+                            int(_zone_row.get("occupancy_now", 0)),
+                        )
+                with shared.lock:
+                    thr_occ = max(0, int(shared.thr_density_alert))
+                if thr_occ > 0:
+                    _above_occ = _occ_metric >= thr_occ
+                    if _above_occ and not _occupancy_alert_high:
+                        alert_mgr.maybe_fire(
+                            kind="occupancy",
+                            track_id=None,
+                            label=(
+                                f"Lotação: {_occ_metric} pessoas (limiar {thr_occ})"
+                            ),
+                            detail={
+                                "occupancy": _occ_metric,
+                                "threshold": thr_occ,
+                            },
+                        )
+                    _occupancy_alert_high = _above_occ
+                else:
+                    _occupancy_alert_high = False
                 _flow_vec_payload = None
                 if _flow_vec_counter >= 30:
                     _flow_vec_counter = 0

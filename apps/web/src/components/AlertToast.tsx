@@ -25,6 +25,17 @@ function IconCar({ size = 14 }: { size?: number }) {
     </svg>
   );
 }
+function IconOccupancy({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="9" cy="7" r="3" />
+      <circle cx="17" cy="9" r="2.5" />
+      <path d="M3 21v-1a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v1" />
+      <path d="M15 21v-1a3 3 0 0 0-1.4-2.5" />
+    </svg>
+  );
+}
 function IconSpeakerOn({ size = 13 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
@@ -71,7 +82,12 @@ export function AlertsLayer() {
   }, []);
 
   const anyEnabled = enabled.cap || enabled.carColors.length > 0;
-  const hasAlerts = anyEnabled || recent.length > 0 || counts.cap > 0 || counts.car > 0;
+  const hasAlerts =
+    anyEnabled ||
+    recent.length > 0 ||
+    counts.cap > 0 ||
+    counts.car > 0 ||
+    counts.occ > 0;
 
   return (
     <>
@@ -117,11 +133,17 @@ export function AlertsLayer() {
       }}>
         {recent.map(ev => {
           const isCap = ev.kind === "cap";
-          const accent = isCap ? "#00D4FF" : "#F59E0B";
-          const bg = isCap ? "rgba(0,212,255,0.07)" : "rgba(245,158,11,0.07)";
+          const isOcc = ev.kind === "occupancy";
+          const accent = isCap ? "#00D4FF" : isOcc ? "#EF4444" : "#F59E0B";
+          const bg = isCap
+            ? "rgba(0,212,255,0.07)"
+            : isOcc
+              ? "rgba(239,68,68,0.07)"
+              : "rgba(245,158,11,0.07)";
+          const titleShort = isCap ? "Bone" : isOcc ? "Lotação" : "Carro";
           return (
             <div
-              key={`${ev.kind}:${ev.track_id}`}
+              key={`${ev.kind}:${ev.seq}`}
               className="_at_toast"
               onClick={() => dismiss(ev.seq)}
               style={{
@@ -143,7 +165,7 @@ export function AlertsLayer() {
                 color: accent, display: "flex", alignItems: "center",
                 padding: 4, background: bg, borderRadius: 4, flexShrink: 0,
               }}>
-                {isCap ? <IconCap size={14} /> : <IconCar size={14} />}
+                {isCap ? <IconCap size={14} /> : isOcc ? <IconOccupancy size={14} /> : <IconCar size={14} />}
               </span>
 
               {/* Label */}
@@ -153,7 +175,7 @@ export function AlertsLayer() {
                   letterSpacing: "0.1em", textTransform: "uppercase",
                   marginBottom: 1,
                 }}>
-                  {isCap ? "Alerta · Bone" : "Alerta · Carro"}
+                  {`Alerta · ${titleShort}`}
                 </span>
                 <span style={{
                   fontWeight: 600, whiteSpace: "nowrap",
@@ -224,7 +246,7 @@ export function AlertsLayer() {
           </button>
 
           {/* Counts section — only when there's something to show */}
-          {(counts.cap > 0 || counts.car > 0 || anyEnabled) && (
+          {(counts.cap > 0 || counts.car > 0 || counts.occ > 0 || anyEnabled) && (
             <>
               <div className="_at_divider" />
               <div style={{
@@ -271,6 +293,22 @@ export function AlertsLayer() {
                         {enabled.carColors.join("·")}
                       </span>
                     )}
+                  </span>
+                )}
+
+                {counts.occ > 0 && (
+                  <span
+                    className="_at_count-badge"
+                    onClick={resetCounts}
+                    title="Alertas de lotação (limiar no perfil; clique para zerar)"
+                    style={{
+                      background: "rgba(239,68,68,0.08)",
+                      borderColor: "rgba(239,68,68,0.28)",
+                      color: "#EF4444",
+                    }}
+                  >
+                    <IconOccupancy size={10} />
+                    <span>{counts.occ}</span>
                   </span>
                 )}
 

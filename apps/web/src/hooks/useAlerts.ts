@@ -39,11 +39,17 @@ export function useAlerts() {
   const [soundOn, setSoundOn] = useState<boolean>(() => {
     try { return localStorage.getItem("alerts.soundOn") !== "0"; } catch { return true; }
   });
-  const [counts, setCounts] = useState<{ cap: number; car: number }>(() => {
+  const [counts, setCounts] = useState<{ cap: number; car: number; occ: number }>(() => {
     try {
       const saved = localStorage.getItem("alerts.counts");
-      return saved ? (JSON.parse(saved) as { cap: number; car: number }) : { cap: 0, car: 0 };
-    } catch { return { cap: 0, car: 0 }; }
+      if (!saved) return { cap: 0, car: 0, occ: 0 };
+      const p = JSON.parse(saved) as { cap?: number; car?: number; occ?: number };
+      return {
+        cap: p.cap ?? 0,
+        car: p.car ?? 0,
+        occ: p.occ ?? 0,
+      };
+    } catch { return { cap: 0, car: 0, occ: 0 }; }
   });
   const sinceRef = useRef<number>(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -73,13 +79,22 @@ export function useAlerts() {
         if (firstFetch || data.alerts.length === 0) return;
 
         if (soundOn) {
-          // Only beep once per batch regardless of how many duplicates arrived
           const seen = new Set<string>();
           for (const ev of data.alerts) {
-            const key = `${ev.kind}:${ev.track_id}`;
+            const key =
+              ev.track_id !== null
+                ? `${ev.kind}:${ev.track_id}`
+                : `${ev.kind}:${ev.seq}`;
             if (!seen.has(key)) {
               seen.add(key);
-              const kind = ev.kind === "cap" ? "cap" : ev.kind === "car_color" ? "car" : "default";
+              const kind =
+                ev.kind === "cap"
+                  ? "cap"
+                  : ev.kind === "car_color"
+                    ? "car"
+                    : ev.kind === "occupancy"
+                      ? "occupancy"
+                      : "default";
               beep({ kind });
             }
           }
@@ -90,17 +105,21 @@ export function useAlerts() {
           for (const ev of data.alerts) {
             if (ev.kind === "cap") next.cap++;
             else if (ev.kind === "car_color") next.car++;
+            else if (ev.kind === "occupancy") next.occ++;
           }
           try { localStorage.setItem("alerts.counts", JSON.stringify(next)); } catch { /* ignore */ }
           return next;
         });
 
-        // Deduplicate by (kind, track_id): update in-place, bump hitCount
         setRecent(prev => {
           let next = [...prev];
           for (const ev of data.alerts) {
             const idx = next.findIndex(
-              e => e.kind === ev.kind && e.track_id === ev.track_id
+              e =>
+                e.seq === ev.seq ||
+                (ev.track_id !== null &&
+                  e.kind === ev.kind &&
+                  e.track_id === ev.track_id),
             );
             if (idx >= 0) {
               next[idx] = { ...ev, hitCount: next[idx].hitCount + 1 };
@@ -132,7 +151,7 @@ export function useAlerts() {
   const dismiss = (seq: number) => setRecent(prev => prev.filter(a => a.seq !== seq));
 
   const resetCounts = () => {
-    const zero = { cap: 0, car: 0 };
+    const zero = { cap: 0, car: 0, occ: 0 };
     setCounts(zero);
     try { localStorage.setItem("alerts.counts", JSON.stringify(zero)); } catch { /* ignore */ }
   };

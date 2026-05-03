@@ -3,12 +3,13 @@
  *   await beep()                    // tom padrao (880Hz, 180ms)
  *   await beep({ kind: "cap" })     // 2 tons rapidos (pessoa com bone)
  *   await beep({ kind: "car" })     // tom longo grave (carro de cor-alvo)
+ *   await beep({ kind: "occupancy" }) // dois tons medios (lotacao)
  *
  * Browsers exigem gesto do usuario (click/keypress) antes de criar AudioContext.
  * Por isso `primeAudio()` deve ser chamado num click handler qualquer uma vez.
  */
 
-type BeepKind = "default" | "cap" | "car";
+type BeepKind = "default" | "cap" | "car" | "occupancy";
 
 let ctx: AudioContext | null = null;
 let primed = false;
@@ -62,6 +63,9 @@ export function beep(opts: { kind?: BeepKind } = {}): void {
     tone(ac, 1320, 120, 140);
   } else if (kind === "car") {
     tone(ac, 560, 320, 0);
+  } else if (kind === "occupancy") {
+    tone(ac, 720, 110, 0);
+    tone(ac, 620, 130, 125);
   } else {
     tone(ac, 880, 180, 0);
   }
