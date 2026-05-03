@@ -1,5 +1,18 @@
 # Treinamento na Plataforma Ultralytics
 
+## 0. Treino direto de stream (pipeline pronto)
+
+Comando unico (extracao -> pre-anotacao opcional -> split -> treino):
+
+```bash
+AUTO_LABEL=1 TRAIN_NOW=1 TEACHER=weights/best.pt \
+  bash scripts/train_from_stream.sh 'rtsp://usuario:senha@ip:554/stream'
+```
+
+- `AUTO_LABEL=1`: usa `scripts/auto_label.sh` para gerar labels iniciais YOLO.
+- `TRAIN_NOW=1`: dispara `scripts/run_train.sh` no final.
+- Sem `AUTO_LABEL=1`, voce deve rotular manualmente antes de treinar.
+
 ## 1. Preparar Dataset no Formato YOLO
 
 Estrutura minima:

@@ -780,6 +780,16 @@ rows = conn.execute("""
 
 ## Treinamento do Modelo
 
+### Treino a partir de stream (novo fluxo)
+
+```bash
+# Extrai frames do stream, pre-anota (AUTO_LABEL=1), divide dataset e treina
+AUTO_LABEL=1 TRAIN_NOW=1 TEACHER=weights/best.pt \
+  bash scripts/train_from_stream.sh 'rtsp://usuario:senha@ip:554/stream'
+```
+
+Sem `AUTO_LABEL=1`, o script apenas extrai/splita e espera rotulacao manual antes do treino.
+
 ### Preparar dataset
 
 ```bash
@@ -898,6 +908,7 @@ Se o broker não estiver acessível, o agregador passa a enfileirar localmente (
 | `scripts/run_inference.sh`              | Inferência standalone sem UI, gera CSV       |
 | `scripts/run_train.sh`                  | Treinar modelo YOLOv8                        |
 | `scripts/run_train_v2.sh`               | Treino avançado com cross-validation         |
+| `scripts/train_from_stream.sh`          | Pipeline stream -> dataset -> treino         |
 | `scripts/run_kafka_consumer.sh`         | Consumer Kafka (`consumer_service`) → BD    |
 | `scripts/run_analytics_kafka_consumer.sh` | Consumer tópico analytics visão → BD (com `ANALYTICS_KAFKA_PUBLISH=1`) |
 | `scripts/extract_frames_from_stream.sh` | Extrair frames de stream para dataset        |

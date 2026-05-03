@@ -4,12 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="1feb0f89-e6ce-46be-bc83-677d520dd1d5" name="Changes" comment="feat: &lt;descrição&gt; (#&lt;número_da_issue&gt;)&#10;&#10;# ⚠️ OBRIGATÓRIO: Substitua &lt;número_da_issue&gt; pelo número real da issue&#10;# Exemplo: feat(chat): Adicionar persistência de sessão (#144)&#10;# Exemplo: fix: Corrigir endpoint de streaming (#174)&#10;&#10;# Tipos permitidos:&#10;#   feat:     Nova funcionalidade&#10;#   fix:      Correção de bug&#10;#   docs:     Documentação&#10;#   style:    Formatação (não afeta código)&#10;#   refactor: Refatoração&#10;#   test:     Testes&#10;#   chore:    Tarefas de manutenção&#10;#   perf:     Melhorias de performance&#10;#   ci:       Mudanças em CI/CD&#10;#   build:    Mudanças no sistema de build&#10;&#10;# Scope (opcional): área do código afetada&#10;#   Exemplos: chat, api, frontend, backend, auth, etc.&#10;#   Formato: tipo(scope): descrição (#123)&#10;&#10;# Descrição detalhada (opcional):&#10;# &#10;&#10;# Issues relacionadas (opcional):&#10;# Fixes #123&#10;# Relates to #456">
-      <change beforePath="$PROJECT_DIR$/.idea/Modelo de contagen de pessoas .iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/Modelo de contagen de pessoas .iml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/deployment.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/deployment.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-    </list>
+    <list default="true" id="1feb0f89-e6ce-46be-bc83-677d520dd1d5" name="Changes" comment="feat: &lt;descrição&gt; (#&lt;número_da_issue&gt;)&#10;&#10;# ⚠️ OBRIGATÓRIO: Substitua &lt;número_da_issue&gt; pelo número real da issue&#10;# Exemplo: feat(chat): Adicionar persistência de sessão (#144)&#10;# Exemplo: fix: Corrigir endpoint de streaming (#174)&#10;&#10;# Tipos permitidos:&#10;#   feat:     Nova funcionalidade&#10;#   fix:      Correção de bug&#10;#   docs:     Documentação&#10;#   style:    Formatação (não afeta código)&#10;#   refactor: Refatoração&#10;#   test:     Testes&#10;#   chore:    Tarefas de manutenção&#10;#   perf:     Melhorias de performance&#10;#   ci:       Mudanças em CI/CD&#10;#   build:    Mudanças no sistema de build&#10;&#10;# Scope (opcional): área do código afetada&#10;#   Exemplos: chat, api, frontend, backend, auth, etc.&#10;#   Formato: tipo(scope): descrição (#123)&#10;&#10;# Descrição detalhada (opcional):&#10;# &#10;&#10;# Issues relacionadas (opcional):&#10;# Fixes #123&#10;# Relates to #456" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -133,16 +128,35 @@
       <workItem from="1777787242111" duration="240000" />
       <workItem from="1777787491585" duration="3050000" />
       <workItem from="1777790877143" duration="82000" />
-      <workItem from="1777791126322" duration="1369000" />
+      <workItem from="1777791126322" duration="1449000" />
     </task>
+    <task id="LOCAL-00001" summary="chore: update IDE configuration files in .idea directory">
+      <option name="closed" value="true" />
+      <created>1777792931627</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1777792931627</updated>
+    </task>
+    <task id="LOCAL-00002" summary="feat: &lt;descrição&gt; (#&lt;número_da_issue&gt;)&#10;&#10;# ⚠️ OBRIGATÓRIO: Substitua &lt;número_da_issue&gt; pelo número real da issue&#10;# Exemplo: feat(chat): Adicionar persistência de sessão (#144)&#10;# Exemplo: fix: Corrigir endpoint de streaming (#174)&#10;&#10;# Tipos permitidos:&#10;#   feat:     Nova funcionalidade&#10;#   fix:      Correção de bug&#10;#   docs:     Documentação&#10;#   style:    Formatação (não afeta código)&#10;#   refactor: Refatoração&#10;#   test:     Testes&#10;#   chore:    Tarefas de manutenção&#10;#   perf:     Melhorias de performance&#10;#   ci:       Mudanças em CI/CD&#10;#   build:    Mudanças no sistema de build&#10;&#10;# Scope (opcional): área do código afetada&#10;#   Exemplos: chat, api, frontend, backend, auth, etc.&#10;#   Formato: tipo(scope): descrição (#123)&#10;&#10;# Descrição detalhada (opcional):&#10;# &#10;&#10;# Issues relacionadas (opcional):&#10;# Fixes #123&#10;# Relates to #456">
+      <option name="closed" value="true" />
+      <created>1777792946596</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1777792946596</updated>
+    </task>
+    <option name="localTasksCounter" value="3" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
     <option name="version" value="3" />
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="feat: &lt;descrição&gt; (#&lt;número_da_issue&gt;)&#10;&#10;# ⚠️ OBRIGATÓRIO: Substitua &lt;número_da_issue&gt; pelo número real da issue&#10;# Exemplo: feat(chat): Adicionar persistência de sessão (#144)&#10;# Exemplo: fix: Corrigir endpoint de streaming (#174)&#10;&#10;# Tipos permitidos:&#10;#   feat:     Nova funcionalidade&#10;#   fix:      Correção de bug&#10;#   docs:     Documentação&#10;#   style:    Formatação (não afeta código)&#10;#   refactor: Refatoração&#10;#   test:     Testes&#10;#   chore:    Tarefas de manutenção&#10;#   perf:     Melhorias de performance&#10;#   ci:       Mudanças em CI/CD&#10;#   build:    Mudanças no sistema de build&#10;&#10;# Scope (opcional): área do código afetada&#10;#   Exemplos: chat, api, frontend, backend, auth, etc.&#10;#   Formato: tipo(scope): descrição (#123)&#10;&#10;# Descrição detalhada (opcional):&#10;# &#10;&#10;# Issues relacionadas (opcional):&#10;# Fixes #123&#10;# Relates to #456&#10;&#10;" />
     <MESSAGE value="feat(stream): adicionar toggle HLS/MJPEG no LiveFeed e endpoint HLS no backend&#10;&#10;- adiciona GET /api/source/hls para resolver e expor URL .m3u8 da fonte ativa&#10;- migra player do LiveFeed para suportar HLS com hls.js&#10;- mantém fallback/alternância para MJPEG via /video_feed&#10;- inclui toggle HLS/MJPEG na UI para troca em tempo real&#10;- ajusta gravação para usar captureStream no modo HLS&#10;- adiciona dependência hls.js no frontend" />
-    <option name="LAST_COMMIT_MESSAGE" value="feat(stream): adicionar toggle HLS/MJPEG no LiveFeed e endpoint HLS no backend&#10;&#10;- adiciona GET /api/source/hls para resolver e expor URL .m3u8 da fonte ativa&#10;- migra player do LiveFeed para suportar HLS com hls.js&#10;- mantém fallback/alternância para MJPEG via /video_feed&#10;- inclui toggle HLS/MJPEG na UI para troca em tempo real&#10;- ajusta gravação para usar captureStream no modo HLS&#10;- adiciona dependência hls.js no frontend" />
+    <MESSAGE value="feat: &lt;descrição&gt; (#&lt;número_da_issue&gt;)&#10;&#10;# ⚠️ OBRIGATÓRIO: Substitua &lt;número_da_issue&gt; pelo número real da issue&#10;# Exemplo: feat(chat): Adicionar persistência de sessão (#144)&#10;# Exemplo: fix: Corrigir endpoint de streaming (#174)&#10;&#10;# Tipos permitidos:&#10;#   feat:     Nova funcionalidade&#10;#   fix:      Correção de bug&#10;#   docs:     Documentação&#10;#   style:    Formatação (não afeta código)&#10;#   refactor: Refatoração&#10;#   test:     Testes&#10;#   chore:    Tarefas de manutenção&#10;#   perf:     Melhorias de performance&#10;#   ci:       Mudanças em CI/CD&#10;#   build:    Mudanças no sistema de build&#10;&#10;# Scope (opcional): área do código afetada&#10;#   Exemplos: chat, api, frontend, backend, auth, etc.&#10;#   Formato: tipo(scope): descrição (#123)&#10;&#10;# Descrição detalhada (opcional):&#10;# &#10;&#10;# Issues relacionadas (opcional):&#10;# Fixes #123&#10;# Relates to #456&#10;&#10;" />
+    <MESSAGE value="chore: update IDE configuration files in .idea directory" />
+    <MESSAGE value="feat: &lt;descrição&gt; (#&lt;número_da_issue&gt;)&#10;&#10;# ⚠️ OBRIGATÓRIO: Substitua &lt;número_da_issue&gt; pelo número real da issue&#10;# Exemplo: feat(chat): Adicionar persistência de sessão (#144)&#10;# Exemplo: fix: Corrigir endpoint de streaming (#174)&#10;&#10;# Tipos permitidos:&#10;#   feat:     Nova funcionalidade&#10;#   fix:      Correção de bug&#10;#   docs:     Documentação&#10;#   style:    Formatação (não afeta código)&#10;#   refactor: Refatoração&#10;#   test:     Testes&#10;#   chore:    Tarefas de manutenção&#10;#   perf:     Melhorias de performance&#10;#   ci:       Mudanças em CI/CD&#10;#   build:    Mudanças no sistema de build&#10;&#10;# Scope (opcional): área do código afetada&#10;#   Exemplos: chat, api, frontend, backend, auth, etc.&#10;#   Formato: tipo(scope): descrição (#123)&#10;&#10;# Descrição detalhada (opcional):&#10;# &#10;&#10;# Issues relacionadas (opcional):&#10;# Fixes #123&#10;# Relates to #456" />
+    <option name="LAST_COMMIT_MESSAGE" value="feat: &lt;descrição&gt; (#&lt;número_da_issue&gt;)&#10;&#10;# ⚠️ OBRIGATÓRIO: Substitua &lt;número_da_issue&gt; pelo número real da issue&#10;# Exemplo: feat(chat): Adicionar persistência de sessão (#144)&#10;# Exemplo: fix: Corrigir endpoint de streaming (#174)&#10;&#10;# Tipos permitidos:&#10;#   feat:     Nova funcionalidade&#10;#   fix:      Correção de bug&#10;#   docs:     Documentação&#10;#   style:    Formatação (não afeta código)&#10;#   refactor: Refatoração&#10;#   test:     Testes&#10;#   chore:    Tarefas de manutenção&#10;#   perf:     Melhorias de performance&#10;#   ci:       Mudanças em CI/CD&#10;#   build:    Mudanças no sistema de build&#10;&#10;# Scope (opcional): área do código afetada&#10;#   Exemplos: chat, api, frontend, backend, auth, etc.&#10;#   Formato: tipo(scope): descrição (#123)&#10;&#10;# Descrição detalhada (opcional):&#10;# &#10;&#10;# Issues relacionadas (opcional):&#10;# Fixes #123&#10;# Relates to #456" />
   </component>
 </project>
