@@ -24,3 +24,6 @@ weights/**/*.pt
 # Gravações de ecrã / vídeos locais (não versionar binários grandes)
 artifacts/*.mov
 artifacts/*.mp4
+
+# JetBrains: patches da shelf podem ser enormes
+.idea/shelf/
