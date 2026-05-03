@@ -41,6 +41,28 @@ except ImportError:
     pass
 
 
+def _apply_yolo_display_label_overrides(nm: dict[int, str]) -> None:
+    """JSON em YOLO_CLASS_DISPLAY_LABELS: nomes na UI alinhados ao negócio (o .pt pode trazer labels do dataset)."""
+    raw = os.environ.get("YOLO_CLASS_DISPLAY_LABELS", "").strip()
+    if not raw:
+        return
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(
+            f"[web] AVISO: YOLO_CLASS_DISPLAY_LABELS JSON invalido ({exc}); ignorado.",
+            flush=True,
+        )
+        return
+    if not isinstance(data, dict):
+        return
+    for k, v in data.items():
+        try:
+            nm[int(k)] = str(v).strip()
+        except (TypeError, ValueError):
+            continue
+
+
 def _configure_opencv_videoio_priorities() -> None:
     """Antes de importar cv2: no Linux, Obsensor pode ser escolhido antes de V4L2 e spammar o stderr."""
     if not sys.platform.startswith("linux"):
@@ -1755,6 +1777,7 @@ def inference_loop(
                         nm[int(_k)] = str(_v)
                     except (TypeError, ValueError):
                         pass
+            _apply_yolo_display_label_overrides(nm)
             shared.yolo_class_names = nm
             shared.yolo_count_class_ids = list(count_class_ids)
             shared.yolo_person_class_id = person_class_id
