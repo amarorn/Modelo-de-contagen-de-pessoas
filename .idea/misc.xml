@@ -3,4 +3,5 @@
   <component name="Black">
     <option name="sdkName" value="Remote 3.11 (sftp://amaro-neto@177.135.190.43:22/home/amaro-neto/Modelo-de-contagen-de-pessoas/.venv/bin/python)" />
   </component>
+  <component name="ProjectRootManager" version="2" project-jdk-name="SSH (sftp://amaro-neto@177.135.190.43:22/home/amaro-neto/Modelo-de-contagen-de-pessoas/.venv/bin/python)" project-jdk-type="Python SDK" />
 </project>
