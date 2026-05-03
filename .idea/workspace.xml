@@ -4,7 +4,16 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="1feb0f89-e6ce-46be-bc83-677d520dd1d5" name="Changes" comment="feat: &lt;descrição&gt; (#&lt;número_da_issue&gt;)&#10;&#10;# ⚠️ OBRIGATÓRIO: Substitua &lt;número_da_issue&gt; pelo número real da issue&#10;# Exemplo: feat(chat): Adicionar persistência de sessão (#144)&#10;# Exemplo: fix: Corrigir endpoint de streaming (#174)&#10;&#10;# Tipos permitidos:&#10;#   feat:     Nova funcionalidade&#10;#   fix:      Correção de bug&#10;#   docs:     Documentação&#10;#   style:    Formatação (não afeta código)&#10;#   refactor: Refatoração&#10;#   test:     Testes&#10;#   chore:    Tarefas de manutenção&#10;#   perf:     Melhorias de performance&#10;#   ci:       Mudanças em CI/CD&#10;#   build:    Mudanças no sistema de build&#10;&#10;# Scope (opcional): área do código afetada&#10;#   Exemplos: chat, api, frontend, backend, auth, etc.&#10;#   Formato: tipo(scope): descrição (#123)&#10;&#10;# Descrição detalhada (opcional):&#10;# &#10;&#10;# Issues relacionadas (opcional):&#10;# Fixes #123&#10;# Relates to #456" />
+    <list default="true" id="1feb0f89-e6ce-46be-bc83-677d520dd1d5" name="Changes" comment="feat: add occupancy alert feature and related UI updates&#10;&#10;- Introduced a new beep sound for occupancy alerts in the audio module.&#10;- Added an occupancy icon and updated the AlertsLayer component to handle occupancy alerts.&#10;- Enhanced the useAlerts hook to track occupancy counts and manage alert states.&#10;- Updated the web_dashboard.py to include occupancy metrics in the inference loop.&#10;- Improved the resolver.py to extract HLS URLs from embedded JSON data, enhancing stream handling capabilities.">
+      <changelist_data name="amarorn" email="amarorn@users.noreply.github.com" automatic="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/shelf/Uncommitted_changes_before_Update_at_03_05_26,_07_12_[Changes]/shelved.patch" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/shelf/Uncommitted_changes_before_Update_at_03_05_26__07_12__Changes_.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/data/.gitkeep" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/docs/spec/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/models/.gitkeep" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/models/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -29,6 +38,11 @@
     <option name="myRunOnSave" value="true" />
   </component>
   <component name="Git.Settings">
+    <option name="PREVIOUS_COMMIT_AUTHORS">
+      <list>
+        <option value="amarorn &lt;amarorn@users.noreply.github.com&gt;" />
+      </list>
+    </option>
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
   <component name="GitHubPullRequestSearchHistory">{
@@ -66,41 +80,41 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "ModuleVcsDetector.initialDetectionPerformed": "true",
-    "RunOnceActivity.MCP Project settings loaded": "true",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
-    "ai.playground.ignore.import.keys.banner.in.settings": "true",
-    "app.teamhub.selectedTeam": "https://github.com/amarorn/Modelo-de-contagen-de-pessoas",
-    "codeWithMe.voiceChat.enabledByDefault": "false",
-    "com.intellij.ml.llm.matterhorn.ej.ui.settings.DefaultModelSelectionForGA.v1": "true",
-    "dart.analysis.tool.window.visible": "false",
-    "git-widget-placeholder": "feat/tune-stream-offline-clip",
-    "junie.onboarding.icon.badge.shown": "true",
-    "last_opened_file_path": "/Users/amaro/Documents/Cactus/Modelo de contagen de pessoas ",
-    "node.js.detected.package.eslint": "true",
-    "node.js.detected.package.standard": "true",
-    "node.js.selected.package.eslint": "(autodetect)",
-    "node.js.selected.package.standard": "",
-    "node.js.selected.package.tslint": "(autodetect)",
-    "nodejs_package_manager_path": "pnpm",
-    "remoteSync.welcome.shown.1.1.8": "true",
-    "settings.editor.selected.configurable": "ssh.settings",
-    "to.speed.mode.migration.done": "true",
-    "ts.external.directory.path": "/Users/amaro/Applications/PyCharm.app/Contents/plugins/javascript-plugin/jsLanguageServicesImpl/external",
-    "vue.rearranger.settings.migration": "true"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.MCP Project settings loaded&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
+    &quot;ai.playground.ignore.import.keys.banner.in.settings&quot;: &quot;true&quot;,
+    &quot;app.teamhub.selectedTeam&quot;: &quot;https://github.com/amarorn/Modelo-de-contagen-de-pessoas&quot;,
+    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
+    &quot;com.intellij.ml.llm.matterhorn.ej.ui.settings.DefaultModelSelectionForGA.v1&quot;: &quot;true&quot;,
+    &quot;dart.analysis.tool.window.visible&quot;: &quot;false&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;feat/tune-stream-offline-clip&quot;,
+    &quot;junie.onboarding.icon.badge.shown&quot;: &quot;true&quot;,
+    &quot;last_opened_file_path&quot;: &quot;/Users/amaro/Documents/Cactus/Modelo de contagen de pessoas &quot;,
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.standard&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;node.js.selected.package.standard&quot;: &quot;&quot;,
+    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;pnpm&quot;,
+    &quot;remoteSync.welcome.shown.1.1.8&quot;: &quot;true&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;ssh.settings&quot;,
+    &quot;to.speed.mode.migration.done&quot;: &quot;true&quot;,
+    &quot;ts.external.directory.path&quot;: &quot;/Users/amaro/Applications/PyCharm.app/Contents/plugins/javascript-plugin/jsLanguageServicesImpl/external&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
-}]]></component>
+}</component>
   <component name="RecapSpentCounter">
     <option name="endsOfQuotaMs" value="1780333238478" />
-    <option name="spentUsd" value="0.0026645" />
+    <option name="spentUsd" value="0.0046025" />
   </component>
   <component name="RecapUselessUpdatesCounter">
-    <option name="suspendCountdown" value="1" />
+    <option name="suspendCountdown" value="0" />
   </component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
@@ -157,6 +171,8 @@
     <MESSAGE value="feat: &lt;descrição&gt; (#&lt;número_da_issue&gt;)&#10;&#10;# ⚠️ OBRIGATÓRIO: Substitua &lt;número_da_issue&gt; pelo número real da issue&#10;# Exemplo: feat(chat): Adicionar persistência de sessão (#144)&#10;# Exemplo: fix: Corrigir endpoint de streaming (#174)&#10;&#10;# Tipos permitidos:&#10;#   feat:     Nova funcionalidade&#10;#   fix:      Correção de bug&#10;#   docs:     Documentação&#10;#   style:    Formatação (não afeta código)&#10;#   refactor: Refatoração&#10;#   test:     Testes&#10;#   chore:    Tarefas de manutenção&#10;#   perf:     Melhorias de performance&#10;#   ci:       Mudanças em CI/CD&#10;#   build:    Mudanças no sistema de build&#10;&#10;# Scope (opcional): área do código afetada&#10;#   Exemplos: chat, api, frontend, backend, auth, etc.&#10;#   Formato: tipo(scope): descrição (#123)&#10;&#10;# Descrição detalhada (opcional):&#10;# &#10;&#10;# Issues relacionadas (opcional):&#10;# Fixes #123&#10;# Relates to #456&#10;&#10;" />
     <MESSAGE value="chore: update IDE configuration files in .idea directory" />
     <MESSAGE value="feat: &lt;descrição&gt; (#&lt;número_da_issue&gt;)&#10;&#10;# ⚠️ OBRIGATÓRIO: Substitua &lt;número_da_issue&gt; pelo número real da issue&#10;# Exemplo: feat(chat): Adicionar persistência de sessão (#144)&#10;# Exemplo: fix: Corrigir endpoint de streaming (#174)&#10;&#10;# Tipos permitidos:&#10;#   feat:     Nova funcionalidade&#10;#   fix:      Correção de bug&#10;#   docs:     Documentação&#10;#   style:    Formatação (não afeta código)&#10;#   refactor: Refatoração&#10;#   test:     Testes&#10;#   chore:    Tarefas de manutenção&#10;#   perf:     Melhorias de performance&#10;#   ci:       Mudanças em CI/CD&#10;#   build:    Mudanças no sistema de build&#10;&#10;# Scope (opcional): área do código afetada&#10;#   Exemplos: chat, api, frontend, backend, auth, etc.&#10;#   Formato: tipo(scope): descrição (#123)&#10;&#10;# Descrição detalhada (opcional):&#10;# &#10;&#10;# Issues relacionadas (opcional):&#10;# Fixes #123&#10;# Relates to #456" />
-    <option name="LAST_COMMIT_MESSAGE" value="feat: &lt;descrição&gt; (#&lt;número_da_issue&gt;)&#10;&#10;# ⚠️ OBRIGATÓRIO: Substitua &lt;número_da_issue&gt; pelo número real da issue&#10;# Exemplo: feat(chat): Adicionar persistência de sessão (#144)&#10;# Exemplo: fix: Corrigir endpoint de streaming (#174)&#10;&#10;# Tipos permitidos:&#10;#   feat:     Nova funcionalidade&#10;#   fix:      Correção de bug&#10;#   docs:     Documentação&#10;#   style:    Formatação (não afeta código)&#10;#   refactor: Refatoração&#10;#   test:     Testes&#10;#   chore:    Tarefas de manutenção&#10;#   perf:     Melhorias de performance&#10;#   ci:       Mudanças em CI/CD&#10;#   build:    Mudanças no sistema de build&#10;&#10;# Scope (opcional): área do código afetada&#10;#   Exemplos: chat, api, frontend, backend, auth, etc.&#10;#   Formato: tipo(scope): descrição (#123)&#10;&#10;# Descrição detalhada (opcional):&#10;# &#10;&#10;# Issues relacionadas (opcional):&#10;# Fixes #123&#10;# Relates to #456" />
+    <MESSAGE value="ap esta " />
+    <MESSAGE value="feat: add occupancy alert feature and related UI updates&#10;&#10;- Introduced a new beep sound for occupancy alerts in the audio module.&#10;- Added an occupancy icon and updated the AlertsLayer component to handle occupancy alerts.&#10;- Enhanced the useAlerts hook to track occupancy counts and manage alert states.&#10;- Updated the web_dashboard.py to include occupancy metrics in the inference loop.&#10;- Improved the resolver.py to extract HLS URLs from embedded JSON data, enhancing stream handling capabilities." />
+    <option name="LAST_COMMIT_MESSAGE" value="feat: add occupancy alert feature and related UI updates&#10;&#10;- Introduced a new beep sound for occupancy alerts in the audio module.&#10;- Added an occupancy icon and updated the AlertsLayer component to handle occupancy alerts.&#10;- Enhanced the useAlerts hook to track occupancy counts and manage alert states.&#10;- Updated the web_dashboard.py to include occupancy metrics in the inference loop.&#10;- Improved the resolver.py to extract HLS URLs from embedded JSON data, enhancing stream handling capabilities." />
   </component>
 </project>
