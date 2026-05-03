@@ -18,6 +18,36 @@ interface HlsSourcePayload {
 
 type StreamMode = "hls" | "mjpeg";
 
+/** Skyline/CDN: pedidos XHR sem Referer costumam falhar (403 ou segmentos vazios); o backend FFmpeg já envia isto. */
+const SKYLINE_HLS_REFERER = "https://www.skylinewebcams.com/";
+
+function urlLooksLikeSkylineHls(u: string): boolean {
+  return u.toLowerCase().includes("skylinewebcams");
+}
+
+/** v2: migração única — quem tinha só «hls» no v1 passa a MJPEG (overlay visível). */
+const LIVE_FEED_STREAM_MODE_KEY = "livefeed.streamMode.v2";
+const LIVE_FEED_STREAM_MODE_KEY_LEGACY = "livefeed.streamMode";
+
+function readStoredStreamMode(): StreamMode {
+  try {
+    const v2 = localStorage.getItem(LIVE_FEED_STREAM_MODE_KEY);
+    if (v2 === "hls" || v2 === "mjpeg") {
+      return v2;
+    }
+    const leg = localStorage.getItem(LIVE_FEED_STREAM_MODE_KEY_LEGACY);
+    if (leg === "hls" || leg === "mjpeg") {
+      const migrated: StreamMode = leg === "hls" ? "mjpeg" : leg;
+      localStorage.setItem(LIVE_FEED_STREAM_MODE_KEY, migrated);
+      localStorage.removeItem(LIVE_FEED_STREAM_MODE_KEY_LEGACY);
+      return migrated;
+    }
+  } catch {
+    /* ignore */
+  }
+  return "mjpeg";
+}
+
 interface Props {
   apiBase: string;
   hero?: boolean;
@@ -34,7 +64,7 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
   const [loading, setLoading]       = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [reloadKey, setReloadKey]   = useState(() => Date.now());
-  const [streamMode, setStreamMode] = useState<StreamMode>("hls");
+  const [streamMode, setStreamMode] = useState<StreamMode>(readStoredStreamMode);
 
   /* ── Camera presets ────────────────────────────────────────── */
   const [presets, setPresets]           = useState<SourcePreset[]>([]);
@@ -180,6 +210,18 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
             enableWorker: true,
             lowLatencyMode: false,
             backBufferLength: 30,
+            xhrSetup(xhr, reqUrl) {
+              try {
+                if (
+                  urlLooksLikeSkylineHls(String(reqUrl)) ||
+                  urlLooksLikeSkylineHls(hlsUrl)
+                ) {
+                  xhr.setRequestHeader("Referer", SKYLINE_HLS_REFERER);
+                }
+              } catch {
+                /* ignore */
+              }
+            },
           });
           hlsRef.current = hls;
           hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -500,9 +542,14 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
                 setError(false);
                 setLoading(true);
                 setStreamMode("hls");
+                try {
+                  localStorage.setItem(LIVE_FEED_STREAM_MODE_KEY, "hls");
+                } catch {
+                  /* ignore */
+                }
                 setReloadKey(Date.now());
               }}
-              title="Modo HLS (mais fluido)"
+              title="HLS: vídeo mais fluido no browser, sem caixas de deteção. Para ver as caixas YOLO, use MJPEG."
               style={{
                 padding: "4px 8px",
                 border: "none",
@@ -524,9 +571,14 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
                 setError(false);
                 setLoading(true);
                 setStreamMode("mjpeg");
+                try {
+                  localStorage.setItem(LIVE_FEED_STREAM_MODE_KEY, "mjpeg");
+                } catch {
+                  /* ignore */
+                }
                 setReloadKey(Date.now());
               }}
-              title="Modo MJPEG (overlay anotado)"
+              title="MJPEG: feed do servidor com caixas de deteção e etiquetas (recomendado para validar contagem)"
               style={{
                 padding: "4px 8px",
                 border: "none",
@@ -891,6 +943,68 @@ function LiveFeedComponent({ apiBase, hero = false, inferFpsEma }: Props) {
                   ...(isFullscreen ? { maxHeight: "100vh" } : {}),
                 }}
               />
+            )}
+            {streamMode === "hls" && feedEngaged && !loading && !error && (
+              <div
+                style={{
+                  position: "absolute",
+                  left: 10,
+                  right: 10,
+                  bottom: 10,
+                  zIndex: 6,
+                  padding: "10px 12px",
+                  borderRadius: 8,
+                  background: "rgba(0,0,0,0.78)",
+                  border: "1px solid rgba(245,158,11,0.4)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 12,
+                  flexWrap: "wrap",
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 12,
+                    color: "var(--text-secondary)",
+                    lineHeight: 1.45,
+                  }}
+                >
+                  Modo <strong style={{ color: "var(--amber)" }}>HLS</strong>: este{" "}
+                  <code style={{ fontSize: 10 }}>&lt;video&gt;</code> mostra só o stream no browser,{" "}
+                  <strong>sem</strong> caixas YOLO. Use MJPEG para ver deteções desenhadas pelo servidor.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setError(false);
+                    setLoading(true);
+                    setStreamMode("mjpeg");
+                    try {
+                      localStorage.setItem(LIVE_FEED_STREAM_MODE_KEY, "mjpeg");
+                    } catch {
+                      /* ignore */
+                    }
+                    setReloadKey(Date.now());
+                  }}
+                  style={{
+                    flexShrink: 0,
+                    padding: "7px 14px",
+                    borderRadius: 6,
+                    border: "1px solid var(--amber)",
+                    background: "rgba(245,158,11,0.14)",
+                    color: "var(--amber)",
+                    fontWeight: 700,
+                    fontSize: 11,
+                    cursor: "pointer",
+                    fontFamily: "var(--font-display)",
+                    letterSpacing: "0.06em",
+                    textTransform: "uppercase",
+                  }}
+                >
+                  Ver com deteção (MJPEG)
+                </button>
+              </div>
             )}
           </div>
         ) : null}

@@ -3,7 +3,7 @@
  * Os presets sao guardados em outputs/source_presets_web.json pelo backend; nao depende do .env.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   IconCamera,
   IconLink,
@@ -109,12 +109,6 @@ const SHORTCUTS: Preset[] = [
     icon: <IconGlobe size={14} />,
     hint: "Stream MJPEG de webcam IP",
   },
-  {
-    label: "Ficheiro",
-    value: "/caminho/para/video.mp4",
-    icon: <IconFile size={14} />,
-    hint: "Caminho absoluto de ficheiro de video local",
-  },
 ];
 
 export function SourceEditor({ apiBase, onClose }: Props) {
@@ -130,6 +124,8 @@ export function SourceEditor({ apiBase, onClose }: Props) {
   const [editingId, setEditingId]         = useState<string>("");
   const [editLabel, setEditLabel]         = useState<string>("");
   const [editUrl, setEditUrl]             = useState<string>("");
+  const [uploading, setUploading]         = useState(false);
+  const fileInputRef                      = useRef<HTMLInputElement>(null);
 
   const detectedKind = useMemo(() => detectKind(inputValue), [inputValue]);
 
@@ -305,6 +301,31 @@ export function SourceEditor({ apiBase, onClose }: Props) {
   const applyPresetShortcut = (value: string) => {
     setInputValue(value);
     setMsg(null);
+  };
+
+  const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    setMsg(null);
+    const form = new FormData();
+    form.append("file", file);
+    try {
+      const res = await fetch(`${apiBase}/api/upload/video`, { method: "POST", body: form });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error((err as { error?: string }).error ?? `HTTP ${res.status}`);
+      }
+      const j = await res.json() as { path: string };
+      setInputValue(j.path);
+      setLabelForSave((prev) => prev || file.name.replace(/\.[^.]+$/, ""));
+      setMsg({ text: `Ficheiro enviado: ${j.path}`, ok: true });
+    } catch (err) {
+      setMsg({ text: `Erro no upload: ${err}`, ok: false });
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
   };
 
   const isPresetActive = (p: SourcePreset) =>
@@ -539,6 +560,34 @@ export function SourceEditor({ apiBase, onClose }: Props) {
                   {p.icon} {p.label}
                 </button>
               ))}
+              {/* Ficheiro — abre seletor nativo e faz upload */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="video/mp4,video/x-matroska,video/avi,video/quicktime,video/webm,.mp4,.mkv,.avi,.mov,.webm,.ts,.m4v"
+                style={{ display: "none" }}
+                onChange={(e) => void handleFileSelected(e)}
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading}
+                title="Importar ficheiro de vídeo local (mp4, mkv, avi…)"
+                style={{
+                  display: "flex", alignItems: "center", gap: 6,
+                  padding: "6px 10px",
+                  background: "var(--bg-elevated)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 8,
+                  color: uploading ? "var(--amber)" : "var(--text-secondary)",
+                  fontSize: 12, fontWeight: 600,
+                  cursor: uploading ? "wait" : "pointer",
+                  opacity: uploading ? 0.7 : 1,
+                }}
+              >
+                <IconFile size={14} />
+                {uploading ? "A enviar…" : "Ficheiro"}
+              </button>
             </div>
 
             <div className="section-label" style={{ marginBottom: 6, display: "flex", alignItems: "center", gap: 8 }}>

@@ -39,8 +39,25 @@ function resolveFlaskDev(mode: string): { target: string; displayHost: string } 
   };
 }
 
+function resolveDevServerPort(mode: string): number {
+  const rootEnv = loadEnv(mode, repoRoot, "");
+  const appEnv = loadEnv(mode, __dirname, "");
+  const raw =
+    appEnv.VITE_DEV_SERVER_PORT ||
+    rootEnv.VITE_DEV_SERVER_PORT ||
+    process.env.VITE_DEV_SERVER_PORT ||
+    "";
+  const n = String(raw).trim();
+  if (/^\d+$/.test(n)) {
+    const p = Number(n);
+    if (p >= 1 && p <= 65535) return p;
+  }
+  return 5173;
+}
+
 export default defineConfig(({ mode }) => {
   const { target, displayHost } = resolveFlaskDev(mode);
+  const devPort = resolveDevServerPort(mode);
   return {
     define: {
       "import.meta.env.VITE_FLASK_DISPLAY_HOST": JSON.stringify(displayHost),
@@ -49,7 +66,7 @@ export default defineConfig(({ mode }) => {
     },
     plugins: [react()],
     server: {
-      port: 5173,
+      port: devPort,
       strictPort: false,
       // Libera acesso via tuneis (ngrok, localtunnel, etc.) durante o desenvolvimento
       allowedHosts: [

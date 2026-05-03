@@ -4713,6 +4713,33 @@ def create_app(
             {"ok": True, "source": url, "active_preset_id": preset_id, "presets": presets}
         )
 
+    _UPLOAD_DIR = Path(__file__).resolve().parent.parent / "outputs" / "uploaded"
+    _ALLOWED_VIDEO_EXT = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".ts", ".m4v"}
+
+    @app.post("/api/upload/video")
+    def upload_video() -> Response:
+        if "file" not in request.files:
+            return jsonify({"error": "Nenhum ficheiro enviado"}), 400
+        f = request.files["file"]
+        if not f.filename:
+            return jsonify({"error": "Nome de ficheiro vazio"}), 400
+        ext = Path(f.filename).suffix.lower()
+        if ext not in _ALLOWED_VIDEO_EXT:
+            return jsonify({"error": f"Extensão não suportada: {ext}"}), 400
+        _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        # Sanitize filename: keep only safe chars
+        safe_name = "".join(c for c in Path(f.filename).stem if c.isalnum() or c in "-_ ")
+        safe_name = safe_name.strip()[:80] or "video"
+        dest = _UPLOAD_DIR / f"{safe_name}{ext}"
+        # Avoid collisions
+        counter = 1
+        while dest.exists():
+            dest = _UPLOAD_DIR / f"{safe_name}_{counter}{ext}"
+            counter += 1
+        f.save(str(dest))
+        print(f"[web] Ficheiro enviado: {dest}")
+        return jsonify({"ok": True, "path": str(dest)})
+
     @app.get("/api/stats")
     def stats() -> Response:
         return jsonify(build_stats_payload(shared))

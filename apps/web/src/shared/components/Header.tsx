@@ -27,6 +27,11 @@ interface Props {
   camDriftScore?: number;
   camDriftReason?: string;
   camDriftBaselineReady?: boolean;
+  /**
+   * Quando false (ex.: separador «Ao Vivo»), o header deixa de ser sticky com z-index alto
+   * para não sobrepor a barra HLS/MJPEG do feed (cliques interceptados).
+   */
+  stickyToViewport?: boolean;
 }
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
@@ -122,9 +127,18 @@ export function Header({
   camDriftScore = 0,
   camDriftReason = "",
   camDriftBaselineReady = false,
+  stickyToViewport = true,
 }: Props) {
+  const pin = stickyToViewport;
   return (
-    <div style={{ position: "sticky", top: 0, zIndex: 100, flexShrink: 0 }}>
+    <div
+      style={{
+        position: pin ? "sticky" : "relative",
+        top: pin ? 0 : undefined,
+        zIndex: pin ? 100 : 0,
+        flexShrink: 0,
+      }}
+    >
       {/* ── Top bar ─────────────────────────────────────────────── */}
       <header style={styles.header}>
         <div style={styles.bottomAccent} />

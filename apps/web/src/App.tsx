@@ -132,6 +132,7 @@ export default function App() {
         camDriftScore={stats.cam_drift_score ?? 0}
         camDriftReason={stats.cam_drift_reason ?? ""}
         camDriftBaselineReady={stats.cam_drift_baseline_ready ?? false}
+        stickyToViewport={view !== "aovivo"}
       />
 
       {view === "zonas" ? (
