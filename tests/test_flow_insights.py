@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from flow_insights import compute_flow_insights_payload
+from visioncount.analytics.flow.insights import compute_flow_insights_payload
 
 
 def _base_kw():

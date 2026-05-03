@@ -1,5 +1,5 @@
-from zones.zone_assigner import ZoneAssigner
-from zones.zone_model import ZoneRecord
+from visioncount.zones.zone_assigner import ZoneAssigner
+from visioncount.zones.zone_model import ZoneRecord
 
 
 def test_assign_inside():

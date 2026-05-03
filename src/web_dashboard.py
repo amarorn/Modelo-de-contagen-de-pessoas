@@ -62,25 +62,25 @@ from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
 from ultralytics import YOLO
 
-from device_utils import resolve_device
-from stream_source_resolve import (
+from visioncount.core.device import resolve_device
+from visioncount.vision.sources.resolver import (
     apply_opencv_ffmpeg_capture_env,
     is_skylinewebcams_webcam_page,
     is_skyline_hls_url,
     probe_skyline_hls_url,
     resolve_stream_source,
 )
-from yolo_class_utils import (
+from visioncount.vision.detection.class_utils import (
     infer_model_nc,
     resolve_yolo_classes_and_person_id,
     short_class_tag,
 )
-from age_classifier_agg import AgeAggregateStats, OptionalAgeClassifier
-from alert_car_color import CarColorClassifier, parse_target_colors
-from alert_cap_detector import OptionalCapDetector
-from alert_manager import AlertManager
-from sex_classifier_agg import OptionalSexClassifier, PerTrackSexSmoother, SexAggregateStats
-from env_settings import (
+from visioncount.classifiers.age import AgeAggregateStats, OptionalAgeClassifier
+from visioncount.alerts.car_color import CarColorClassifier, parse_target_colors
+from visioncount.alerts.cap_detector import OptionalCapDetector
+from visioncount.alerts.manager import AlertManager
+from visioncount.classifiers.sex import OptionalSexClassifier, PerTrackSexSmoother, SexAggregateStats
+from visioncount.core.config import (
     EDITABLE_ENV_KEYS,
     SETTINGS_RUNTIME_APPLY_KEYS,
     apply_settings_updates_to_environ,
@@ -93,21 +93,31 @@ from env_settings import (
 )
 
 MJPEG_SHARED_SYNC_KEYS = SETTINGS_RUNTIME_APPLY_KEYS | frozenset({"YOLO_FEED_STALE_S"})
-from persistence.emitter import emit_config_event, shutdown_emitter, start_stats_emitter_thread
-from persistence.db import get_session_factory
-from analytics import AggregatorWorker, bp as analytics_bp
-from analytics.models import EventRaw as _AnalyticsEventRaw
-from persistence.dwell_store import DwellStore
-from persistence.heatmap_store import HeatmapStore
-from dwell_accumulator import DwellGridLive, ZoneSlotTracker
-from dwell_slot_aggregator import DwellSlotAggregator
-from heatmap_aggregator import SlotAggregator
-from hotspot_scorer import HotspotScorer, rasterize_norm_polygon
-from zones.zone_assigner import ZoneAssigner
-from zones.zone_store import ZoneStore, ensure_builtin_templates
-from queue_detector import QueueDetector
-from flow_vector_grid import FlowVectorGrid
-from env_profiles import (
+from visioncount.pipeline.context import (
+    CounterState,
+    SharedState,
+    _bump_hourly,
+    _peak_hour_stats,
+    _persist_config_event,
+    _sync_mjpeg_from_environ,
+    build_stats_payload,
+    reset_entry_exit_counters,
+)
+from visioncount.persistence.emitter import emit_config_event, shutdown_emitter, start_stats_emitter_thread
+from visioncount.persistence.db import get_session_factory
+from visioncount.analytics import AggregatorWorker, bp as analytics_bp
+from visioncount.analytics.models import EventRaw as _AnalyticsEventRaw
+from visioncount.persistence.dwell_store import DwellStore
+from visioncount.persistence.heatmap_store import HeatmapStore
+from visioncount.analytics.dwell.accumulator import DwellGridLive, ZoneSlotTracker
+from visioncount.analytics.dwell.slots import DwellSlotAggregator
+from visioncount.analytics.heatmap.aggregator import SlotAggregator
+from visioncount.analytics.heatmap.hotspot_scorer import HotspotScorer, rasterize_norm_polygon
+from visioncount.zones.zone_assigner import ZoneAssigner
+from visioncount.zones.zone_store import ZoneStore, ensure_builtin_templates
+from visioncount.analytics.queues.detector import QueueDetector
+from visioncount.analytics.heatmap.flow_vectors import FlowVectorGrid
+from visioncount.core.profiles import (
     PROFILES,
     get_profile,
     is_builtin_profile,
@@ -116,13 +126,13 @@ from env_profiles import (
     delete_custom_profile as _delete_custom_profile,
     EnvProfile as _EnvProfile,
 )
-from roi_suggester import suggest_line as _suggest_line, suggest_zones as _suggest_zones
-from track_confidence import TrackConfidenceTracker
-from camera_drift import CameraDriftDetector
-from persistence.audit_log import AuditLog
-from person_tracker import PersonTracker
+from visioncount.vision.calibration.roi_suggester import suggest_line as _suggest_line, suggest_zones as _suggest_zones
+from visioncount.vision.tracking.confidence import TrackConfidenceTracker
+from visioncount.vision.calibration.camera_drift import CameraDriftDetector
+from visioncount.persistence.audit_log import AuditLog
+from visioncount.vision.tracking.person_tracker import PersonTracker
 
-import persistence.camera_calibration_store as cam_cal
+import visioncount.persistence.camera_calibration_store as cam_cal
 
 
 def _resolve_listen_port(host: str, preferred: int) -> int:
@@ -187,64 +197,6 @@ def _configure_runtime_logging() -> None:
 
 
 @dataclass
-class CounterState:
-    def __init__(self) -> None:
-        self.entries: int = 0
-        self.exits: int = 0
-        self.vehicle_entries: int = 0
-        self.vehicle_exits: int = 0
-        self.vehicle_class_entries: dict[int, int] = {}
-        self.vehicle_class_exits: dict[int, int] = {}
-
-    @property
-    def total(self) -> int:
-        return self.entries + self.exits
-
-    @property
-    def vehicle_total(self) -> int:
-        return self.vehicle_entries + self.vehicle_exits
-
-
-def reset_entry_exit_counters(shared: SharedState) -> None:
-    shared.counter = CounterState()
-    shared.sex_agg = SexAggregateStats()
-    shared.age_agg = AgeAggregateStats()
-    shared.hourly_entries = [0] * 24
-    shared.hourly_exits = [0] * 24
-    # Sinaliza ao loop de inferencia para zerar contadores por poligono
-    # e limpar o historico de "dentro/fora" (senao tracks ja presentes
-    # ficam travados e a proxima entrada nao e registrada).
-    shared.counters_reset_flag = True
-
-
-def _hour_now() -> int:
-    return datetime.now().hour % 24
-
-
-def _bump_hourly(shared: SharedState, kind: str) -> None:
-    h = _hour_now()
-    if kind == "entry":
-        shared.hourly_entries[h] += 1
-    elif kind == "exit":
-        shared.hourly_exits[h] += 1
-
-
-def _peak_hour_stats(shared: SharedState) -> tuple[int, int]:
-    """Indice 0-23 com maior (entradas+saidas); fluxo nessa hora."""
-    best_h = 0
-    best_v = -1
-    for h in range(24):
-        v = shared.hourly_entries[h] + shared.hourly_exits[h]
-        if v > best_v:
-            best_v = v
-            best_h = h
-    return best_h, max(0, best_v)
-
-
-_MAX_SOURCE_PRESETS = 24
-_SOURCE_PRESETS_FILE = Path("outputs/source_presets_web.json")
-
-
 def _load_source_presets_from_env() -> list[dict[str, str]]:
     """JSON em YOLO_WEB_SOURCE_PRESETS ou um preset a partir de URL_HLS_OU_RTSP_OU_FICHEIRO."""
     out: list[dict[str, str]] = []
@@ -440,215 +392,6 @@ def _save_calibration_for_preset(shared: SharedState, preset_id: str) -> None:
         line=tuple(int(x) for x in line),
         polygons=polys,
     )
-
-
-class SharedState:
-    def __init__(
-        self,
-        line_default: tuple[int, int, int, int],
-        loitering_threshold_sec: float = 10.0,
-    ) -> None:
-        self.session_id: str = uuid.uuid4().hex
-        self.counter = CounterState()
-        self.sex_agg = SexAggregateStats()
-        self.age_agg = AgeAggregateStats()
-        self.hourly_entries: list[int] = [0] * 24
-        self.hourly_exits: list[int] = [0] * 24
-        self.sex_classifier_enabled: bool = False
-        self.age_classifier_enabled: bool = False
-        self.alert_manager: AlertManager | None = None
-        self.alert_cap_enabled: bool = False
-        self.alert_car_colors: list[str] = []
-        self.alert_cap_detector: "OptionalCapDetector | None" = None
-        self.alert_car_color_clf: "CarColorClassifier | None" = None
-        self.alert_cap_threshold: float = 0.55
-        self.alert_car_min_score: float = 0.08
-        self.alert_server_beep: bool = False
-        # UI «Todos os veículos»: conta todas as passagens sem alertas por cor de carro
-        self.all_vehicles_mode: bool = False
-        self.started_at = datetime.now()
-        self.last_frame_jpeg: bytes | None = None
-        # time.monotonic() do ultimo frame JPEG escrito pelo inference_loop (watchdog + MJPEG stale).
-        self.last_frame_mono: float = 0.0
-        # Sequencia monotona do JPEG publicado (consumidor MJPEG detecta frame novo sem ambiguidade).
-        self.last_frame_seq: int = 0
-        # Ring buffer curto com os ultimos JPEGs para reduzir "salto" visual em picos de carga.
-        self.frame_ring: deque[tuple[int, float, bytes]] = deque(maxlen=3)
-        # Ultimo avanco do iterador model.track (incl. orig_img None entre segmentos HLS). Watchdog usa max(mono, tick).
-        self.last_track_tick_mono: float = 0.0
-        # Lock dedicado ao JPEG: o inference_loop segura `lock` durante processamento pesado por frame;
-        # /video_feed e o watchdog leem `last_frame_*` sem competir com esse lock (evita MJPEG "congelado").
-        self.frame_output_lock = threading.Lock()
-        self.last_error: str | None = None
-        self.lock = threading.Lock()
-        self.line_default = line_default
-        self.line_live = line_default
-        self.count_mode: str = "line"
-        self.polygons_default: list[dict[str, Any]] = []
-        self.polygons_live: list[dict[str, Any]] = []
-        self.occupancy_now: int = 0
-        self.moving_now: int = 0
-        self.stationary_now: int = 0
-        self.loitering_now: int = 0
-        self.avg_dwell_sec: float = 0.0
-        self.max_dwell_sec: float = 0.0
-        self.loitering_threshold_sec: float = max(0.0, float(loitering_threshold_sec))
-        # Media do rastro dos pes (px/frame) só para quem nao esta "parado"; px/s = * infer_fps_ema
-        self.avg_move_speed_px_per_frame: float = 0.0
-        self.avg_move_speed_px_per_sec: float = 0.0
-        self.vehicle_avg_speed_px_per_sec: float = 0.0
-        self.infer_fps_ema: float = 0.0
-        # fonte de vídeo trocável em tempo real
-        self.source_live: str = ""
-        self.source_changed: bool = False
-        # id do preset em uso (evita ambiguidade se dois presets tiverem a mesma url)
-        self.active_preset_id: str = ""
-        # Presets: {"id", "label", "url"} — max 24; preenchido no arranque a partir do .env
-        self.source_presets: list[dict[str, str]] = []
-        # overlays no MJPEG (caixas/labels mantêm-se; só rastro e seta PCA)
-        self.show_trail_overlay: bool = False
-        self.show_heading_overlay: bool = False
-        # Linha/polígono visíveis por defeito para alinhar contagem (UI pode desligar «Marcações ROI»).
-        self.show_roi_overlay: bool = True
-        # Mapa de calor: só tem efeito se o processo foi iniciado sem --no-heatmap (WEB_HEATMAP=1)
-        self.heatmap_available: bool = False
-        self.show_heatmap_overlay: bool = False
-        # Sexo (classify): disponivel se --sex-model carregou; overlay ligavel na UI como o mapa de calor
-        self.sex_overlay_available: bool = False
-        self.show_sex_overlay: bool = False
-        # GridLive — payload serializado para /api/heatmap/live; atualizado a cada ~30 frames
-        self.heatmap_live_payload: dict = {
-            "grid_w": 32, "grid_h": 18, "max_val": 0.0, "total_events": 0, "cells": [],
-        }
-        self.vehicle_heatmap_live_payload: dict = {
-            "grid_w": 32, "grid_h": 18, "max_val": 0.0, "total_events": 0, "cells": [],
-        }
-        self.vehicle_zone_live_payload: dict = {"zones": []}
-        # Per-polygon live stats (assembled each inference frame; polygon mode only)
-        self.polygon_live_stats: list[dict[str, Any]] = []
-        self.dwell_live_payload: dict = {
-            "grid_w": 32, "grid_h": 18, "max_val": 0.0, "total_dwell_s": 0.0, "cells": [],
-        }
-        self.hotspots_live_payload: dict = {
-            "grid_w": 32, "grid_h": 18, "max_val": 0.0, "cells": [], "mode": "composite", "alpha": 0.6,
-        }
-        self.zones_reload_flag: bool = True
-        # Quando True, o loop de inferencia zera contadores por poligono
-        # e limpa o historico "prev_inside_per_poly_by_id" na proxima iteracao.
-        self.counters_reset_flag: bool = False
-        # Posicao dos pes (centro-baixo do bbox) das pessoas ativas no ultimo frame,
-        # e rastro agregado dos pes nos ultimos segundos (guia visual no editor de ROI).
-        self.live_feet_px: list[tuple[int, int]] = []
-        self.recent_feet_trail_px: deque[tuple[int, int]] = deque(maxlen=600)
-        self.frame_w: int = 0
-        self.frame_h: int = 0
-        # Multi-classe YOLO (ex. pessoa + veículo): controlado na UI sem reiniciar processo
-        self.yolo_count_class_ids: list[int] = []
-        self.yolo_person_class_id: int = 0
-        self.yolo_class_names: dict[int, str] = {}
-        self.model_nc: int = 0
-        self.track_active_class_ids: list[int] = []
-        self.track_person_enabled: bool = True
-        self.track_vehicle_enabled: bool = False
-        self.track_classes_changed: bool = False
-        # POST /api/settings: reabrir model.track() com novos conf/imgsz/etc. (sem reiniciar o processo).
-        self.infer_params_reload: bool = False
-        self.cam_confidence: str = "high"
-        self.cam_confidence_reasons: list[str] = []
-        self.queue_size: int = 0
-        self.queue_avg_wait_s: float = 0.0
-        self.queue_saturated: bool = False
-        self.queue_linearity: float = 0.0
-        self.flow_vectors_payload: dict = {
-            "grid_w": 16, "grid_h": 9, "max_mag": 0.0, "vectors": [],
-        }
-        self.reid_unique_persons: int = 0
-        self.reid_active_persons: int = 0
-        self.reid_revisited: int = 0
-        self.reid_avg_dwell_s: float = 0.0
-        # ── Mutable thresholds (may be updated via env profile without restart) ──
-        self.thr_loitering_seconds: float = loitering_threshold_sec
-        self.thr_stationary_max_speed: float = 2.2
-        self.thr_queue_saturation: int = 8
-        self.thr_density_alert: int = 0
-        self.thr_blur_low: float = 60.0
-        self.thr_blur_critical: float = 20.0
-        self.thr_bbox_small_px: float = 40.0
-        self.thr_reid_radius_norm: float = 0.18
-        self.thr_reid_timeout_s: float = 20.0
-        # Active env profile id ("" = none / custom)
-        self.active_env_profile: str = ""
-        # Latest frame dimensions (set by inference loop)
-        self.frame_w: int = 0
-        self.frame_h: int = 0
-        # ── Track confidence ─────────────────────────────────────────────────
-        self.low_conf_tracks: int = 0
-        self.suppressed_events: int = 0   # cumulative crossing events suppressed
-        # ── Camera drift ─────────────────────────────────────────────────────
-        self.cam_drift_level: str = "ok"   # "ok"|"illumination"|"focus"|"position"
-        self.cam_drift_score: float = 0.0  # 0-1 severity
-        self.cam_drift_reason: str = ""
-        self.cam_drift_baseline_ready: bool = False
-        # ── Camera observation (used for profile suggestion) ──────────────────
-        self.cam_blur_ema: float = 0.0       # Laplacian variance EMA
-        self.cam_avg_bbox_h: float = 0.0     # mean person bbox height (px)
-        # Smooth display (YOLO_SMOOTH_DISPLAY=1): segundo VideoCapture lê à FPS nativa da câmera
-        # e composta o último diff de overlay (int16) do YOLO por cima de cada frame bruto.
-        # O loop YOLO NÃO escreve em last_frame_jpeg quando smooth display está activo —
-        # só a thread de display escreve, evitando o tremido causado por dois fundos alternados.
-        self.smooth_display_overlay_i16: "np.ndarray | None" = None
-        self.smooth_display_overlay_lock = threading.Lock()
-        # MJPEG /video_feed (espelho de YOLO_MJPEG_* + YOLO_FEED_STALE_S; actualizado no arranque e em POST /api/settings)
-        self.mjpeg_max_fps: float = 10.0
-        self.mjpeg_adaptive_fps: bool = False
-        self.mjpeg_adaptive_headroom: float = 1.15
-        self.mjpeg_adaptive_min_fps: float = 8.0
-        self.mjpeg_burst_new: bool = True
-        self.mjpeg_burst_cap_fps: float = 35.0
-        self.mjpeg_stale_s: float = 8.0
-
-
-def _sync_mjpeg_from_environ(shared: SharedState) -> None:
-    """Relê os limiares MJPEG/stale a partir de os.environ (após merge do .env)."""
-    try:
-        mx = float(os.environ.get("YOLO_MJPEG_MAX_FPS", "10").strip() or "10")
-    except ValueError:
-        mx = 10.0
-    mx = max(1.0, min(30.0, mx))
-    adaptive = os.environ.get("YOLO_MJPEG_ADAPTIVE_FPS", "0").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
-    try:
-        headroom = float(os.environ.get("YOLO_MJPEG_ADAPTIVE_HEADROOM", "1.15").strip() or "1.15")
-    except ValueError:
-        headroom = 1.15
-    headroom = max(1.0, min(1.8, headroom))
-    try:
-        min_fps = float(os.environ.get("YOLO_MJPEG_ADAPTIVE_MIN_FPS", "8").strip() or "8")
-    except ValueError:
-        min_fps = 8.0
-    min_fps = max(1.0, min(mx, min_fps))
-    try:
-        stale_s = float(os.environ.get("YOLO_FEED_STALE_S", "8").strip() or "8")
-    except ValueError:
-        stale_s = 8.0
-    stale_s = max(2.0, stale_s)
-    burst_new = os.environ.get("YOLO_MJPEG_BURST_NEW", "1").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
-    try:
-        burst_cap = float(os.environ.get("YOLO_MJPEG_BURST_CAP_FPS", "35").strip() or "35")
-    except ValueError:
-        burst_cap = 35.0
-    burst_cap = max(10.0, min(60.0, burst_cap))
-    with shared.lock:
-        shared.mjpeg_max_fps = mx
-        shared.mjpeg_adaptive_fps = adaptive
-        shared.mjpeg_adaptive_headroom = headroom
-        shared.mjpeg_adaptive_min_fps = min_fps
-        shared.mjpeg_stale_s = stale_s
-        shared.mjpeg_burst_new = burst_new
-        shared.mjpeg_burst_cap_fps = burst_cap
 
 
 def _publish_jpeg_frame(shared: SharedState, jpeg: bytes, now_mono: float | None = None) -> None:
@@ -4056,103 +3799,6 @@ _ROI_PAGE_HTML = """
 """
 
 
-def _persist_config_event(shared: SharedState, event_type: str, payload: dict) -> None:
-    try:
-        emit_config_event(session_id=shared.session_id, event_type=event_type, payload=payload)
-    except Exception as exc:
-        if os.environ.get("YOLO_WEB_VERBOSE", "").strip() == "1":
-            print(f"[persist] {event_type}: {exc}", flush=True)
-
-
-def build_stats_payload(shared: SharedState) -> dict:
-    """Mesmo conteudo que GET /api/stats (para fila Kafka / espelho)."""
-    with shared.lock:
-        peak_h, peak_v = _peak_hour_stats(shared)
-        return {
-            "entries": shared.counter.entries,
-            "exits": shared.counter.exits,
-            "total_passages": shared.counter.total,
-            "vehicle_entries": shared.counter.vehicle_entries,
-            "vehicle_exits": shared.counter.vehicle_exits,
-            "vehicle_total": shared.counter.vehicle_total,
-            "vehicle_class_counts": {
-                str(k): {"entries": shared.counter.vehicle_class_entries.get(k, 0), "exits": shared.counter.vehicle_class_exits.get(k, 0)}
-                for k in shared.yolo_count_class_ids
-                if k != shared.yolo_person_class_id
-            },
-            "vehicle_avg_speed_px_per_sec": shared.vehicle_avg_speed_px_per_sec,
-            "occupancy_now": shared.occupancy_now,
-            "moving_now": shared.moving_now,
-            "stationary_now": shared.stationary_now,
-            "loitering_now": shared.loitering_now,
-            "avg_dwell_sec": shared.avg_dwell_sec,
-            "max_dwell_sec": shared.max_dwell_sec,
-            "loitering_threshold_sec": shared.loitering_threshold_sec,
-            "avg_move_speed_px_per_frame": shared.avg_move_speed_px_per_frame,
-            "avg_move_speed_px_per_sec": shared.avg_move_speed_px_per_sec,
-            "infer_fps_ema": shared.infer_fps_ema,
-            "error": shared.last_error,
-            "sex_classifier_enabled": shared.sex_classifier_enabled,
-            "sex_overlay_available": shared.sex_overlay_available,
-            "show_sex_overlay": shared.show_sex_overlay
-            if shared.sex_overlay_available
-            else False,
-            "sex_female_agg": shared.sex_agg.female,
-            "sex_male_agg": shared.sex_agg.male,
-            "sex_unknown_agg": shared.sex_agg.unknown,
-            "age_classifier_enabled": shared.age_classifier_enabled,
-            "age_child_agg": shared.age_agg.child,
-            "age_adolescent_agg": shared.age_agg.adolescent,
-            "age_young_agg": shared.age_agg.young,
-            "age_adult_agg": shared.age_agg.adult,
-            "age_elderly_agg": shared.age_agg.elderly,
-            "age_unknown_agg": shared.age_agg.unknown,
-            "hourly_entries": list(shared.hourly_entries),
-            "hourly_exits": list(shared.hourly_exits),
-            "peak_hour": peak_h,
-            "peak_flow": peak_v,
-            "cam_confidence": shared.cam_confidence,
-            "cam_confidence_reasons": list(shared.cam_confidence_reasons),
-            "queue_size": shared.queue_size,
-            "queue_avg_wait_s": shared.queue_avg_wait_s,
-            "queue_saturated": shared.queue_saturated,
-            "reid_unique_persons": shared.reid_unique_persons,
-            "reid_active_persons": shared.reid_active_persons,
-            "reid_revisited": shared.reid_revisited,
-            "reid_avg_dwell_s": shared.reid_avg_dwell_s,
-            "active_env_profile": shared.active_env_profile,
-            "low_conf_tracks": shared.low_conf_tracks,
-            "suppressed_events": shared.suppressed_events,
-            "cam_drift_level": shared.cam_drift_level,
-            "cam_drift_score": shared.cam_drift_score,
-            "cam_drift_reason": shared.cam_drift_reason,
-            "cam_drift_baseline_ready": shared.cam_drift_baseline_ready,
-            "vehicle_tracking_available": len(shared.yolo_count_class_ids) > 1,
-            "model_nc": int(shared.model_nc),
-            "yolo_count_class_ids": list(shared.yolo_count_class_ids),
-            "yolo_person_class_id": int(shared.yolo_person_class_id),
-            "track_active_class_ids": list(shared.track_active_class_ids),
-            "yolo_class_labels": {
-                str(k): shared.yolo_class_names.get(k, f"class_{k}")
-                for k in shared.yolo_count_class_ids
-            },
-            "track_people": shared.track_person_enabled,
-            "track_vehicles": (
-                shared.track_vehicle_enabled if len(shared.yolo_count_class_ids) > 1 else False
-            ),
-            "all_vehicles_mode": shared.all_vehicles_mode,
-            "polygon_stats": list(shared.polygon_live_stats),
-            # Migracoes zona-zona: sum(entradas por poligono) - entradas globais.
-            # Conta quantas pessoas migraram de uma zona para outra sem sair
-            # da uniao (esses eventos nao aparecem no contador global).
-            "polygon_migrations": max(
-                0,
-                sum(int(p.get("entries", 0) or 0) for p in shared.polygon_live_stats)
-                - int(shared.counter.entries),
-            ),
-        }
-
-
 def create_app(
     shared: SharedState,
     audit_log: AuditLog,
@@ -5124,7 +4770,7 @@ def create_app(
     def flow_insights() -> Response:
         from datetime import datetime as _dt
 
-        from flow_insights import compute_flow_insights_payload
+        from visioncount.analytics.flow.insights import compute_flow_insights_payload
 
         with shared.lock:
             payload = compute_flow_insights_payload(

@@ -1,4 +1,9 @@
+# Env files — manter apenas .env.example e apps/**/.env.example
 .env
+.env *
+*.tgz
+*.ndjson
+
 node_modules/
 runs/
 __pycache__/
@@ -12,6 +17,8 @@ data/*.db-wal
 data/*.db-shm
 data/gender_classify_7k_view/
 /*.pt
+# classification-exp-4 pt (nome com espaço)
+classification-exp-* pt
 weights/**/*.pt
 
 # Gravações de ecrã / vídeos locais (não versionar binários grandes)

@@ -26,9 +26,9 @@ import numpy as np
 from flask import Flask, Response, jsonify, request
 from ultralytics import YOLO
 
-from device_utils import resolve_device
-from sex_classifier_agg import OptionalSexClassifier, PerTrackSexSmoother, SexAggregateStats
-from yolo_class_utils import resolve_yolo_classes_and_person_id, short_class_tag
+from visioncount.core.device import resolve_device
+from visioncount.classifiers.sex import OptionalSexClassifier, PerTrackSexSmoother, SexAggregateStats
+from visioncount.vision.detection.class_utils import resolve_yolo_classes_and_person_id, short_class_tag
 
 # BGR para OpenCV (alinhado as cores hex do browser: F rosa, M azul, ? cinza)
 _SEX_BOX_COLOR_BGR: dict[str, tuple[int, int, int]] = {

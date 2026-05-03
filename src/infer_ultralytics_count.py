@@ -23,9 +23,9 @@ import cv2
 import torch
 from ultralytics import YOLO
 
-from device_utils import resolve_device
-from stream_source_resolve import apply_opencv_ffmpeg_capture_env
-from yolo_class_utils import resolve_yolo_classes_and_person_id
+from visioncount.core.device import resolve_device
+from visioncount.vision.sources.resolver import apply_opencv_ffmpeg_capture_env
+from visioncount.vision.detection.class_utils import resolve_yolo_classes_and_person_id
 
 
 @dataclass

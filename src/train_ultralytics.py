@@ -28,7 +28,7 @@ import torch
 import ultralytics
 import yaml
 
-from device_utils import resolve_device
+from visioncount.core.device import resolve_device
 from ultralytics import YOLO, settings
 from ultralytics.hub import login as hub_login
 

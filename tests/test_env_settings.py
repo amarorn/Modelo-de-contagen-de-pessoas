@@ -2,7 +2,7 @@
 
 import unittest
 
-from env_settings import (
+from visioncount.core.config import (
     settings_updates_require_restart,
     settings_updates_trigger_stream_reload,
 )
